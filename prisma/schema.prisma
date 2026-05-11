@@ -1,0 +1,180 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Supplier {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  baseUrl     String
+  type        String   @default("generic") // generic, zara, shein, hm
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  products    SourceProduct[]
+}
+
+model SourceProduct {
+  id              String   @id @default(cuid())
+  supplierId      String
+  supplier        Supplier @relation(fields: [supplierId], references: [id])
+  url             String   @unique
+  productId       String?  // ID on the supplier side
+  title           String
+  description     String?
+  brand           String?
+  currency        String
+  price           Float
+  raw             String?  // JSON string of full scraped data
+  syncStatus      String   @default("pending") // pending, active, paused, error
+  lastScrapedAt   DateTime @default(now())
+  
+  images          SourceImage[]
+  variants        SourceVariant[]
+  shopifyProduct  ShopifyProduct?
+  manualReviews   ManualReviewItem[]
+  auditLogs       AuditLog[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SourceVariant {
+  id              String   @id @default(cuid())
+  sourceProductId String
+  sourceProduct   SourceProduct @relation(fields: [sourceProductId], references: [id])
+  sourceVariantId String?
+  sku             String?
+  color           String?
+  size            String?
+  price           Float?
+  currency        String?
+  available       Boolean  @default(true)
+  stockStatus     String   @default("unknown") // in_stock, out_of_stock, low_stock, unknown
+  imageUrl        String?
+  raw             String?  // JSON string
+  
+  shopifyVariant  ShopifyVariant?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SourceImage {
+  id              String   @id @default(cuid())
+  sourceProductId String
+  sourceProduct   SourceProduct @relation(fields: [sourceProductId], references: [id])
+  url             String
+  alt             String?
+  color           String?
+  position        Int      @default(0)
+  
+  createdAt       DateTime @default(now())
+}
+
+model ShopifyProduct {
+  id              String   @id @default(cuid())
+  sourceProductId String   @unique
+  sourceProduct   SourceProduct @relation(fields: [sourceProductId], references: [id])
+  shopifyId       String   @unique // GID
+  handle          String?
+  status          String   @default("draft") // draft, active, archived
+  collectionIds   String?  // Comma-separated or JSON string of collection GIDs
+  price           Float?   // Summary price for display
+  
+  syncEnabled     Boolean  @default(true)
+  syncPrice       Boolean  @default(true)
+  syncInventory   Boolean  @default(true)
+  syncImages      Boolean  @default(true)
+  outOfStockAction String  @default("alert_only") // set_inventory_zero, draft_product, archive_product, alert_only
+  
+  variants        ShopifyVariant[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model ShopifyVariant {
+  id              String   @id @default(cuid())
+  shopifyProductId String
+  shopifyProduct  ShopifyProduct @relation(fields: [shopifyProductId], references: [id])
+  sourceVariantId String   @unique
+  sourceVariant   SourceVariant @relation(fields: [sourceVariantId], references: [id])
+  shopifyId       String   @unique // GID
+  sku             String?
+  price           Float?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model PricingRule {
+  id              String   @id @default(cuid())
+  name            String
+  supplierId      String?  // Optional override for specific supplier
+  currency        String?  // "EUR", "EGP", etc.
+  multiplier      Float    @default(1.0)
+  fixedMarkup     Float    @default(0.0)
+  percentageMarkup Float   @default(0.0)
+  rounding        String   @default("none") // none, .99, .00
+  minPrice        Float?
+  maxPrice        Float?
+  isDefault       Boolean  @default(false)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SyncJob {
+  id              String   @id @default(cuid())
+  type            String   // SCRAPE, PUBLISH, SYNC_ALL, etc.
+  status          String   @default("pending") // pending, running, completed, failed
+  payload         String?  // JSON input
+  result          String?  // JSON output or error
+  startedAt       DateTime?
+  completedAt     DateTime?
+  
+  createdAt       DateTime @default(now())
+}
+
+model AuditLog {
+  id              String   @id @default(cuid())
+  sourceProductId String?
+  sourceProduct   SourceProduct? @relation(fields: [sourceProductId], references: [id])
+  action          String
+  details         String?  // JSON
+  userId          String?
+  
+  createdAt       DateTime @default(now())
+}
+
+model ManualReviewItem {
+  id              String   @id @default(cuid())
+  sourceProductId String
+  sourceProduct   SourceProduct @relation(fields: [sourceProductId], references: [id])
+  reason          String
+  status          String   @default("pending") // pending, approved, rejected
+  resolvedAt      DateTime?
+  
+  createdAt       DateTime @default(now())
+}
+
+model ShopifyConnection {
+  id              String   @id @default(uuid())
+  shopDomain      String   @unique
+  clientId        String
+  clientSecretEnc String
+  accessTokenEnc  String?
+  scopes          String   @default("read_products,write_products,read_inventory,write_inventory,read_files,write_files")
+  isConnected     Boolean  @default(false)
+  connectedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
