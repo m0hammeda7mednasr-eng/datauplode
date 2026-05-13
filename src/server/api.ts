@@ -10,6 +10,113 @@ import crypto from 'crypto';
 
 const router = Router();
 const scraperService = new ScraperService();
+const DEFAULT_SHOPIFY_SCOPES = [
+  'read_products',
+  'write_products',
+  'read_inventory',
+  'write_inventory',
+  'read_files',
+  'write_files',
+];
+const SHOPIFY_DOMAIN_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+
+function firstQueryValue(value: any): string {
+  return String(Array.isArray(value) ? value[0] : value || '').trim();
+}
+
+function normalizePublicUrl(value?: string | null) {
+  if (!value) return '';
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+function getBackendUrl(req: any) {
+  const configured = normalizePublicUrl(process.env.APP_URL);
+  if (configured) return configured;
+
+  const forwardedProto = firstQueryValue(req.get('x-forwarded-proto')).split(',')[0];
+  const forwardedHost = firstQueryValue(req.get('x-forwarded-host')).split(',')[0];
+  const protocol = forwardedProto || req.protocol || 'http';
+  const host = forwardedHost || req.get('host');
+
+  return `${protocol}://${host}`;
+}
+
+function getFrontendUrl(req?: any) {
+  return normalizePublicUrl(
+    process.env.FRONTEND_URL ||
+    process.env.VITE_FRONTEND_URL ||
+    (req ? getBackendUrl(req) : '') ||
+    'https://datauplode.vercel.app'
+  );
+}
+
+function getShopifyRedirectUri(req: any) {
+  return `${getBackendUrl(req)}/api/shopify/callback`;
+}
+
+function redirectToFrontend(req: any, res: any, params: Record<string, string>) {
+  const redirectUrl = new URL('/settings', getFrontendUrl(req));
+  for (const [key, value] of Object.entries(params)) {
+    redirectUrl.searchParams.set(key, value);
+  }
+  res.redirect(redirectUrl.toString());
+}
+
+function normalizeShopDomain(value: any) {
+  let domain = String(value || '').trim().toLowerCase();
+  domain = domain.replace(/^https?:\/\//, '');
+  domain = domain.replace(/\/admin.*$/, '');
+  domain = domain.replace(/\/.*$/, '');
+  return domain;
+}
+
+function assertShopDomain(value: any) {
+  const domain = normalizeShopDomain(value);
+  if (!SHOPIFY_DOMAIN_REGEX.test(domain)) {
+    throw Object.assign(new Error('Shop domain must be a valid .myshopify.com hostname'), {
+      statusCode: 400,
+    });
+  }
+  return domain;
+}
+
+function normalizeScopes(scopes: any) {
+  const scopeList = Array.isArray(scopes)
+    ? scopes
+    : String(scopes || '').split(',');
+
+  const cleanedScopes = scopeList
+    .map((scope: string) => String(scope).trim())
+    .filter(Boolean);
+
+  return cleanedScopes.length ? cleanedScopes : DEFAULT_SHOPIFY_SCOPES;
+}
+
+function verifyShopifyHmac(query: any, clientSecret: string) {
+  const hmac = firstQueryValue(query.hmac);
+  if (!hmac) return false;
+
+  const message = Object.keys(query)
+    .filter((key) => key !== 'hmac' && key !== 'signature')
+    .sort()
+    .map((key) => {
+      const value = Array.isArray(query[key]) ? query[key].join(',') : query[key];
+      return `${key}=${value}`;
+    })
+    .join('&');
+
+  const digest = crypto
+    .createHmac('sha256', clientSecret)
+    .update(message)
+    .digest('hex');
+
+  const hmacBuffer = Buffer.from(hmac, 'hex');
+  const digestBuffer = Buffer.from(digest, 'hex');
+
+  return hmacBuffer.length === digestBuffer.length && crypto.timingSafeEqual(hmacBuffer, digestBuffer);
+}
 
 // Analysis
 router.post('/imports/analyze', async (req, res) => {
@@ -96,6 +203,15 @@ router.get('/pricing-rules', async (req, res) => {
 router.post('/pricing-rules', async (req, res) => {
   const rule = await prisma.pricingRule.create({ data: req.body });
   res.json(rule);
+});
+
+router.delete('/pricing-rules/:id', async (req, res) => {
+  try {
+    await prisma.pricingRule.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(404).json({ error: error.message || 'Pricing rule not found' });
+  }
 });
 
 // Suppliers
@@ -286,16 +402,32 @@ router.post('/manual-review/:id/:decision', async (req, res) => {
 router.get('/settings/shopify', async (req, res) => {
   try {
     const connection = await prisma.shopifyConnection.findFirst();
-    if (!connection) return res.json(null);
+    if (!connection) {
+      return res.json({
+        shopDomain: '',
+        clientId: '',
+        clientSecret: '',
+        hasClientSecret: false,
+        accessToken: 'Not Connected',
+        scopes: DEFAULT_SHOPIFY_SCOPES,
+        isConnected: false,
+        connectedAt: null,
+        callbackUrl: getShopifyRedirectUri(req),
+        apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
+      });
+    }
     
     res.json({
       shopDomain: connection.shopDomain,
       clientId: connection.clientId,
-      clientSecret: '••••••••••••••••',
+      clientSecret: '****************',
+      hasClientSecret: Boolean(connection.clientSecretEnc),
       accessToken: connection.accessTokenEnc ? 'Connected' : 'Not Connected',
       scopes: connection.scopes.split(','),
       isConnected: connection.isConnected,
-      connectedAt: connection.connectedAt
+      connectedAt: connection.connectedAt,
+      callbackUrl: getShopifyRedirectUri(req),
+      apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch settings' });
@@ -305,33 +437,57 @@ router.get('/settings/shopify', async (req, res) => {
 router.post('/settings/shopify', async (req, res) => {
   const { shopDomain, clientId, clientSecret, scopes } = req.body;
   
-  if (!shopDomain || !clientId || !clientSecret) {
+  if (!shopDomain || !clientId) {
     return res.status(400).json({ error: 'Missing required configuration fields' });
   }
 
   try {
-    const clientSecretEnc = encrypt(clientSecret);
-    const scopesStr = Array.isArray(scopes) ? scopes.join(',') : scopes;
+    const normalizedShopDomain = assertShopDomain(shopDomain);
+    const cleanClientId = String(clientId).trim();
+    const cleanClientSecret = String(clientSecret || '').trim();
+    const scopesStr = normalizeScopes(scopes).join(',');
+    const existing = await prisma.shopifyConnection.findUnique({
+      where: { shopDomain: normalizedShopDomain },
+    });
+
+    if (!existing && !cleanClientSecret) {
+      return res.status(400).json({ error: 'Client secret is required for a new Shopify connection' });
+    }
+
+    const credentialsChanged = Boolean(
+      existing &&
+      (existing.clientId !== cleanClientId || existing.scopes !== scopesStr || cleanClientSecret)
+    );
+    const encryptedSecret = cleanClientSecret ? encrypt(cleanClientSecret) : existing?.clientSecretEnc;
 
     await prisma.shopifyConnection.upsert({
-      where: { shopDomain },
+      where: { shopDomain: normalizedShopDomain },
       update: {
-        clientId,
-        clientSecretEnc,
+        clientId: cleanClientId,
+        clientSecretEnc: encryptedSecret!,
         scopes: scopesStr,
+        ...(credentialsChanged
+          ? {
+              accessTokenEnc: null,
+              isConnected: false,
+              connectedAt: null,
+              oauthState: null,
+              oauthStateExpiresAt: null,
+            }
+          : {}),
         updatedAt: new Date()
       },
       create: {
-        shopDomain,
-        clientId,
-        clientSecretEnc,
+        shopDomain: normalizedShopDomain,
+        clientId: cleanClientId,
+        clientSecretEnc: encryptedSecret!,
         scopes: scopesStr
       }
     });
 
-    res.json({ success: true });
+    res.json({ success: true, callbackUrl: getShopifyRedirectUri(req) });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 
@@ -340,15 +496,20 @@ router.post('/settings/shopify/test', async (req, res) => {
   if (!shopDomain) return res.status(400).json({ error: 'Shop domain required' });
 
   try {
+    const normalizedShopDomain = assertShopDomain(shopDomain);
     // Simple reachability test
-    await axios.get(`https://${shopDomain}/admin`, { timeout: 5000 });
+    await axios.get(`https://${normalizedShopDomain}/admin`, {
+      timeout: 5000,
+      maxRedirects: 0,
+      validateStatus: (status) => status < 500,
+    });
     res.json({ success: true, message: 'Shopify domain is reachable' });
   } catch (error: any) {
     if (error.response?.status === 302 || error.response?.status === 200 || error.response?.status === 401) {
       // 401 means reachable but unauthorized, which is expected for /admin without token
       return res.json({ success: true, message: 'Shopify domain is reachable' });
     }
-    res.status(400).json({ error: 'Could not reach Shopify domain. Please check the URL.' });
+    res.status(error.statusCode || 400).json({ error: error.message || 'Could not reach Shopify domain. Please check the URL.' });
   }
 });
 
@@ -356,48 +517,86 @@ router.post('/shopify/connect', async (req, res) => {
   try {
     const connection = await prisma.shopifyConnection.findFirst();
     if (!connection) return res.status(400).json({ error: 'Shopify connection not configured' });
+    if (!connection.clientSecretEnc) return res.status(400).json({ error: 'Shopify client secret is missing' });
 
     const state = crypto.randomBytes(16).toString('hex');
-    const redirectUri = `${process.env.APP_URL}/api/shopify/callback`;
-    const installUrl = `https://${connection.shopDomain}/admin/oauth/authorize?client_id=${connection.clientId}&scope=${connection.scopes}&redirect_uri=${redirectUri}&state=${state}`;
+    const redirectUri = getShopifyRedirectUri(req);
+    const oauthUrl = new URL(`https://${connection.shopDomain}/admin/oauth/authorize`);
+    oauthUrl.searchParams.set('client_id', connection.clientId);
+    oauthUrl.searchParams.set('scope', connection.scopes);
+    oauthUrl.searchParams.set('redirect_uri', redirectUri);
+    oauthUrl.searchParams.set('state', state);
 
-    res.json({ url: installUrl });
+    await prisma.shopifyConnection.update({
+      where: { id: connection.id },
+      data: {
+        oauthState: state,
+        oauthStateExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    res.json({ url: oauthUrl.toString(), redirectUri });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
 router.get('/shopify/callback', async (req, res) => {
-  const { code, shop } = req.query;
+  const code = firstQueryValue(req.query.code);
+  const state = firstQueryValue(req.query.state);
+  const shop = normalizeShopDomain(req.query.shop);
   
-  if (!code || !shop) return res.status(400).send('Invalid callback');
+  if (!code || !shop || !state) return res.status(400).send('Invalid callback');
 
   try {
-    const connection = await prisma.shopifyConnection.findUnique({ where: { shopDomain: shop as string } });
+    const shopDomain = assertShopDomain(shop);
+    const connection = await prisma.shopifyConnection.findUnique({ where: { shopDomain } });
     if (!connection) return res.status(404).send('Connection not found');
 
     const clientSecret = decrypt(connection.clientSecretEnc);
+    const stateExpired = !connection.oauthStateExpiresAt || connection.oauthStateExpiresAt < new Date();
+    if (!connection.oauthState || connection.oauthState !== state || stateExpired) {
+      return res.status(400).send('Invalid or expired OAuth state');
+    }
 
-    const response = await axios.post(`https://${shop}/admin/oauth/access_token`, {
-      client_id: connection.clientId,
-      client_secret: clientSecret,
-      code
-    });
+    if (!verifyShopifyHmac(req.query, clientSecret)) {
+      return res.status(400).send('Invalid Shopify callback signature');
+    }
 
-    const { access_token } = response.data;
+    const response = await axios.post(
+      `https://${shopDomain}/admin/oauth/access_token`,
+      new URLSearchParams({
+        client_id: connection.clientId,
+        client_secret: clientSecret,
+        code,
+      }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+      }
+    );
+
+    const { access_token, scope } = response.data;
+    if (!access_token) throw new Error('Shopify did not return an access token');
+
     await prisma.shopifyConnection.update({
       where: { id: connection.id },
       data: {
         accessTokenEnc: encrypt(access_token),
+        scopes: scope || connection.scopes,
         isConnected: true,
-        connectedAt: new Date()
+        connectedAt: new Date(),
+        oauthState: null,
+        oauthStateExpiresAt: null,
       }
     });
 
-    res.redirect('/settings?connected=true');
+    redirectToFrontend(req, res, { connected: 'true', shop: shopDomain });
   } catch (error: any) {
     console.error('OAuth Error:', error.response?.data || error.message);
-    res.status(500).send('Failed to exchange code for token');
+    redirectToFrontend(req, res, { connected: 'false', error: 'shopify_oauth_failed' });
   }
 });
 
@@ -411,7 +610,9 @@ router.post('/shopify/disconnect', async (req, res) => {
       data: {
         accessTokenEnc: null,
         isConnected: false,
-        connectedAt: null
+        connectedAt: null,
+        oauthState: null,
+        oauthStateExpiresAt: null,
       }
     });
 

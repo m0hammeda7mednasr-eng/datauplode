@@ -40,6 +40,14 @@ export default function LinkedProducts() {
     }
   });
 
+  const { data: shopifyConfig } = useQuery({
+    queryKey: ['shopify-config'],
+    queryFn: async () => {
+      const { data } = await axios.get('/api/settings/shopify');
+      return data;
+    }
+  });
+
   const handleSyncNow = async (id: string) => {
     toast.promise(axios.post(`/api/products/${id}/sync`), {
       loading: 'Queuing sync job...',
@@ -161,8 +169,8 @@ export default function LinkedProducts() {
                     <a href={p.url} target="_blank" rel="noreferrer" className="p-1.5 border rounded hover:bg-zinc-100 transition-all text-zinc-400 hover:text-zinc-900" title="Source URL">
                       <ExternalLink className="h-3 w-3" />
                     </a>
-                    {p.shopifyProduct && (
-                      <a href={`https://myshop.myshopify.com/admin/products/${p.shopifyProduct.shopifyId.split('/').pop()}`} target="_blank" rel="noreferrer" className="p-1.5 border rounded hover:bg-zinc-100 text-zinc-400 hover:text-green-600 transition-all" title="Shopify Admin">
+                    {p.shopifyProduct && shopifyConfig?.shopDomain && (
+                      <a href={`https://${shopifyConfig.shopDomain}/admin/products/${p.shopifyProduct.shopifyId.split('/').pop()}`} target="_blank" rel="noreferrer" className="p-1.5 border rounded hover:bg-zinc-100 text-zinc-400 hover:text-green-600 transition-all" title="Shopify Admin">
                         <CheckCircle2 className="h-3 w-3" />
                       </a>
                     )}
@@ -212,4 +220,3 @@ export default function LinkedProducts() {
     </div>
   );
 }
-

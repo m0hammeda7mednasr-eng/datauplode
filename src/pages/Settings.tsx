@@ -11,7 +11,8 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  Copy
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { toast } from 'sonner';
@@ -66,6 +67,12 @@ export default function Settings() {
   });
 
   const [selectedScopes, setSelectedScopes] = useState<string[]>([]);
+  const canConnect = Boolean(
+    config?.shopDomain &&
+    config?.clientId &&
+    config?.hasClientSecret &&
+    !config?.isConnected
+  );
   
   useEffect(() => {
     if (config?.scopes) {
@@ -74,6 +81,19 @@ export default function Settings() {
       setSelectedScopes(SCOPES);
     }
   }, [config]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get('connected');
+
+    if (connected === 'true') {
+      toast.success('Shopify store connected');
+      window.history.replaceState(null, '', window.location.pathname);
+    } else if (connected === 'false') {
+      toast.error('Shopify connection failed');
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
 
   const testMutation = useMutation({
     mutationFn: async (shopDomain: string) => axios.post('/api/settings/shopify/test', { shopDomain }),
@@ -94,13 +114,19 @@ export default function Settings() {
       clientSecret: formData.get('clientSecret'),
       scopes: selectedScopes
     };
+    const normalizedShopDomain = data.shopDomain
+      ?.toString()
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/.*$/, '');
 
-    if (!data.shopDomain?.toString().endsWith('.myshopify.com')) {
+    if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(normalizedShopDomain || '')) {
       toast.error('Shop domain must end with .myshopify.com');
       return;
     }
 
-    saveMutation.mutate(data);
+    saveMutation.mutate({ ...data, shopDomain: normalizedShopDomain });
   };
 
   return (
@@ -170,14 +196,38 @@ export default function Settings() {
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Client Secret / API Secret</label>
                     <input 
                       name="clientSecret"
-                      required={!config?.isConnected}
+                      required={!config?.hasClientSecret}
                       type="password" 
-                      placeholder={config?.isConnected ? "••••••••••••••••" : "Enter Client Secret"}
+                      placeholder={config?.hasClientSecret ? "Saved secret - leave blank to keep it" : "Enter Client Secret"}
                       className="w-full px-4 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-mono"
                     />
                     <p className="text-[10px] text-slate-400 italic">Credentials are encrypted at rest for maximum security.</p>
                   </div>
                 </div>
+
+                {config?.callbackUrl && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">OAuth Redirect URL</label>
+                    <div className="flex gap-2">
+                      <input
+                        readOnly
+                        value={config.callbackUrl}
+                        className="w-full px-4 py-2.5 border border-slate-200 rounded-lg bg-slate-50 text-sm font-mono text-slate-600"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(config.callbackUrl);
+                          toast.success('Redirect URL copied');
+                        }}
+                        className="px-4 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-all"
+                        title="Copy redirect URL"
+                      >
+                        <Copy size={16} />
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-4">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Required Scopes</label>
@@ -241,10 +291,10 @@ export default function Settings() {
                       <button 
                         type="button"
                         onClick={() => connectMutation.mutate()}
-                        disabled={connectMutation.isPending}
+                        disabled={connectMutation.isPending || config.isConnected || !canConnect}
                         className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
-                          config.isConnected 
+                          config.isConnected || !canConnect
                             ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed" 
                             : "bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-50"
                         )}
@@ -277,7 +327,7 @@ export default function Settings() {
                   <div className="text-xs leading-relaxed text-emerald-900">
                     <p className="font-bold">Sync Engine Status: Active</p>
                     <p className="opacity-80">Last connected: {new Date(config.connectedAt).toLocaleString()}</p>
-                    <p className="opacity-80">System using Admin GraphQL v2026-04. Throttle safety: ON</p>
+                    <p className="opacity-80">System using Admin GraphQL v{config.apiVersion || '2026-04'}. Throttle safety: ON</p>
                   </div>
                 </div>
               )}
@@ -314,4 +364,3 @@ function SettingsTab({ active, onClick, label, icon: Icon }: any) {
     </button>
   );
 }
-

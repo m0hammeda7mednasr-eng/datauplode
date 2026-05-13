@@ -6,8 +6,8 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Supplier {
@@ -175,6 +175,8 @@ model ShopifyConnection {
   scopes          String   @default("read_products,write_products,read_inventory,write_inventory,read_files,write_files")
   isConnected     Boolean  @default(false)
   connectedAt     DateTime?
+  oauthState      String?
+  oauthStateExpiresAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }

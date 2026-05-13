@@ -4,10 +4,39 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
+.env
+.env.local
+.env.*.local
+.env.production
 !.env.example
+!.env.production.example
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 scraper-*-results.json
+
+# Local generated deployment notes (may contain real secrets)
+BACKEND-API-DEPLOYMENT.md
+DEPLOY-BACKEND-NOW.txt
+DEPLOY-NOW.txt
+DEPLOYMENT-SUMMARY.md
+FINAL-DEPLOYMENT-SUMMARY.md
+FINAL-SUMMARY.md
+RAILWAY-DEPLOYMENT.md
+READY-TO-DEPLOY.md
+START.txt
+SUPABASE-SETUP.md
+deploy-to-railway.md
+
+# Railway
+.railway/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db

@@ -36,6 +36,14 @@ export default function ProductDetail() {
     }
   });
 
+  const { data: shopifyConfig } = useQuery({
+    queryKey: ['shopify-config'],
+    queryFn: async () => {
+      const { data } = await axios.get('/api/settings/shopify');
+      return data;
+    }
+  });
+
   const syncMutation = useMutation({
     mutationFn: async () => axios.post(`/api/products/${id}/sync`),
     onSuccess: () => {
@@ -64,6 +72,9 @@ export default function ProductDetail() {
   if (!product) return <div>Product not found</div>;
 
   const shopifyId = product.shopifyProduct?.shopifyId?.split('/').pop();
+  const shopifyAdminUrl = shopifyConfig?.shopDomain && shopifyId
+    ? `https://${shopifyConfig.shopDomain}/admin/products/${shopifyId}`
+    : null;
 
   return (
     <div className="space-y-8 max-w-6xl mx-auto pb-12">
@@ -94,7 +105,7 @@ export default function ProductDetail() {
                 </div>
               </div>
               <p className="text-slate-500 font-medium mt-1">
-                Linked to Shopify product <span className="font-mono text-slate-900">#{shopifyId || 'N/A'}</span> • {product.supplier?.name}
+                Linked to Shopify product <span className="font-mono text-slate-900">#{shopifyId || 'N/A'}</span> / {product.supplier?.name}
               </p>
             </div>
           </div>
@@ -279,9 +290,9 @@ export default function ProductDetail() {
               <DetailRow label="Collection" value={product.shopifyProduct?.collectionIds || 'General'} />
               <DetailRow label="Status" value={product.shopifyProduct?.status || 'Draft'} uppercase />
             </div>
-            {product.shopifyProduct && (
+            {product.shopifyProduct && shopifyAdminUrl && (
               <a 
-                href={`https://myshop.myshopify.com/admin/products/${shopifyId}`}
+                href={shopifyAdminUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="w-full mt-2 flex items-center justify-center gap-2 py-2 border rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-500 hover:bg-slate-50 transition-all font-sans"

@@ -56,6 +56,64 @@ function buildShopifyVariantOptions(variant: any, optionNames: string[]): string
   return optionNames.map(name => cleanOptionText(values[name] || 'Default'));
 }
 
+function buildShopifyProductOptions(variants: any[], optionNames: string[]) {
+  return optionNames.map((name, index) => {
+    const values = new Set<string>();
+
+    for (const variant of variants) {
+      const optionValue = buildShopifyVariantOptions(variant, optionNames)[index] || 'Default';
+      values.add(optionValue);
+    }
+
+    if (values.size === 0) values.add(name === 'Title' ? 'Default Title' : 'Default');
+
+    return {
+      name,
+      values: [...values].map(value => ({ name: value })),
+    };
+  });
+}
+
+function formatPrice(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function buildVariantPayloads(product: any, rule: any, optionNames: string[]) {
+  const seen = new Set<string>();
+
+  return product.variants
+    .map((variant: any) => {
+      const optionValues = buildShopifyVariantOptions(variant, optionNames);
+      const key = optionValues.join('||');
+      const sourcePrice = variant.price || product.price;
+      const calculatedPrice = rule
+        ? PricingEngine.calculatePrice(sourcePrice, rule)
+        : sourcePrice;
+
+      return {
+        key,
+        sourceVariant: variant,
+        price: formatPrice(calculatedPrice),
+        input: {
+          price: formatPrice(calculatedPrice),
+          optionValues: optionNames.map((optionName, index) => ({
+            optionName,
+            name: optionValues[index],
+          })),
+          inventoryItem: {
+            sku: variant.sku || `${product.supplier.name}-${product.productId || product.id}-${variant.id.slice(-4)}`,
+            tracked: true,
+          },
+        },
+      };
+    })
+    .filter((variantPayload: any) => {
+      if (seen.has(variantPayload.key)) return false;
+      seen.add(variantPayload.key);
+      return true;
+    });
+}
+
 export class QueueService {
   private static queue = new PQueue({ concurrency: 2 });
 
@@ -108,23 +166,28 @@ export class QueueService {
               : await prisma.pricingRule.findFirst({ where: { isDefault: true } });
 
             const optionNames = buildShopifyOptionNames(product.variants);
+            const variantPayloads = buildVariantPayloads(product, rule, optionNames);
+            if (variantPayloads.length === 0) {
+              throw new Error('No variants available to publish');
+            }
 
             const input: any = {
-              title: product.title,
-              descriptionHtml: product.description,
-              vendor: product.brand || product.supplier.name,
-              status: 'DRAFT',
-              tags: [product.supplier.name, product.brand, 'SyncEngine'].filter(Boolean),
-              images: product.images.map(img => ({ altText: img.alt, src: img.url })),
-              variants: product.variants.map(v => ({
-                price: rule ? PricingEngine.calculatePrice(v.price || product.price, rule) : (v.price || product.price),
-                sku: v.sku || `${product.supplier.name}-${product.productId}-${v.id.slice(-4)}`,
-                inventoryItem: {
-                  tracked: true
-                },
-                options: buildShopifyVariantOptions(v, optionNames)
-              })),
-              options: optionNames
+              product: {
+                title: product.title,
+                descriptionHtml: product.description || undefined,
+                vendor: product.brand || product.supplier.name,
+                status: 'DRAFT',
+                tags: [product.supplier.name, product.brand, 'SyncEngine'].filter(Boolean),
+                productOptions: buildShopifyProductOptions(product.variants, optionNames),
+              },
+              media: product.images
+                .filter(img => img.url)
+                .slice(0, 20)
+                .map(img => ({
+                  mediaContentType: 'IMAGE',
+                  originalSource: img.url,
+                  alt: img.alt || product.title,
+                })),
             };
 
             // 3. Create in Shopify
@@ -135,6 +198,23 @@ export class QueueService {
               throw new Error(`Shopify Error: ${userErrors[0].message}`);
             }
 
+            const variantsResponse = await ShopifyService.createVariantsBulk(
+              client,
+              shopifyProductResult.id,
+              variantPayloads.map((variantPayload: any) => variantPayload.input),
+            );
+            const {
+              productVariants: createdVariants,
+              userErrors: variantErrors,
+            } = variantsResponse.productVariantsBulkCreate;
+
+            if (variantErrors && variantErrors.length > 0) {
+              throw new Error(`Shopify Variant Error: ${variantErrors[0].message}`);
+            }
+            if (!createdVariants || createdVariants.length === 0) {
+              throw new Error('Shopify did not return created variants');
+            }
+
             // 4. Save to DB
             const dbShopifyProduct = await prisma.shopifyProduct.create({
               data: {
@@ -142,13 +222,13 @@ export class QueueService {
                 shopifyId: shopifyProductResult.id,
                 handle: shopifyProductResult.handle,
                 collectionIds: collections?.join(',') || null,
-                price: parseFloat(shopifyProductResult.variants.edges[0].node.price),
+                price: createdVariants[0]?.price ? parseFloat(createdVariants[0].price) : variantPayloads[0].price,
                 variants: {
-                  create: shopifyProductResult.variants.edges.map((edge: any, index: number) => ({
-                    shopifyId: edge.node.id,
-                    sku: edge.node.sku,
-                    price: parseFloat(edge.node.price),
-                    sourceVariantId: product.variants[index]?.id || product.variants[0].id
+                  create: createdVariants.map((variant: any, index: number) => ({
+                    shopifyId: variant.id,
+                    sku: variant.inventoryItem?.sku,
+                    price: variant.price ? parseFloat(variant.price) : variantPayloads[index]?.price,
+                    sourceVariantId: variantPayloads[index]?.sourceVariant.id || product.variants[0].id
                   }))
                 }
               }
@@ -166,6 +246,9 @@ export class QueueService {
           }
           case 'SCRAPE_PRODUCT':
             // Scrape logic would go here
+            break;
+          case 'SYNC_PRODUCT':
+            result = { message: 'Product sync worker is not configured yet' };
             break;
           case 'SYNC_INVENTORY':
             // Sync logic

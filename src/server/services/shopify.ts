@@ -2,6 +2,8 @@ import axios from 'axios';
 import { decrypt } from './encryption.js';
 import { PrismaClient } from '@prisma/client';
 
+const DEFAULT_SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-04';
+
 export interface ShopifyConfig {
   shopDomain: string;
   accessToken: string;
@@ -27,6 +29,7 @@ export class ShopifyGraphqlClient {
         this.endpoint,
         { query, variables },
         {
+          timeout: 30000,
           headers: {
             'X-Shopify-Access-Token': this.config.accessToken,
             'Content-Type': 'application/json',
@@ -63,7 +66,7 @@ export class ShopifyGraphqlClient {
 export const shopifyClient = new ShopifyGraphqlClient({
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || '',
   accessToken: process.env.SHOPIFY_ACCESS_TOKEN || '',
-  apiVersion: '2024-04',
+  apiVersion: DEFAULT_SHOPIFY_API_VERSION,
 });
 
 // Helper for mutations
@@ -80,7 +83,7 @@ export class ShopifyService {
     return new ShopifyGraphqlClient({
       shopDomain: connection.shopDomain,
       accessToken: decrypt(connection.accessTokenEnc),
-      apiVersion: '2024-04'
+      apiVersion: DEFAULT_SHOPIFY_API_VERSION
     });
   }
 
@@ -104,19 +107,20 @@ export class ShopifyService {
 
   static async createProduct(client: ShopifyGraphqlClient, input: any) {
     const mutation = `
-      mutation productCreate($input: ProductInput!) {
-        productCreate(input: $input) {
+      mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+        productCreate(product: $product, media: $media) {
           product {
             id
             handle
             title
+            status
             variants(first: 100) {
-              edges {
-                node {
-                  id
+              nodes {
+                id
+                title
+                price
+                inventoryItem {
                   sku
-                  title
-                  price
                 }
               }
             }
@@ -128,7 +132,52 @@ export class ShopifyService {
         }
       }
     `;
-    return client.request(mutation, { input });
+    return client.request(mutation, {
+      product: input.product,
+      media: input.media || [],
+    });
+  }
+
+  static async createVariantsBulk(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    variants: any[],
+  ) {
+    const mutation = `
+      mutation productVariantsBulkCreate(
+        $productId: ID!,
+        $variants: [ProductVariantsBulkInput!]!,
+        $strategy: ProductVariantsBulkCreateStrategy
+      ) {
+        productVariantsBulkCreate(
+          productId: $productId,
+          variants: $variants,
+          strategy: $strategy
+        ) {
+          productVariants {
+            id
+            title
+            price
+            inventoryItem {
+              sku
+            }
+            selectedOptions {
+              name
+              value
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    return client.request(mutation, {
+      productId,
+      variants,
+      strategy: 'REMOVE_STANDALONE_VARIANT',
+    });
   }
 
   static async updateVariant(client: ShopifyGraphqlClient, input: any) {
