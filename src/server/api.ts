@@ -912,7 +912,7 @@ router.post("/imports/publish", async (req, res) => {
             selectedImageCount: images.length,
           },
         }),
-        syncStatus: "active",
+        syncStatus: "pending",
       };
 
       const imageRecords = images
@@ -995,6 +995,23 @@ router.post("/imports/publish", async (req, res) => {
 
 // Sync execution
 router.post("/products/:id/sync", async (req, res) => {
+  const product = await prisma.sourceProduct.findUnique({
+    where: { id: req.params.id },
+    select: {
+      id: true,
+      shopifyProduct: { select: { id: true } },
+    },
+  });
+
+  if (!product) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+  if (!product.shopifyProduct) {
+    return res.status(409).json({
+      error: "Product is not linked to Shopify yet. Publish it to Shopify before running Sync Now.",
+    });
+  }
+
   const job = await QueueService.addTask("SYNC_PRODUCT", {
     sourceProductId: req.params.id,
   });

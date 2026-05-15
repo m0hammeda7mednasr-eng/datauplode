@@ -853,6 +853,10 @@ export class QueueService {
                 }
               }
             });
+            await prisma.sourceProduct.update({
+              where: { id: sourceProductId },
+              data: { syncStatus: 'active' },
+            });
 
             // 5. Add to collections if any
             if (collections && collections.length > 0) {
@@ -928,7 +932,7 @@ export class QueueService {
       } catch (error: any) {
         try {
           const payload = JSON.parse(job.payload || '{}');
-          if (job.type === 'SYNC_PRODUCT' && payload.sourceProductId) {
+          if ((job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY') && payload.sourceProductId) {
             await prisma.sourceProduct.update({
               where: { id: payload.sourceProductId },
               data: { syncStatus: 'error' },
