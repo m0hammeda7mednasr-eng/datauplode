@@ -45,13 +45,13 @@ function logWarning(message: string) {
 // URLs للتست
 const testUrls = [
   {
-    name: "Next.co.uk Product",
-    url: "https://www.nextdirect.com/eg/ar/style/su864117/y13998#y13998",
+    name: "Next UAE Product - Supplied Variant Case",
+    url: "https://www.next.ae/en/style/su876474/y19782",
     supplier: "Next",
   },
   {
-    name: "Next UAE Product",
-    url: "https://www.next.ae/en/style/su827809/v18422",
+    name: "Next US Product - Regional Fallback Case",
+    url: "https://www.next.us/en/style/su876474/y19782",
     supplier: "Next",
   },
   {

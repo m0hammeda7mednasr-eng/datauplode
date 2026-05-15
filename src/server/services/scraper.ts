@@ -3796,6 +3796,8 @@ function descriptionFromNextSnapshotLines(lines: string[]): string {
   for (const line of lines.slice(descriptionStart + 1)) {
     if (
       /^##\s+/.test(line) ||
+      /^!\[/.test(line) ||
+      /https?:\/\/xcdn\.next\.co\.uk\/.+\/product\//i.test(line) ||
       /^(?:Price History|Reviews|Recently Viewed|Product Code|Colour|Color|Size|Add to Bag|Store Stock Checker)$/i.test(line)
     ) {
       break;
@@ -3831,6 +3833,39 @@ function nextSizeValuesFromSnapshotLines(lines: string[]): string[] {
   return uniqueCleanValues(sizes);
 }
 
+function nextSnapshotHasSizePicker(lines: string[]): boolean {
+  const sizeIndex = lines.findIndex(line => /^(?:Size|Rozmiar|\u0627\u0644\u0645\u0642\u0627\u0633)\b/i.test(line));
+  if (sizeIndex < 0) return false;
+
+  return lines
+    .slice(sizeIndex, sizeIndex + 8)
+    .some(line => /Choose Size|Select Size|Size Guide|Add to Bag|\u0627\u062e\u062a(?:ر|\u0627\u0631)\s+\u0627\u0644\u0645\u0642\u0627\u0633/i.test(line));
+}
+
+function inferNextFallbackSizesFromProductType(title: string, description: string, lines: string[]): string[] {
+  if (!nextSnapshotHasSizePicker(lines)) return [];
+
+  const text = cleanText(`${title} ${description}`).toLowerCase();
+
+  if (/\b(?:slippers?|mules?|slider slippers?|toe thong slippers?)\b/i.test(text)) {
+    return ['S', 'M', 'L'];
+  }
+
+  return [];
+}
+
+function nextSnapshotTitleIndex(lines: string[], title: string, productCodeIndex: number): number {
+  const candidates = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) =>
+      cleanNextSnapshotTitle(line) === title &&
+      (productCodeIndex === -1 || index < productCodeIndex)
+    );
+
+  const productHeading = [...candidates].reverse().find(({ line }) => /^#\s+/.test(line));
+  return productHeading?.index ?? candidates.at(-1)?.index ?? 0;
+}
+
 function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = url, rawFlags: Record<string, any> = {}): NormalizedProduct {
   if (isBlockedReaderMarkdown(snapshotText)) {
     throw new Error('Reader fallback returned an access-denied or missing page');
@@ -3844,7 +3879,7 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
 
   const priceIndex = lines.findIndex(looksLikeNextPriceText);
   const title = titleFromNextSnapshotLines(lines, priceIndex, productCodeIndex);
-  const titleIndex = Math.max(0, lines.findIndex(line => cleanNextSnapshotTitle(line) === title));
+  const titleIndex = nextSnapshotTitleIndex(lines, title, productCodeIndex);
 
   if (!title || /^(Access Denied|404|Page Not Found|Next Product)$/i.test(title)) {
     throw new Error('Reader fallback did not expose a product title');
@@ -3883,7 +3918,9 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
     });
   }
   const explicitSizes = nextSizeValuesFromSnapshotLines(lines);
-  const sizeValues = explicitSizes.length ? explicitSizes : inferNextBabySizes(`${title} ${descriptionText}`);
+  const typeInferredSizes = explicitSizes.length ? [] : inferNextFallbackSizesFromProductType(title, descriptionText, lines);
+  const babyInferredSizes = explicitSizes.length || typeInferredSizes.length ? [] : inferNextBabySizes(`${title} ${descriptionText}`);
+  const sizeValues = explicitSizes.length ? explicitSizes : (typeInferredSizes.length ? typeInferredSizes : babyInferredSizes);
   const variants = buildInferredNextVariants(productCode, sizeValues, priceRange, color);
 
   if (price <= 0) {
@@ -3922,6 +3959,7 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
       regionalFallback: snapshotUrl !== url,
       productCode,
       inferredVariants: variants.length > 0,
+      sizesInferredFromProductType: typeInferredSizes.length ? true : undefined,
       imageUnavailableReason: images.length === 0
         ? 'Next blocked direct product media access, so this analysis did not include image URLs.'
         : undefined,
