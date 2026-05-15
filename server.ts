@@ -46,6 +46,11 @@ function getAllowedOrigins() {
   );
 }
 
+function isDatabaseUnavailableError(error: any) {
+  const message = String(error?.message || "");
+  return error?.code === "P1001" || message.includes("Can't reach database server");
+}
+
 async function startServer() {
   const app = express();
   const httpServer = createHttpServer(app);
@@ -97,7 +102,12 @@ async function startServer() {
         ok: false,
         service: "syncly-api",
         database: "error",
-        error: error.message,
+        error: isDatabaseUnavailableError(error)
+          ? "Database is currently unavailable. Check DATABASE_URL and database reachability."
+          : error.message,
+        code: isDatabaseUnavailableError(error)
+          ? "DB_UNAVAILABLE"
+          : "HEALTH_CHECK_FAILED",
       });
     }
   });

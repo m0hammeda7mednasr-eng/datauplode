@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { prisma } from "./db.js";
 import {
   ScraperService,
@@ -24,6 +24,65 @@ const DEFAULT_SHOPIFY_SCOPES = [
   "write_publications",
 ];
 const SHOPIFY_DOMAIN_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+
+function wrapAsyncHandler(handler: any) {
+  if (handler.length > 3 || handler.__synclyAsyncWrapped) return handler;
+
+  const wrapped = function (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) {
+    try {
+      const result = handler(req, res, next);
+      if (result && typeof result.then === "function") {
+        result.catch(next);
+      }
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  Object.defineProperty(wrapped, "__synclyAsyncWrapped", { value: true });
+  return wrapped;
+}
+
+function wrapAsyncRouterHandlers(expressRouter: any) {
+  for (const layer of expressRouter.stack || []) {
+    if (layer.route?.stack) {
+      for (const routeLayer of layer.route.stack) {
+        routeLayer.handle = wrapAsyncHandler(routeLayer.handle);
+      }
+    } else if (layer.handle) {
+      layer.handle = wrapAsyncHandler(layer.handle);
+    }
+  }
+}
+
+function getApiErrorStatus(error: any) {
+  if (Number.isInteger(error?.statusCode)) return error.statusCode;
+  if (Number.isInteger(error?.status)) return error.status;
+  if (isDatabaseUnavailableError(error)) return 503;
+  return 500;
+}
+
+function getApiErrorMessage(error: any) {
+  if (isDatabaseUnavailableError(error)) {
+    return "Database is currently unavailable. Check DATABASE_URL and database reachability.";
+  }
+
+  return error?.message || "Internal server error";
+}
+
+function getApiErrorCode(error: any) {
+  if (isDatabaseUnavailableError(error)) return "DB_UNAVAILABLE";
+  return error?.code || "API_ERROR";
+}
+
+function isDatabaseUnavailableError(error: any) {
+  const message = String(error?.message || "");
+  return error?.code === "P1001" || message.includes("Can't reach database server");
+}
 
 function firstQueryValue(value: any): string {
   return String(Array.isArray(value) ? value[0] : value || "").trim();
@@ -1139,6 +1198,29 @@ router.get("/shopify/collections", async (req, res) => {
 
     res.status(500).json({ error: error.message });
   }
+});
+
+wrapAsyncRouterHandlers(router);
+
+router.use((error: any, req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+
+  const status = getApiErrorStatus(error);
+  const code = getApiErrorCode(error);
+  const message = getApiErrorMessage(error);
+
+  console.error("API route failed:", {
+    method: req.method,
+    path: req.originalUrl,
+    status,
+    code,
+    message,
+  });
+
+  res.status(status).json({ error: message, code });
 });
 
 export default router;
