@@ -525,17 +525,42 @@ function getNextStyleIds(url: string): { styleId: string; productId: string } | 
   };
 }
 
+function stripUrlHash(url: string): string {
+  return cleanText(url).split('#')[0];
+}
+
+function buildNextBrowserHeaders(url: string): Record<string, string> {
+  return {
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'accept-language': defaultNextLanguageForUrl(url),
+    'cache-control': 'no-cache',
+    pragma: 'no-cache',
+    'sec-ch-ua': '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'none',
+    'sec-fetch-user': '?1',
+    'upgrade-insecure-requests': '1',
+    'user-agent': browserHeaders['User-Agent'],
+    cookie: nextCookieForUrl(url),
+  };
+}
+
 function buildNextReaderUrls(url: string): string[] {
   const ids = getNextStyleIds(url);
-  const urls = [url];
+  const urls = [stripUrlHash(url)];
 
   if (ids) {
     const { styleId, productId } = ids;
     urls.push(
+      `https://www.next.co.uk/style/${styleId}/${productId}`,
+      `https://www.next.co.uk/en/style/${styleId}/${productId}`,
+      `https://www.next.ie/en/style/${styleId}/${productId}`,
       `https://www.next.us/en/style/${styleId}/${productId}`,
       `https://www.nextdirect.com/eg/en/style/${styleId}/${productId}`,
       `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`,
-      `https://www.next.co.uk/style/${styleId}/${productId}`,
     );
   }
 
@@ -544,16 +569,19 @@ function buildNextReaderUrls(url: string): string[] {
 
 function buildNextHtmlFallbackUrls(url: string): string[] {
   const ids = getNextStyleIds(url);
-  if (!ids) return [url];
+  if (!ids) return [stripUrlHash(url)];
 
   const { styleId, productId } = ids;
-  return [
-    url,
+  return [...new Set([
+    `https://www.next.co.uk/style/${styleId}/${productId}`,
+    `https://www.next.co.uk/en/style/${styleId}/${productId}`,
+    stripUrlHash(url),
+    `https://www.next.ie/en/style/${styleId}/${productId}`,
     `https://www.next.us/en/style/${styleId}/${productId}`,
     `https://www.next.us/en/style/${styleId}/${productId}?json=true`,
     `https://www.nextdirect.com/eg/en/style/${styleId}/${productId}`,
-    `https://www.next.co.uk/style/${styleId}/${productId}`,
-  ];
+    `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`,
+  ])];
 }
 
 function isBlockedReaderMarkdown(markdown: string): boolean {
@@ -762,6 +790,211 @@ function stripNextCardPrice(title: string): string {
     .replace(/\s+(?:was|now|from)?\s*(?:EGP|AED|USD|SAR|GBP|EUR|\$|£|€)\s*[\d,.].*$/i, '')
     .replace(/\s+(?:was|now|from)\s+.*$/i, '')
     .trim();
+}
+
+function normalizeHmSize(value: unknown): string {
+  const cleaned = cleanText(value);
+  const monthRange = cleaned.match(/^(\d+)\s*-\s*(\d+)\s*M$/i);
+  if (monthRange) return `${monthRange[1]}-${monthRange[2]} Months`;
+
+  const yearRange = cleaned.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*Y$/i);
+  if (yearRange) return `${yearRange[1]}-${yearRange[2]} Years`;
+
+  return cleaned;
+}
+
+function inferColorFromHmUrl(url: string): string | undefined {
+  try {
+    const slug = new URL(url).pathname.split('/').filter(Boolean).pop() || '';
+    const colorSlug = slug.replace(/^buy-[^-]+(?:-[^-]+)*?-(?=(?:light|dark|blue|white|black|pink|red|green|yellow|orange|purple|beige|brown|grey|gray|cream|striped|print|multi)\b)/i, '');
+    const candidate = colorSlug
+      .replace(/^buy-/, '')
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, char => char.toUpperCase());
+    return cleanColorOptionValue(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+function hmGraphqlPriceAmount(value: any): { price: number; currency: string } {
+  const amount = value?.final?.amount || value?.regular?.amount || value?.amount || value;
+  return {
+    price: parsePrice(amount?.value ?? amount),
+    currency: cleanText(amount?.currency) || 'AED',
+  };
+}
+
+function hmGraphqlRangePrice(product: any): { price: number; maxPrice: number; currency: string } {
+  const minimum = hmGraphqlPriceAmount(product?.priceRange?.minimum);
+  const maximum = hmGraphqlPriceAmount(product?.priceRange?.maximum);
+  const simple = hmGraphqlPriceAmount(product?.price);
+  const prices = [minimum.price, maximum.price, simple.price].filter(price => price > 0);
+
+  return {
+    price: prices.length ? Math.min(...prices) : 0,
+    maxPrice: prices.length ? Math.max(...prices) : 0,
+    currency: minimum.currency || maximum.currency || simple.currency || 'AED',
+  };
+}
+
+function hmAttribute(product: any, names: string[]): string | undefined {
+  const normalizedNames = names.map(name => name.toLowerCase());
+  const attribute = (product?.attributes || []).find((entry: any) =>
+    normalizedNames.includes(cleanText(entry?.name).toLowerCase()) ||
+    normalizedNames.includes(cleanText(entry?.label).toLowerCase())
+  );
+  return cleanText(attribute?.value) || undefined;
+}
+
+function pushHmAssetImages(images: NormalizedProduct['images'], product: any, url: string, title: string) {
+  const attributes = product?.attributes || [];
+  for (const attributeName of ['assets_pdp', 'assets_plp', 'assets_cart']) {
+    const rawValue = attributes.find((entry: any) => cleanText(entry?.name) === attributeName)?.value;
+    if (!rawValue) continue;
+    try {
+      const assets = JSON.parse(rawValue);
+      for (const asset of assets || []) {
+        pushImage(
+          images,
+          asset?.styles?.product_zoom_large_800x800 || asset?.url,
+          url,
+          title,
+        );
+      }
+    } catch {}
+  }
+}
+
+async function fetchHmGraphqlProduct(url: string, sku: string): Promise<any> {
+  const query = `
+    query GetProduct($skus:[String]) {
+      products(skus:$skus) {
+        __typename
+        sku
+        name
+        urlKey
+        inStock
+        addToCartAllowed
+        description
+        shortDescription
+        externalId
+        images { url label roles }
+        attributes { name label value roles }
+        ... on SimpleProductView {
+          price { final { amount { value currency } } regular { amount { value currency } } }
+        }
+        ... on ComplexProductView {
+          options {
+            id
+            title
+            required
+            multi
+            values {
+              __typename
+              id
+              title
+              inStock
+              ... on ProductViewOptionValueSwatch { value type }
+            }
+          }
+          priceRange {
+            minimum { final { amount { value currency } } regular { amount { value currency } } }
+            maximum { final { amount { value currency } } regular { amount { value currency } } }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await axios.post('https://ae.hm.com/graphql', {
+    query,
+    variables: { skus: [sku] },
+  }, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Magento-Website-Code': 'are',
+      'Magento-Store-View-Code': 'are_en',
+      'Magento-Store-Code': 'hm_uae_store',
+      'Magento-Customer-Group': '0',
+      'Store': 'are_en',
+      'User-Agent': browserHeaders['User-Agent'],
+      'Referer': url,
+    },
+    timeout: 30000,
+  });
+
+  return response.data?.data?.products?.[0];
+}
+
+function normalizeHmGraphqlProduct(product: any, fallback: NormalizedProduct, url: string): NormalizedProduct {
+  const title = cleanText(product?.name) || fallback.title;
+  const priceRange = hmGraphqlRangePrice(product);
+  const price = priceRange.price || fallback.price;
+  const currency = priceRange.currency || fallback.currency;
+  const color =
+    cleanColorOptionValue(hmAttribute(product, ['color_label', 'Actual Color Label', 'colour', 'color'])) ||
+    inferColorFromHmUrl(url);
+  const images = [...fallback.images];
+
+  for (const image of product?.images || []) {
+    pushImage(images, image?.url, url, image?.label || title);
+  }
+  pushHmAssetImages(images, product, url, title);
+
+  const sizeOption = (product?.options || []).find((option: any) =>
+    /^size$/i.test(cleanText(option?.id)) || /^size$/i.test(cleanText(option?.title))
+  );
+  const sizeValues = uniqueCleanValues(
+    (sizeOption?.values || [])
+      .filter((value: any) => value?.inStock !== false)
+      .map((value: any) => normalizeHmSize(value?.title || value?.value))
+      .filter(Boolean)
+  );
+
+  const variants = sizeValues.length
+    ? sizeValues.map((size: string) => ({
+        sourceVariantId: `${product?.sku || fallback.source.productId}-${slugOption(size)}`,
+        sku: `${product?.sku || fallback.source.productId}-${slugOption(size).toUpperCase()}`,
+        color,
+        size,
+        price,
+        currency,
+        available: product?.inStock !== false,
+        stockStatus: product?.inStock === false ? 'out_of_stock' as const : 'in_stock' as const,
+        optionValues: buildVariantOptionValues(color, size),
+      }))
+    : fallback.variants;
+
+  return {
+    ...fallback,
+    source: {
+      supplier: 'H&M',
+      url,
+      productId: cleanText(product?.sku) || fallback.source.productId,
+    },
+    title,
+    description: cleanText(product?.description) || fallback.description,
+    brand: 'H&M',
+    price,
+    currency,
+    images: removeObviousPageAssetImages(images),
+    options: [
+      ...(color ? [{ name: 'Color', values: [color] }] : []),
+      ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
+    ].length ? [
+      ...(color ? [{ name: 'Color', values: [color] }] : []),
+      ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : []),
+    ] : fallback.options,
+    variants,
+    raw: {
+      ...(fallback.raw || {}),
+      hmGraphqlProduct: product,
+      hmGraphqlFallback: true,
+      extractedAt: new Date().toISOString(),
+    },
+  };
 }
 
 function productIdKeyFromNextCode(productCode: string | undefined): string | undefined {
@@ -975,18 +1208,25 @@ async function fetchHtml(url: string, extraHeaders: Record<string, string> = {})
   return typeof response.data === 'string' ? response.data : String(response.data);
 }
 
-async function fetchHtmlWithCurl(url: string): Promise<string> {
+async function fetchHtmlWithCurl(url: string, requestHeaders: Record<string, string> = {}): Promise<string> {
   const curlExecutable = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  const curlArgs = [
+    '-L',
+    '--compressed',
+    '-sS',
+    '-A',
+    browserHeaders['User-Agent'],
+  ];
+
+  for (const [key, value] of Object.entries(requestHeaders)) {
+    curlArgs.push('-H', `${key}: ${value}`);
+  }
+
+  curlArgs.push(url);
+
   const { stdout } = await execFileAsync(
     curlExecutable,
-    [
-      '-L',
-      '--compressed',
-      '-sS',
-      '-A',
-      browserHeaders['User-Agent'],
-      url,
-    ],
+    curlArgs,
     {
       timeout: 60000,
       maxBuffer: 30 * 1024 * 1024,
@@ -2550,7 +2790,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
         },
         title: cleanText(productData?.name || 'Marks & Spencer Product'),
         description: cleanText(productData?.description),
-        brand: cleanText(productData?.brand?.name || productData?.brand || 'Marks & Spencer'),
+        brand: decodeHtmlEntities(cleanText(productData?.brand?.name || productData?.brand || 'Marks & Spencer')),
         currency,
         price,
         images: images.map((image, position) => ({ ...image, position })),
@@ -3597,6 +3837,29 @@ async function fetchReaderMarkdown(url: string): Promise<string> {
   return text;
 }
 
+async function fetchNextReaderMarkdown(url: string): Promise<{ markdown: string; readerUrl: string } | null> {
+  const tried = new Set<string>();
+
+  for (const readerUrl of buildNextReaderUrls(url)) {
+    const normalized = stripUrlHash(readerUrl);
+    if (tried.has(normalized)) continue;
+    tried.add(normalized);
+
+    try {
+      const markdown = await fetchReaderMarkdown(normalized);
+      if (markdown.length < 400) {
+        throw new Error('Reader fallback returned an unexpectedly short page');
+      }
+
+      return { markdown, readerUrl: normalized };
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+  }
+
+  return null;
+}
+
 function parseMaxReaderMarkdown(markdown: string, url: string): NormalizedProduct {
   if (isBlockedReaderMarkdown(markdown)) {
     throw new Error('Reader fallback returned an access-denied page');
@@ -3921,6 +4184,14 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
   const typeInferredSizes = explicitSizes.length ? [] : inferNextFallbackSizesFromProductType(title, descriptionText, lines);
   const babyInferredSizes = explicitSizes.length || typeInferredSizes.length ? [] : inferNextBabySizes(`${title} ${descriptionText}`);
   const sizeValues = explicitSizes.length ? explicitSizes : (typeInferredSizes.length ? typeInferredSizes : babyInferredSizes);
+  if (!sizeValues.length && nextSnapshotHasSizePicker(lines)) {
+    throw new ScraperError('Next exposed a size picker, but the page snapshot did not include the size values. Re-analyze with the full visible product page text after opening the size selector, so Syncly does not publish this as One Size.', {
+      code: 'NEXT_SIZE_VALUES_MISSING',
+      status: 422,
+      supplier: 'Next',
+      retryWithSnapshot: true,
+    });
+  }
   const variants = buildInferredNextVariants(productCode, sizeValues, priceRange, color);
 
   if (price <= 0) {
@@ -3975,7 +4246,15 @@ function parseNextReaderMarkdown(markdown: string, url: string, readerUrl = url)
 }
 
 async function enrichNextProductWithReaderColorways(product: NormalizedProduct, url: string): Promise<NormalizedProduct> {
-  return product;
+  if (product.raw?.readerFallback || product.raw?.pastedSnapshotFallback) return product;
+
+  try {
+    const reader = await fetchNextReaderMarkdown(url);
+    if (!reader) return product;
+    return applyNextColorwaysFromMarkdown(product, reader.markdown, url, reader.readerUrl);
+  } catch {
+    return product;
+  }
 }
 
 function isBlockedNextHtml(html: string): boolean {
@@ -4322,6 +4601,50 @@ export class CentrepointScraper implements SupplierScraper {
   }
 }
 
+export class HmScraper implements SupplierScraper {
+  canHandle(url: string): boolean {
+    return hostMatches(url, ['ae.hm.com', 'hm.com']);
+  }
+
+  async scrape(url: string): Promise<NormalizedProduct> {
+    const html = await fetchHtml(url, {
+      'Accept-Language': 'en-AE,en;q=0.9',
+      'Referer': 'https://ae.hm.com/en/',
+    });
+    const fallback = extractGenericProductFromHtml(html, url, 'H&M');
+    const $ = cheerio.load(html);
+    const sku = cleanText(
+      extractProductJsonLdFromHtml(html)?.sku ||
+      $('meta[name="sku"]').attr('content') ||
+      fallback.source.productId
+    );
+
+    if (!sku) return fallback;
+
+    try {
+      const product = await fetchHmGraphqlProduct(url, sku);
+      if (!product) return fallback;
+      return normalizeProductOptionsAndVariants(normalizeHmGraphqlProduct(product, fallback, url));
+    } catch (error: any) {
+      return normalizeProductOptionsAndVariants({
+        ...fallback,
+        source: {
+          ...fallback.source,
+          supplier: 'H&M',
+        },
+        raw: {
+          ...(fallback.raw || {}),
+          hmGraphqlError: error.message,
+        },
+      });
+    }
+  }
+
+  async checkAvailability(url: string): Promise<AvailabilitySnapshot> {
+    return availabilitySnapshotFromProduct(await this.scrape(url));
+  }
+}
+
 export class GenericScraper implements SupplierScraper {
   canHandle(url: string): boolean {
     return true; // Catch-all
@@ -4432,7 +4755,7 @@ export class NextScraper implements SupplierScraper {
                 title: item.name || item.title || 'Next Product',
                 description: item.description,
                 brand: item.brand || 'Next',
-                currency: item.currency || 'EGP',
+                currency: item.currency || defaultNextCurrencyForUrl(url),
                 price: parseFloat(item.price || item.currentPrice || '0'),
                 images: (item.images || []).map((img: any, idx: number) => ({
                   url: img.url || img,
@@ -4485,20 +4808,13 @@ export class NextScraper implements SupplierScraper {
       ];
 
       let lastError: any = null;
-      for (const uaInfo of uas) {
+      const directUrls = [...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)])];
+      for (const directUrl of directUrls) {
+        for (const uaInfo of uas) {
         try {
           const headers: any = {
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'en-US,en;q=0.9,ar-EG;q=0.8,ar;q=0.7',
-            'cache-control': 'no-cache',
-            'pragma': 'no-cache',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
+            ...buildNextBrowserHeaders(directUrl),
             'user-agent': uaInfo.ua,
-            'cookie': 'Country=eg; Language=ar; ' + (uaInfo.ua.includes('Googlebot') ? '' : 'OptanonAlertBoxClosed=2024-01-01T00:00:00.000Z;'),
           };
 
           if (uaInfo.platform) headers['sec-ch-ua-platform'] = uaInfo.platform;
@@ -4508,15 +4824,15 @@ export class NextScraper implements SupplierScraper {
           const requestOptions: any = {
             headers,
             timeout: 20000,
-            validateStatus: (status: number) => status < 500, // Allow 403 to handle it manually if needed, but axios throws on 403 by default
+            validateStatus: (status: number) => status < 500,
           };
 
-          response = await axios.get(url, requestOptions);
+          response = await axios.get(directUrl, requestOptions);
           
           if (response.status === 200) {
             console.log(`Successfully scraped Next using UA: ${uaInfo.ua.substring(0, 30)}...`);
             try {
-              return await enrichNextProductWithReaderColorways(extractNextProductFromHtml(response.data, url), url);
+              return await enrichNextProductWithReaderColorways(extractNextProductFromHtml(response.data, url, directUrl), url);
             } catch (htmlError) {
               lastError = htmlError;
               response = null;
@@ -4530,6 +4846,7 @@ export class NextScraper implements SupplierScraper {
         } catch (e: any) {
           lastError = e;
           continue;
+        }
         }
       }
 
@@ -4687,6 +5004,7 @@ export class ScraperService {
     new SheinScraper(),
     new MaxFashionScraper(),
     new CentrepointScraper(),
+    new HmScraper(),
     new GenericScraper(), // Fallback
   ];
 

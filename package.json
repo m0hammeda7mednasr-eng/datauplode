@@ -17,6 +17,7 @@
     "postinstall": "prisma generate",
     "test:scraper": "tsx test-scraper.ts",
     "test:scraper:next": "tsx test-next-scraper-details.ts",
+    "test:scraper:regression": "tsx test-scraper-regression.ts",
     "test:scraper:demo": "tsx test-scraper-demo.ts",
     "db:push": "prisma db push",
     "db:deploy": "prisma db push",

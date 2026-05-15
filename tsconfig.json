@@ -22,5 +22,9 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "probe-*.ts",
+    "test-user-urls.ts"
+  ]
 }
