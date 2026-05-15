@@ -2,14 +2,14 @@ import { ScraperService } from "./src/server/services/scraper";
 import * as fs from "fs";
 
 const testUrls = [
-  { name: "Max Fashion", url: "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM" },
   { name: "Next UAE (su759706)", url: "https://www.next.ae/en/style/su759706/w59264#w59264" },
+  { name: "Next UAE (sv124809)", url: "https://www.next.ae/en/style/sv124809/g44412#g44412" },
+  { name: "Max Fashion", url: "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM" },
   { name: "M&S UAE", url: "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D" },
   { name: "H&M UAE", url: "https://ae.hm.com/en/buy-2-piece-set-light-blue-white-striped" },
   { name: "Mothercare", url: "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4" },
   { name: "Zara", url: "https://www.zara.com/ae/en/-p01473692.html?v1=511134201" },
   { name: "Centrepoint", url: "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE" },
-  { name: "Next UAE (sv124809)", url: "https://www.next.ae/en/style/sv124809/g44412#g44412" },
 ];
 
 function validate(product: Awaited<ReturnType<ScraperService["scrape"]>>) {

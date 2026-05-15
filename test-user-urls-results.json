@@ -1,0 +1,238 @@
+[
+  {
+    "name": "Next UAE (su759706)",
+    "url": "https://www.next.ae/en/style/su759706/w59264#w59264",
+    "success": true,
+    "durationMs": 32426,
+    "supplier": "Next",
+    "title": "White Strawberry Baby Short Sleeve Dresse 2 Pack (0mths-3yrs)",
+    "price": 91,
+    "currency": "AED",
+    "brand": "Next",
+    "imageCount": 9,
+    "variantCount": 9,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "White Strawberry"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "50cm (First Size)",
+          "Up to 1 Month (56cm)",
+          "Up to 3 Months (62cm)",
+          "3-6 Months (62-68cm)",
+          "6-9 Months (68-74cm)",
+          "9-12 Months (74-80cm)",
+          "12-18 Months (80-86cm)",
+          "1.5-2 Years (86-92cm)",
+          "2-3 Years (92-98cm)"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Next UAE (sv124809)",
+    "url": "https://www.next.ae/en/style/sv124809/g44412#g44412",
+    "success": true,
+    "status": "manual_snapshot_required",
+    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
+    "error": "Next blocked automated server access to this product page (HTTP 403). Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+  },
+  {
+    "name": "Max Fashion",
+    "url": "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM",
+    "success": true,
+    "durationMs": 3435,
+    "supplier": "Max Fashion",
+    "title": "Stitch Embroidered Denim Dungaree with T-shirt",
+    "price": 65,
+    "currency": "AED",
+    "brand": "MAX",
+    "imageCount": 8,
+    "variantCount": 5,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Multicolour"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "3-6 mths",
+          "6-9 mths",
+          "9-12 mths",
+          "12-18 mths",
+          "18-24 mths"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "M&S UAE",
+    "url": "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D",
+    "success": true,
+    "durationMs": 724,
+    "supplier": "Marks & Spencer",
+    "title": "Denim Striped Bibshort with T-Shirt (0-3 Yrs)",
+    "price": 89.1,
+    "currency": "AED",
+    "brand": "M&S",
+    "imageCount": 3,
+    "variantCount": 7,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "DENIM"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "0-3 Months",
+          "3-6 Months",
+          "6-9 Months",
+          "9-12 Months",
+          "18-24 Months",
+          "2-3 Years",
+          "12-18 Months"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "H&M UAE",
+    "url": "https://ae.hm.com/en/buy-2-piece-set-light-blue-white-striped",
+    "success": true,
+    "durationMs": 554,
+    "supplier": "H&M",
+    "title": "2-piece set",
+    "price": 69,
+    "currency": "AED",
+    "brand": "H&M",
+    "imageCount": 5,
+    "variantCount": 7,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Light Blue White Striped"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "1.5-2 Years",
+          "4-6 Months",
+          "6-9 Months",
+          "9-12 Months",
+          "12-18 Months",
+          "2-3 Years",
+          "3-4 Years"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Mothercare",
+    "url": "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4",
+    "success": true,
+    "durationMs": 537,
+    "supplier": "Mothercare",
+    "title": "3 Pack Mothercare Newborn Bibs",
+    "price": 40,
+    "currency": "AED",
+    "brand": "Mothercare",
+    "imageCount": 4,
+    "variantCount": 1,
+    "options": [
+      {
+        "name": "Default",
+        "values": [
+          "Default"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Zara",
+    "url": "https://www.zara.com/ae/en/-p01473692.html?v1=511134201",
+    "success": true,
+    "durationMs": 360,
+    "supplier": "Zara",
+    "title": "CRAB PRINT KNIT PLAYSUIT",
+    "price": 159,
+    "currency": "AED",
+    "brand": "Zara",
+    "imageCount": 6,
+    "variantCount": 4,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Ecru"
+        ],
+        "swatches": {
+          "Ecru": {
+            "color": "#E2D2C2"
+          }
+        }
+      },
+      {
+        "name": "Size",
+        "values": [
+          "3-6 months (68 cm)",
+          "6-9 months (74 cm)",
+          "9-12 months (80 cm)",
+          "12-18 months (86 cm)"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Centrepoint",
+    "url": "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE",
+    "success": true,
+    "durationMs": 2534,
+    "supplier": "Centrepoint",
+    "title": "Juniors Round Neck Short Sleeve T-shirt and Dungaree Set with Alligator Applique",
+    "price": 45,
+    "currency": "AED",
+    "brand": "Juniors",
+    "imageCount": 9,
+    "variantCount": 7,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Multicolour"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "0-3 mths",
+          "3-6 mths",
+          "6-9 mths",
+          "9-12 mths",
+          "12-18 mths",
+          "18-24 mths",
+          "24-36 mths"
+        ]
+      }
+    ],
+    "issues": []
+  }
+]
