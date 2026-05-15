@@ -132,6 +132,168 @@ function isUsableNextProductHtml(html: string): boolean {
     html.includes('"@type": "Product"');
 }
 
+type ManagedBypassProvider = 'scraperapi' | 'zenrows';
+
+type ManagedBypassOptions = {
+  providerOrder?: ManagedBypassProvider[];
+  countryCode?: string;
+  deviceType?: 'desktop' | 'mobile';
+  jsRender?: boolean;
+  premium?: boolean;
+  ultraPremium?: boolean;
+};
+
+function envFlag(name: string, defaultValue = false): boolean {
+  const value = cleanText(process.env[name]);
+  if (!value) return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+function inferCountryCodeFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const pathName = parsed.pathname.toLowerCase();
+
+    if (host.endsWith('.ae') || pathName.includes('/ae/')) return 'ae';
+    if (host.endsWith('.co.uk') || host.endsWith('.uk')) return 'gb';
+    if (host.endsWith('.us')) return 'us';
+    if (host.endsWith('.ie')) return 'ie';
+    if (host.endsWith('.com') && pathName.includes('/eg/')) return 'eg';
+  } catch {}
+
+  return undefined;
+}
+
+function activeManagedBypassProviders(orderOverride?: ManagedBypassProvider[]): ManagedBypassProvider[] {
+  if (orderOverride?.length) return [...orderOverride];
+
+  const configured = cleanText(process.env.SCRAPER_BYPASS_PROVIDERS)
+    .split(',')
+    .map(value => cleanText(value).toLowerCase())
+    .filter(Boolean) as ManagedBypassProvider[];
+
+  const validConfigured = configured.filter(provider => provider === 'scraperapi' || provider === 'zenrows');
+  if (validConfigured.length) return [...new Set(validConfigured)];
+
+  const providers: ManagedBypassProvider[] = [];
+  if (cleanText(process.env.SCRAPERAPI_KEY)) providers.push('scraperapi');
+  if (cleanText(process.env.ZENROWS_API_KEY)) providers.push('zenrows');
+  return providers;
+}
+
+function looksLikeAccessDeniedHtml(html: string): boolean {
+  const text = html.toLowerCase();
+  return (
+    text.includes('just a moment') ||
+    text.includes('access denied') ||
+    text.includes('security verification') ||
+    text.includes('forbidden') ||
+    text.includes('cf-chl') ||
+    text.includes('cloudflare')
+  );
+}
+
+async function fetchHtmlViaScraperApi(url: string, options: ManagedBypassOptions): Promise<string> {
+  const apiKey = cleanText(process.env.SCRAPERAPI_KEY);
+  if (!apiKey) throw new Error('SCRAPERAPI_KEY is not configured');
+
+  const countryCode = options.countryCode || cleanText(process.env.SCRAPERAPI_COUNTRY_CODE) || inferCountryCodeFromUrl(url);
+  const deviceType = options.deviceType || (cleanText(process.env.SCRAPERAPI_DEVICE_TYPE).toLowerCase() as 'desktop' | 'mobile' | '');
+  const jsRender = options.jsRender ?? envFlag('SCRAPERAPI_RENDER', true);
+  const premium = options.premium ?? envFlag('SCRAPERAPI_PREMIUM', false);
+  const ultraPremium = options.ultraPremium ?? envFlag('SCRAPERAPI_ULTRA_PREMIUM', false);
+
+  const params = new URLSearchParams();
+  params.set('api_key', apiKey);
+  if (jsRender) params.set('render', 'true');
+  if (countryCode) params.set('country_code', countryCode);
+  if (deviceType === 'mobile' || deviceType === 'desktop') params.set('device_type', deviceType);
+  if (ultraPremium) {
+    params.set('ultra_premium', 'true');
+  } else if (premium) {
+    params.set('premium', 'true');
+  }
+  params.set('url', url);
+
+  const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
+    timeout: 90000,
+    responseType: 'text',
+    validateStatus: status => status < 500,
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`ScraperAPI HTTP ${response.status}`);
+  }
+
+  const html = typeof response.data === 'string' ? response.data : String(response.data);
+  if (!html.trim()) throw new Error('ScraperAPI returned an empty response');
+  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+    throw new Error('ScraperAPI returned a blocked page');
+  }
+
+  return html;
+}
+
+async function fetchHtmlViaZenRows(url: string, options: ManagedBypassOptions): Promise<string> {
+  const apiKey = cleanText(process.env.ZENROWS_API_KEY);
+  if (!apiKey) throw new Error('ZENROWS_API_KEY is not configured');
+
+  const countryCode = options.countryCode || cleanText(process.env.ZENROWS_PROXY_COUNTRY) || inferCountryCodeFromUrl(url);
+  const jsRender = options.jsRender ?? envFlag('ZENROWS_JS_RENDER', true);
+  const premiumProxy = options.premium ?? envFlag('ZENROWS_PREMIUM_PROXY', true);
+  const useCustomHeaders = envFlag('ZENROWS_CUSTOM_HEADERS', false);
+
+  const params = new URLSearchParams();
+  params.set('apikey', apiKey);
+  params.set('url', url);
+  if (jsRender) params.set('js_render', 'true');
+  if (premiumProxy) params.set('premium_proxy', 'true');
+  if (countryCode && premiumProxy) params.set('proxy_country', countryCode);
+  if (useCustomHeaders) params.set('custom_headers', 'true');
+
+  const response = await axios.get(`https://api.zenrows.com/v1/?${params.toString()}`, {
+    timeout: 90000,
+    responseType: 'text',
+    validateStatus: status => status < 500,
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`ZenRows HTTP ${response.status}`);
+  }
+
+  const html = typeof response.data === 'string' ? response.data : String(response.data);
+  if (!html.trim()) throw new Error('ZenRows returned an empty response');
+  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+    throw new Error('ZenRows returned a blocked page');
+  }
+
+  return html;
+}
+
+async function fetchHtmlViaManagedBypass(url: string, options: ManagedBypassOptions = {}): Promise<string> {
+  const providers = activeManagedBypassProviders(options.providerOrder);
+  if (!providers.length) {
+    throw new Error('No managed bypass provider is configured');
+  }
+
+  const errors: string[] = [];
+  for (const provider of providers) {
+    try {
+      if (provider === 'scraperapi') {
+        return await fetchHtmlViaScraperApi(url, options);
+      }
+      if (provider === 'zenrows') {
+        return await fetchHtmlViaZenRows(url, options);
+      }
+    } catch (error: any) {
+      errors.push(`${provider}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`Managed bypass failed (${errors.join('; ')})`);
+}
+
 const execFileAsync = promisify(execFile);
 
 const nextDomains = ['next.co.uk', 'nextdirect.com', 'next.ae', 'next.us'];
@@ -2823,6 +2985,112 @@ export class GapScraper implements SupplierScraper {
   }
 }
 
+function parseMarksAndSpencerHtml(html: string, url: string): NormalizedProduct {
+  const productData = extractProductJsonLdFromHtml(html);
+  const offer = firstOffer(productData);
+  const productCode = cleanText(productData?.sku || getProductIdFromUrl(url) || '');
+  const productAnchor = productCode ? html.indexOf(`"productCode":"${productCode}"`) : -1;
+  const searchFrom = productAnchor >= 0 ? productAnchor : 0;
+
+  const productImages = parseJsonAfterMarker(html, '"productImages":', searchFrom) || [];
+  const kiboOptions = parseJsonAfterMarker(html, '"options":', searchFrom) || [];
+  const variations = parseJsonAfterMarker(html, '"variations":', searchFrom) || [];
+
+  const images: NormalizedProduct['images'] = [];
+  for (const image of productImages) {
+    pushImage(images, image?.imageUrl || image?.src, url, image?.altText || productData?.name);
+  }
+  const productDataImages = Array.isArray(productData?.image) ? productData.image : [productData?.image].filter(Boolean);
+  for (const image of productDataImages) {
+    pushImage(images, typeof image === 'string' ? image : image?.url, url, image?.alt);
+  }
+
+  const optionValueMaps = new Map<string, Map<string, string>>();
+  for (const option of kiboOptions) {
+    const values = new Map<string, string>();
+    for (const value of option?.values || []) {
+      values.set(String(value?.value), cleanText(value?.stringValue || value?.value));
+    }
+    optionValueMaps.set(String(option?.attributeFQN), values);
+  }
+
+  const findOptionValue = (variation: any, matcher: RegExp) => {
+    const option = (variation?.options || []).find((entry: any) => matcher.test(String(entry?.attributeFQN || '')));
+    if (!option) return undefined;
+    return optionValueMaps.get(String(option.attributeFQN))?.get(String(option.value)) || cleanText(option.value);
+  };
+
+  const price = parsePrice(offer?.price);
+  const currency = detectCurrency(offer?.priceCurrency || 'AED', offer?.priceCurrency || 'AED');
+  const variants: NormalizedProduct['variants'] = Array.isArray(variations)
+    ? variations.map((variation: any) => {
+        const stock = variation?.inventoryInfo;
+        const available = stock?.manageStock
+          ? Number(stock?.onlineStockAvailable || 0) > 0
+          : stock?.outOfStockBehavior !== 'HideProduct';
+        const color = findOptionValue(variation, /color/i);
+        const size = findOptionValue(variation, /size/i);
+        const variantPrice = parsePrice(
+          variation?.price ||
+          variation?.salePrice ||
+          variation?.priceInfo?.price ||
+          variation?.priceInfo?.salePrice ||
+          price
+        ) || price;
+
+        return {
+          sourceVariantId: String(variation?.productCode || variation?.upc || productCode || 'default'),
+          sku: variation?.upc ? String(variation.upc) : String(variation?.productCode || ''),
+          color,
+          size,
+          price: variantPrice,
+          currency,
+          optionValues: buildVariantOptionValues(color, size),
+          available,
+          stockStatus: available ? 'in_stock' : 'out_of_stock',
+          raw: variation,
+        };
+      })
+    : [];
+
+  const normalizedOptions = kiboOptions
+    .map((option: any) => ({
+      name: cleanText(option?.attributeDetail?.name || option?.attributeFQN),
+      values: uniqueCleanValues((option?.values || []).map((value: any) => value?.stringValue || value?.value)),
+    }))
+    .filter((option: any) => option.name && option.values.length);
+
+  const fallbackVariants = variantsFromJsonLdOffers(productData?.offers, productCode);
+
+  return {
+    source: {
+      supplier: 'Marks & Spencer',
+      url,
+      productId: productCode,
+    },
+    title: cleanText(productData?.name || 'Marks & Spencer Product'),
+    description: cleanText(productData?.description),
+    brand: decodeHtmlEntities(cleanText(productData?.brand?.name || productData?.brand || 'Marks & Spencer')),
+    currency,
+    price,
+    images: images.map((image, position) => ({ ...image, position })),
+    options: normalizedOptions.length ? normalizedOptions : [{ name: 'Default', values: ['Default'] }],
+    variants: variants.length ? variants : fallbackVariants.length ? fallbackVariants : [{
+      sourceVariantId: productCode || 'default',
+      sku: productCode,
+      price,
+      available: true,
+      stockStatus: 'in_stock',
+    }],
+    raw: {
+      productData,
+      productImages,
+      kiboOptions,
+      variations,
+    },
+  };
+}
+
 export class MarksAndSpencerScraper implements SupplierScraper {
   canHandle(url: string): boolean {
     return hostMatches(url, ['marksandspencerme.com']);
@@ -2853,109 +3121,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
         'Accept-Language': 'en-AE,en;q=0.9',
         'Referer': 'https://www.marksandspencerme.com/en-ae/',
       });
-      const productData = extractProductJsonLdFromHtml(html);
-      const offer = firstOffer(productData);
-      const productCode = cleanText(productData?.sku || getProductIdFromUrl(url) || '');
-      const productAnchor = productCode ? html.indexOf(`"productCode":"${productCode}"`) : -1;
-      const searchFrom = productAnchor >= 0 ? productAnchor : 0;
-
-      const productImages = parseJsonAfterMarker(html, '"productImages":', searchFrom) || [];
-      const kiboOptions = parseJsonAfterMarker(html, '"options":', searchFrom) || [];
-      const variations = parseJsonAfterMarker(html, '"variations":', searchFrom) || [];
-
-      const images: NormalizedProduct['images'] = [];
-      for (const image of productImages) {
-        pushImage(images, image?.imageUrl || image?.src, url, image?.altText || productData?.name);
-      }
-      const productDataImages = Array.isArray(productData?.image) ? productData.image : [productData?.image].filter(Boolean);
-      for (const image of productDataImages) {
-        pushImage(images, typeof image === 'string' ? image : image?.url, url, image?.alt);
-      }
-
-      const optionValueMaps = new Map<string, Map<string, string>>();
-      for (const option of kiboOptions) {
-        const values = new Map<string, string>();
-        for (const value of option?.values || []) {
-          values.set(String(value?.value), cleanText(value?.stringValue || value?.value));
-        }
-        optionValueMaps.set(String(option?.attributeFQN), values);
-      }
-
-      const findOptionValue = (variation: any, matcher: RegExp) => {
-        const option = (variation?.options || []).find((entry: any) => matcher.test(String(entry?.attributeFQN || '')));
-        if (!option) return undefined;
-        return optionValueMaps.get(String(option.attributeFQN))?.get(String(option.value)) || cleanText(option.value);
-      };
-
-      const price = parsePrice(offer?.price);
-      const currency = detectCurrency(offer?.priceCurrency || 'AED', offer?.priceCurrency || 'AED');
-      const variants: NormalizedProduct['variants'] = Array.isArray(variations)
-        ? variations.map((variation: any) => {
-            const stock = variation?.inventoryInfo;
-            const available = stock?.manageStock
-              ? Number(stock?.onlineStockAvailable || 0) > 0
-              : stock?.outOfStockBehavior !== 'HideProduct';
-            const color = findOptionValue(variation, /color/i);
-            const size = findOptionValue(variation, /size/i);
-            const variantPrice = parsePrice(
-              variation?.price ||
-              variation?.salePrice ||
-              variation?.priceInfo?.price ||
-              variation?.priceInfo?.salePrice ||
-              price
-            ) || price;
-
-            return {
-              sourceVariantId: String(variation?.productCode || variation?.upc || productCode || 'default'),
-              sku: variation?.upc ? String(variation.upc) : String(variation?.productCode || ''),
-              color,
-              size,
-              price: variantPrice,
-              currency,
-              optionValues: buildVariantOptionValues(color, size),
-              available,
-              stockStatus: available ? 'in_stock' : 'out_of_stock',
-              raw: variation,
-            };
-          })
-        : [];
-
-      const normalizedOptions = kiboOptions
-        .map((option: any) => ({
-          name: cleanText(option?.attributeDetail?.name || option?.attributeFQN),
-          values: uniqueCleanValues((option?.values || []).map((value: any) => value?.stringValue || value?.value)),
-        }))
-        .filter((option: any) => option.name && option.values.length);
-
-      const fallbackVariants = variantsFromJsonLdOffers(productData?.offers, productCode);
-
-      return {
-        source: {
-          supplier: 'Marks & Spencer',
-          url,
-          productId: productCode,
-        },
-        title: cleanText(productData?.name || 'Marks & Spencer Product'),
-        description: cleanText(productData?.description),
-        brand: decodeHtmlEntities(cleanText(productData?.brand?.name || productData?.brand || 'Marks & Spencer')),
-        currency,
-        price,
-        images: images.map((image, position) => ({ ...image, position })),
-        options: normalizedOptions.length ? normalizedOptions : [{ name: 'Default', values: ['Default'] }],
-        variants: variants.length ? variants : fallbackVariants.length ? fallbackVariants : [{
-          sourceVariantId: productCode || 'default',
-          sku: productCode,
-          price,
-          available: true,
-          stockStatus: 'in_stock',
-        }],
-        raw: {
-          productData,
-          productImages,
-          kiboOptions,
-          variations,
-        },
-      };
+      return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
       errors.push(`direct: ${error.message}`);
     }
@@ -2965,9 +3131,22 @@ export class MarksAndSpencerScraper implements SupplierScraper {
         'Accept-Language': 'en-AE,en;q=0.9',
         Referer: 'https://www.marksandspencerme.com/en-ae/',
       });
-      return extractGenericProductFromHtml(html, url, 'Marks & Spencer');
+      return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
       errors.push(`curl: ${error.message}`);
+    }
+
+    if (activeManagedBypassProviders().length > 0) {
+      try {
+        const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
+          deviceType: 'desktop',
+          jsRender: true,
+          premium: true,
+        });
+        return parseMarksAndSpencerHtml(html, url);
+      } catch (error: any) {
+        errors.push(`managed bypass: ${error.message}`);
+      }
     }
 
     try {
@@ -2986,7 +3165,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     }
 
     const blockedSignals = errors.filter(error =>
-      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|curl executable is not available|Reader fallback returned an access-denied|ScraperAPI returned a blocked page|ZenRows returned a blocked page|Managed bypass returned non-product HTML/i.test(error)
     ).length;
 
     if (blockedSignals >= Math.max(1, errors.length - 1)) {
@@ -4038,6 +4217,22 @@ export class MaxFashionScraper implements SupplierScraper {
       errors.push(`curl: ${error.message}`);
     }
 
+    if (activeManagedBypassProviders().length > 0) {
+      try {
+        const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
+          deviceType: 'mobile',
+          jsRender: true,
+          premium: true,
+        });
+        if (!isUsableMaxFashionHtml(html)) {
+          throw new Error('managed bypass returned non-product HTML');
+        }
+        return parseMaxFashionHtml(html, url);
+      } catch (error: any) {
+        errors.push(`managed bypass: ${error.message}`);
+      }
+    }
+
     try {
       const markdown = await fetchReaderMarkdown(url);
       return parseMaxReaderMarkdown(markdown, url);
@@ -4046,7 +4241,7 @@ export class MaxFashionScraper implements SupplierScraper {
     }
 
     const blockedSignals = errors.filter(error =>
-      /HTTP 403|Cloudflare|security verification|access-denied|no usable product html|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+      /HTTP 403|Cloudflare|security verification|access-denied|no usable product html|curl executable is not available|Reader fallback returned an access-denied|ScraperAPI returned a blocked page|ZenRows returned a blocked page|managed bypass returned non-product html/i.test(error)
     ).length;
 
     if (blockedSignals >= Math.max(1, errors.length - 1)) {
@@ -4739,10 +4934,10 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
 function isNextBlockedFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
   const blockedOrUnusableFallback = errors.every(error =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page|size picker.*did not include the size values|No usable product HTML returned|no usable markdown returned|Regional mismatch)/i.test(error)
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page|size picker.*did not include the size values|No usable product HTML returned|no usable markdown returned|Regional mismatch|Managed bypass returned non-product HTML|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(error)
   );
   const blockedByNext = errors.some(error =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|size picker.*did not include the size values|No usable product HTML returned|Regional mismatch)/i.test(error)
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|size picker.*did not include the size values|No usable product HTML returned|Regional mismatch|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(error)
   );
 
   return blockedByNext && blockedOrUnusableFallback;
@@ -4956,6 +5151,19 @@ export class CentrepointScraper implements SupplierScraper {
       errors.push(`curl: ${error.message}`);
     }
 
+    if (activeManagedBypassProviders().length > 0) {
+      try {
+        const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
+          deviceType: 'mobile',
+          jsRender: true,
+          premium: true,
+        });
+        return parseCentrepointHtml(html, url);
+      } catch (error: any) {
+        errors.push(`managed bypass: ${error.message}`);
+      }
+    }
+
     try {
       const markdown = await fetchReaderMarkdown(url);
       return {
@@ -4972,7 +5180,7 @@ export class CentrepointScraper implements SupplierScraper {
     }
 
     const blockedSignals = errors.filter(error =>
-      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|no usable product html|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|no usable product html|curl executable is not available|Reader fallback returned an access-denied|ScraperAPI returned a blocked page|ZenRows returned a blocked page|managed bypass returned non-product html/i.test(error)
     ).length;
 
     if (blockedSignals >= Math.max(1, errors.length - 1)) {
@@ -5207,6 +5415,38 @@ export class NextScraper implements SupplierScraper {
         }
       }
 
+      const bypassErrors: string[] = [];
+      if (activeManagedBypassProviders().length > 0) {
+        for (const pageUrl of pageUrls) {
+          try {
+            const html = await fetchHtmlViaManagedBypass(pageUrl, {
+              deviceType: 'mobile',
+              jsRender: true,
+              premium: true,
+            });
+            if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
+              throw new Error('Managed bypass returned non-product HTML');
+            }
+
+            const product = extractNextProductFromHtml(html, url, pageUrl);
+            if (!nextScrapeMatchesRequestedRegion(url, pageUrl, product.currency)) {
+              throw new Error(`Regional mismatch (${product.currency} from ${pageUrl})`);
+            }
+
+            console.log(`Successfully scraped Next via managed bypass from ${pageUrl}`);
+            return await enrichNextProductWithReaderColorways({
+              ...product,
+              raw: {
+                ...product.raw,
+                managedBypassFallback: true,
+              },
+            }, url);
+          } catch (bypassError: any) {
+            bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
+          }
+        }
+      }
+
       const directError = lastError?.message || 'No usable product HTML returned';
       const readerErrors: string[] = [];
 
@@ -5231,7 +5471,7 @@ export class NextScraper implements SupplierScraper {
           readerErrors.push(`reader: ${readerError.message}`);
         }
 
-      const failureDetails = [`direct page: ${directError}`, ...htmlErrors, ...readerErrors];
+      const failureDetails = [`direct page: ${directError}`, ...htmlErrors, ...bypassErrors, ...readerErrors];
       const blockedByNext = isNextBlockedFailure(failureDetails) ||
         failureDetails.filter(error =>
           /(?:HTTP 403|HTTP 404|Access Denied|access-denied|permission to access|Forbidden|no usable markdown)/i.test(error)
@@ -5241,7 +5481,7 @@ export class NextScraper implements SupplierScraper {
         throw nextBlockedScraperError(failureDetails);
       }
 
-      throw new Error(`Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join('; ')}), and Reader fallbacks failed (${readerErrors.join('; ')})`);
+      throw new Error(`Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join('; ')}), managed bypass fallbacks failed (${bypassErrors.join('; ')}), and Reader fallbacks failed (${readerErrors.join('; ')})`);
     } catch (error: any) {
       console.error('Next Scraper error:', error.message);
       if (error instanceof ScraperError || error?.code === 'SOURCE_BLOCKED') {
