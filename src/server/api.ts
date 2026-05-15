@@ -2,6 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { prisma } from "./db.js";
 import {
   ScraperService,
+  type NormalizedProduct,
   normalizeProductImageList,
 } from "./services/scraper.js";
 import { PricingEngine } from "./services/pricing.js";
@@ -24,6 +25,126 @@ const DEFAULT_SHOPIFY_SCOPES = [
   "write_publications",
 ];
 const SHOPIFY_DOMAIN_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+const analyzeProductCache = new Map<string, { expiresAt: number; product: NormalizedProduct }>();
+
+function envNumber(name: string, defaultValue: number): number {
+  const value = Number(String(process.env[name] || "").trim());
+  return Number.isFinite(value) ? value : defaultValue;
+}
+
+function normalizeAnalyzeCacheUrl(url: string): string {
+  try {
+    const parsed = new URL(String(url).trim());
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(url || "").trim();
+  }
+}
+
+function getAnalyzeCacheMs(): number {
+  const hours = Math.max(0, envNumber("SCRAPE_ANALYZE_CACHE_HOURS", 168));
+  return hours * 60 * 60 * 1000;
+}
+
+function cloneProduct(product: NormalizedProduct): NormalizedProduct {
+  return JSON.parse(JSON.stringify(product));
+}
+
+function readJsonObject(value: unknown): any {
+  if (!value || typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
+  const cacheMs = getAnalyzeCacheMs();
+  if (cacheMs <= 0) return undefined;
+
+  const key = normalizeAnalyzeCacheUrl(url);
+  const cached = analyzeProductCache.get(key);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    analyzeProductCache.delete(key);
+    return undefined;
+  }
+
+  return cloneProduct(cached.product);
+}
+
+function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
+  const cacheMs = getAnalyzeCacheMs();
+  if (cacheMs <= 0) return;
+  analyzeProductCache.set(normalizeAnalyzeCacheUrl(url), {
+    expiresAt: Date.now() + cacheMs,
+    product: cloneProduct(product),
+  });
+}
+
+function deriveOptionsFromStoredVariants(variants: any[]) {
+  const colors = [
+    ...new Set(variants.map((variant) => String(variant.color || "").trim()).filter(Boolean)),
+  ];
+  const sizes = [
+    ...new Set(variants.map((variant) => String(variant.size || "").trim()).filter(Boolean)),
+  ];
+  const options = [];
+  if (colors.length) options.push({ name: "Color", values: colors });
+  if (sizes.length) options.push({ name: "Size", values: sizes });
+  return options.length ? options : [{ name: "Default", values: ["Default"] }];
+}
+
+function sourceProductToNormalizedProduct(sourceProduct: any): NormalizedProduct {
+  const sourceRaw = readJsonObject(sourceProduct.raw);
+  const variants = (sourceProduct.variants || []).map((variant: any) => {
+    const variantRaw = readJsonObject(variant.raw);
+    return {
+      sourceVariantId: variant.sourceVariantId,
+      sku: variant.sku,
+      color: variant.color,
+      size: variant.size,
+      price: variant.price ?? sourceProduct.price,
+      currency: variant.currency || sourceProduct.currency,
+      optionValues: variantRaw.optionValues,
+      available: variant.available ?? true,
+      stockStatus: variant.stockStatus || "unknown",
+      imageUrl: variant.imageUrl,
+      raw: variantRaw.raw || variantRaw,
+    };
+  });
+
+  return {
+    source: {
+      supplier: sourceProduct.supplier?.name || "Unknown",
+      url: sourceProduct.url,
+      productId: sourceProduct.productId,
+    },
+    title: sourceProduct.title,
+    description: sourceProduct.description || undefined,
+    brand: sourceProduct.brand || undefined,
+    currency: sourceProduct.currency,
+    price: sourceProduct.price,
+    images: (sourceProduct.images || []).map((image: any, index: number) => ({
+      url: image.url,
+      alt: image.alt || undefined,
+      color: image.color || undefined,
+      position: Number.isInteger(image.position) ? image.position : index,
+    })),
+    options: Array.isArray(sourceRaw.options) && sourceRaw.options.length
+      ? sourceRaw.options
+      : deriveOptionsFromStoredVariants(variants),
+    variants,
+    raw: {
+      ...(sourceRaw.raw && typeof sourceRaw.raw === "object" ? sourceRaw.raw : {}),
+      cachedFromSourceProductId: sourceProduct.id,
+      cachedAt: new Date().toISOString(),
+    },
+  };
+}
 
 function wrapAsyncHandler(handler: any) {
   if (handler.length > 3 || handler.__synclyAsyncWrapped) return handler;
@@ -429,9 +550,43 @@ router.post("/imports/analyze", async (req, res) => {
 
   try {
     const snapshotText = typeof pageText === "string" ? pageText.trim() : "";
-    const data = snapshotText
-      ? await scraperService.scrapeSnapshot(url, snapshotText)
-      : await scraperService.scrape(url);
+    let data = !snapshotText ? getCachedAnalyzeProduct(url) : undefined;
+
+    if (!data && !snapshotText) {
+      const normalizedUrl = normalizeAnalyzeCacheUrl(url);
+      const cacheMs = getAnalyzeCacheMs();
+      const cachedSourceProduct = cacheMs > 0
+        ? await prisma.sourceProduct.findFirst({
+            where: {
+              OR: [
+                { url },
+                ...(normalizedUrl !== url ? [{ url: normalizedUrl }] : []),
+              ],
+              lastScrapedAt: {
+                gte: new Date(Date.now() - cacheMs),
+              },
+            },
+            include: {
+              supplier: true,
+              images: { orderBy: { position: "asc" } },
+              variants: true,
+            },
+          })
+        : null;
+
+      if (cachedSourceProduct) {
+        data = sourceProductToNormalizedProduct(cachedSourceProduct);
+        setCachedAnalyzeProduct(url, data);
+      }
+    }
+
+    if (!data) {
+      data = snapshotText
+        ? await scraperService.scrapeSnapshot(url, snapshotText)
+        : await scraperService.scrape(url);
+      if (!snapshotText) setCachedAnalyzeProduct(url, data);
+    }
+
     const rule = await findBestPricingRuleForProduct(data);
 
     const calculatedPrice = rule

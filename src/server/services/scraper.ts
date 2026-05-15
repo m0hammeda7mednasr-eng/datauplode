@@ -149,6 +149,63 @@ function envFlag(name: string, defaultValue = false): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
+function envNumber(name: string, defaultValue: number): number {
+  const value = Number(cleanText(process.env[name]));
+  return Number.isFinite(value) ? value : defaultValue;
+}
+
+const managedBypassUsageByDay = new Map<string, number>();
+const managedBypassCooldownUntil = new Map<string, number>();
+
+function getManagedBypassDayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getManagedBypassUrlKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return cleanText(url);
+  }
+}
+
+function reserveManagedBypassAttempt(url: string): string | undefined {
+  const mode = cleanText(process.env.SCRAPER_BYPASS_MODE || 'auto').toLowerCase();
+  if (mode === 'never' || mode === 'off' || mode === 'disabled') {
+    return 'disabled by SCRAPER_BYPASS_MODE';
+  }
+
+  const key = getManagedBypassUrlKey(url);
+  const cooldownUntil = managedBypassCooldownUntil.get(key) || 0;
+  if (cooldownUntil > Date.now()) {
+    const minutes = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 60000));
+    return `cooling down for ${minutes} minute(s) after a recent provider failure`;
+  }
+
+  const dailyLimit = Math.max(0, envNumber('SCRAPER_BYPASS_DAILY_LIMIT', 0));
+  if (dailyLimit > 0) {
+    const dayKey = getManagedBypassDayKey();
+    const used = managedBypassUsageByDay.get(dayKey) || 0;
+    if (used >= dailyLimit) {
+      return `daily managed bypass limit reached (${used}/${dailyLimit})`;
+    }
+    managedBypassUsageByDay.set(dayKey, used + 1);
+  }
+
+  return undefined;
+}
+
+function noteManagedBypassFailure(url: string) {
+  const cooldownMinutes = Math.max(0, envNumber('SCRAPER_BYPASS_COOLDOWN_MINUTES', 120));
+  if (cooldownMinutes <= 0) return;
+  managedBypassCooldownUntil.set(
+    getManagedBypassUrlKey(url),
+    Date.now() + cooldownMinutes * 60000,
+  );
+}
+
 function inferCountryCodeFromUrl(url: string): string | undefined {
   try {
     const parsed = new URL(url);
@@ -200,7 +257,7 @@ async function fetchHtmlViaScraperApi(url: string, options: ManagedBypassOptions
 
   const countryCode = options.countryCode || cleanText(process.env.SCRAPERAPI_COUNTRY_CODE) || inferCountryCodeFromUrl(url);
   const deviceType = options.deviceType || (cleanText(process.env.SCRAPERAPI_DEVICE_TYPE).toLowerCase() as 'desktop' | 'mobile' | '');
-  const jsRender = options.jsRender ?? envFlag('SCRAPERAPI_RENDER', true);
+  const jsRender = options.jsRender ?? envFlag('SCRAPERAPI_RENDER', false);
   const premium = options.premium ?? envFlag('SCRAPERAPI_PREMIUM', false);
   const ultraPremium = options.ultraPremium ?? envFlag('SCRAPERAPI_ULTRA_PREMIUM', false);
 
@@ -240,7 +297,7 @@ async function fetchHtmlViaZenRows(url: string, options: ManagedBypassOptions): 
   if (!apiKey) throw new Error('ZENROWS_API_KEY is not configured');
 
   const countryCode = options.countryCode || cleanText(process.env.ZENROWS_PROXY_COUNTRY) || inferCountryCodeFromUrl(url);
-  const jsRender = options.jsRender ?? envFlag('ZENROWS_JS_RENDER', true);
+  const jsRender = options.jsRender ?? envFlag('ZENROWS_JS_RENDER', false);
   const premiumProxy = options.premium ?? envFlag('ZENROWS_PREMIUM_PROXY', true);
   const useCustomHeaders = envFlag('ZENROWS_CUSTOM_HEADERS', false);
 
@@ -277,6 +334,11 @@ async function fetchHtmlViaManagedBypass(url: string, options: ManagedBypassOpti
     throw new Error('No managed bypass provider is configured');
   }
 
+  const skippedReason = reserveManagedBypassAttempt(url);
+  if (skippedReason) {
+    throw new Error(`Managed bypass skipped (${skippedReason})`);
+  }
+
   const errors: string[] = [];
   for (const provider of providers) {
     try {
@@ -291,6 +353,7 @@ async function fetchHtmlViaManagedBypass(url: string, options: ManagedBypassOpti
     }
   }
 
+  noteManagedBypassFailure(url);
   throw new Error(`Managed bypass failed (${errors.join('; ')})`);
 }
 
