@@ -3,7 +3,7 @@
     "name": "Next UAE (su759706)",
     "url": "https://www.next.ae/en/style/su759706/w59264#w59264",
     "success": true,
-    "durationMs": 32426,
+    "durationMs": 62605,
     "supplier": "Next",
     "title": "White Strawberry Baby Short Sleeve Dresse 2 Pack (0mths-3yrs)",
     "price": 91,
@@ -39,15 +39,39 @@
     "name": "Next UAE (sv124809)",
     "url": "https://www.next.ae/en/style/sv124809/g44412#g44412",
     "success": true,
-    "status": "manual_snapshot_required",
-    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
-    "error": "Next blocked automated server access to this product page (HTTP 403). Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+    "durationMs": 56725,
+    "supplier": "Next",
+    "title": "River Island Pink Stripe Puff Sleeve Top & Bow Wide Leg Set",
+    "price": 186,
+    "currency": "AED",
+    "brand": "River Island",
+    "imageCount": 5,
+    "variantCount": 5,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "River Island Pink Stripe Puff Sleeve"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "12-18 Months (80-86cm)",
+          "1.5-2 Years (86-92cm)",
+          "2-3 Years (92-98cm)",
+          "3-4 Years (98-104cm)",
+          "4-5 Years (104-110cm)"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "Max Fashion",
     "url": "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM",
     "success": true,
-    "durationMs": 3435,
+    "durationMs": 11021,
     "supplier": "Max Fashion",
     "title": "Stitch Embroidered Denim Dungaree with T-shirt",
     "price": 65,
@@ -79,7 +103,7 @@
     "name": "M&S UAE",
     "url": "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D",
     "success": true,
-    "durationMs": 724,
+    "durationMs": 591,
     "supplier": "Marks & Spencer",
     "title": "Denim Striped Bibshort with T-Shirt (0-3 Yrs)",
     "price": 89.1,
@@ -113,7 +137,7 @@
     "name": "H&M UAE",
     "url": "https://ae.hm.com/en/buy-2-piece-set-light-blue-white-striped",
     "success": true,
-    "durationMs": 554,
+    "durationMs": 533,
     "supplier": "H&M",
     "title": "2-piece set",
     "price": 69,
@@ -144,10 +168,133 @@
     "issues": []
   },
   {
+    "name": "Lefties UAE",
+    "url": "https://www.lefties.com/ae/woman/shoes/minimalist-chunky-sole-sneaker-c1030267545p730276495.html",
+    "success": true,
+    "durationMs": 1278,
+    "supplier": "Lefties",
+    "title": "Minimalist chunky sole sneaker",
+    "price": 99,
+    "currency": "AED",
+    "brand": "Lefties",
+    "imageCount": 7,
+    "variantCount": 8,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "WHITE"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "98",
+          "35",
+          "36",
+          "37",
+          "38",
+          "39",
+          "40",
+          "41"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Gap UAE",
+    "url": "https://www.gap.ae/product/218613975",
+    "success": true,
+    "durationMs": 1417,
+    "supplier": "Gap",
+    "title": "ColdControl Max Relaxed Midi Puffer Jacket",
+    "price": 199,
+    "currency": "AED",
+    "brand": "Gap",
+    "imageCount": 9,
+    "variantCount": 5,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "BLACK 1"
+        ],
+        "swatches": {
+          "BLACK 1": {
+            "image": "https://production.atgwasl.com/dw/image/v2/BDSP_PRD/on/demandware.static/-/Sites-GAP-master-catalog/default/dw5588ecbc/images/hi-res/GAP/218/218613974/218613974_000_in.jpg"
+          }
+        }
+      },
+      {
+        "name": "Size",
+        "values": [
+          "L",
+          "M",
+          "S",
+          "XL",
+          "XS"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Adidas UAE",
+    "url": "https://www.adidas.ae/en/clot-samba-by-edison-chen-trainers/KJ0274.html",
+    "success": true,
+    "durationMs": 406,
+    "supplier": "Adidas",
+    "title": "CLOT Samba By Edison Chen Trainers",
+    "price": 599,
+    "currency": "AED",
+    "brand": "ADIDAS",
+    "imageCount": 30,
+    "variantCount": 24,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Cloud White / Core Black / Cloud White"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "36",
+          "36 2/3",
+          "37 1/3",
+          "38",
+          "38 2/3",
+          "39 1/3",
+          "40",
+          "40 2/3",
+          "41 1/3",
+          "42",
+          "42 2/3",
+          "43 1/3",
+          "44",
+          "44 2/3",
+          "45 1/3",
+          "46",
+          "46 2/3",
+          "47 1/3",
+          "48",
+          "48 2/3",
+          "49 1/3",
+          "50",
+          "50 2/3",
+          "51 1/3"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
     "name": "Mothercare",
     "url": "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4",
     "success": true,
-    "durationMs": 537,
+    "durationMs": 572,
     "supplier": "Mothercare",
     "title": "3 Pack Mothercare Newborn Bibs",
     "price": 40,
@@ -169,7 +316,7 @@
     "name": "Zara",
     "url": "https://www.zara.com/ae/en/-p01473692.html?v1=511134201",
     "success": true,
-    "durationMs": 360,
+    "durationMs": 272,
     "supplier": "Zara",
     "title": "CRAB PRINT KNIT PLAYSUIT",
     "price": 159,
@@ -205,7 +352,7 @@
     "name": "Centrepoint",
     "url": "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE",
     "success": true,
-    "durationMs": 2534,
+    "durationMs": 2327,
     "supplier": "Centrepoint",
     "title": "Juniors Round Neck Short Sleeve T-shirt and Dungaree Set with Alligator Applique",
     "price": 45,

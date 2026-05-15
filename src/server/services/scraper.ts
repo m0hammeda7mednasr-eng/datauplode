@@ -1,3 +1,4 @@
+import "dotenv/config";
 import * as cheerio from "cheerio";
 import axios from "axios";
 import { execFile } from "node:child_process";
@@ -3305,6 +3306,123 @@ async function enrichLeftiesProductWithReader(
   });
 }
 
+type LeftiesStoreConfig = {
+  storeId: number;
+  catalogId: number;
+  languageId: number;
+};
+
+let leftiesStoreConfigCache:
+  | {
+      expiresAt: number;
+      stores: any[];
+    }
+  | undefined;
+
+function leftiesCountryCodeFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const firstPathPart = parsed.pathname
+      .split("/")
+      .filter(Boolean)[0]
+      ?.toLowerCase();
+    const countryAliases: Record<string, string> = {
+      ae: "AE",
+      xe: "AE",
+      eg: "EG",
+      sa: "SA",
+      qa: "QA",
+      kw: "KW",
+      bh: "BH",
+      om: "OM",
+      jo: "JO",
+      ma: "MA",
+      tn: "TN",
+      tr: "TR",
+      mx: "MX",
+      it: "IT",
+      es: "ES",
+      pt: "PT",
+      fr: "FR",
+      ro: "RO",
+    };
+
+    return countryAliases[firstPathPart || ""] || "AE";
+  } catch {
+    return "AE";
+  }
+}
+
+function leftiesLanguageCodeFromUrl(url: string): string {
+  try {
+    const pathParts = new URL(url).pathname.split("/").filter(Boolean);
+    const maybeLanguage = pathParts[1]?.toLowerCase();
+    return /^[a-z]{2}$/.test(maybeLanguage) ? maybeLanguage : "en";
+  } catch {
+    return "en";
+  }
+}
+
+async function fetchLeftiesStores(): Promise<any[]> {
+  const now = Date.now();
+  if (leftiesStoreConfigCache && leftiesStoreConfigCache.expiresAt > now) {
+    return leftiesStoreConfigCache.stores;
+  }
+
+  const { data } = await axios.get(
+    "https://www.lefties.com/itxrest/2/catalog/store?brandId=9&appId=1",
+    {
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        "User-Agent": browserHeaders["User-Agent"],
+        Referer: "https://www.lefties.com/",
+      },
+      timeout: 20000,
+    },
+  );
+
+  const stores = Array.isArray(data?.stores) ? data.stores : [];
+  if (!stores.length) throw new Error("Lefties store catalog was empty");
+
+  leftiesStoreConfigCache = {
+    expiresAt: now + 24 * 60 * 60 * 1000,
+    stores,
+  };
+  return stores;
+}
+
+async function getLeftiesStoreConfig(url: string): Promise<LeftiesStoreConfig> {
+  const stores = await fetchLeftiesStores();
+  const countryCode = leftiesCountryCodeFromUrl(url);
+  const languageCode = leftiesLanguageCodeFromUrl(url);
+  const store =
+    stores.find((entry: any) => entry?.countryCode === countryCode) ||
+    stores.find((entry: any) => entry?.countryCode === "AE") ||
+    stores.find((entry: any) => entry?.id === 94009000);
+  if (!store?.id) throw new Error(`Lefties store not found for ${countryCode}`);
+
+  const catalog =
+    (store.catalogs || []).find((entry: any) => entry?.type === 1) ||
+    (store.catalogs || []).find((entry: any) => entry?.id);
+  if (!catalog?.id) {
+    throw new Error(`Lefties catalog not found for ${countryCode}`);
+  }
+
+  const language =
+    (store.supportedLanguages || []).find(
+      (entry: any) => cleanText(entry?.code).toLowerCase() === languageCode,
+    ) ||
+    (store.supportedLanguages || []).find(
+      (entry: any) => cleanText(entry?.code).toLowerCase() === "en",
+    );
+
+  return {
+    storeId: Number(store.id),
+    catalogId: Number(catalog.id),
+    languageId: Number(language?.id || store.storeDefaultLanguageId || -1),
+  };
+}
+
 function extractGenericProductFromHtml(
   html: string,
   url: string,
@@ -4813,7 +4931,8 @@ export class LeftiesScraper implements SupplierScraper {
       const productId = extractInditexProductId(url);
       if (!productId) throw new Error("No Lefties product id found in URL");
 
-      const apiUrl = `https://www.lefties.com/itxrest/3/catalog/store/94009000/90009053/productsArray?productIds=${encodeURIComponent(productId)}&languageId=-1&appId=1`;
+      const config = await getLeftiesStoreConfig(url);
+      const apiUrl = `https://www.lefties.com/itxrest/3/catalog/store/${config.storeId}/${config.catalogId}/productsArray?productIds=${encodeURIComponent(productId)}&languageId=${config.languageId}&appId=1`;
       const { data } = await axios.get(apiUrl, {
         headers: {
           Accept: "application/json, text/plain, */*",
@@ -4944,6 +5063,24 @@ export class SheinScraper implements SupplierScraper {
     return hostMatches(url, ["shein.com"]);
   }
 
+  scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const product = parseGenericReaderMarkdown(snapshotText, url);
+    return normalizeProductOptionsAndVariants({
+      ...product,
+      source: {
+        ...product.source,
+        supplier: "SHEIN",
+        productId: product.source.productId || extractSheinProductId(url),
+      },
+      brand:
+        product.brand && product.brand !== "Generic" ? product.brand : "SHEIN",
+      raw: {
+        ...(product.raw || {}),
+        pastedSnapshotFallback: true,
+      },
+    });
+  }
+
   async scrape(url: string): Promise<NormalizedProduct> {
     try {
       let html = await fetchHtml(url, {
@@ -4972,6 +5109,39 @@ export class SheinScraper implements SupplierScraper {
             html = curlHtml;
             ssrData = curlSsrData;
             rawData = curlRawData;
+          }
+        } catch {}
+      }
+
+      if (
+        isSheinRiskChallenge(html) &&
+        !ssrData &&
+        !rawData &&
+        activeManagedBypassProviders().length > 0
+      ) {
+        try {
+          const bypassHtml = await fetchHtmlViaManagedBypass(url, {
+            deviceType: "mobile",
+            jsRender: true,
+            premium: true,
+          });
+          const bypassSsrData = parseWindowAssignedJson(
+            bypassHtml,
+            "window.goodsDetailv2SsrData",
+          );
+          const bypassRawData = parseWindowAssignedJson(
+            bypassHtml,
+            "window.gbRawData",
+          );
+
+          if (
+            !isSheinRiskChallenge(bypassHtml) ||
+            bypassSsrData ||
+            bypassRawData
+          ) {
+            html = bypassHtml;
+            ssrData = bypassSsrData;
+            rawData = bypassRawData;
           }
         } catch {}
       }
@@ -5125,6 +5295,23 @@ export class SheinScraper implements SupplierScraper {
     } catch (error: any) {
       const fallback = buildSheinRiskFallbackProduct(url, error.message);
       if (fallback) return fallback;
+
+      if (
+        /risk challenge|did not expose SSR product JSON|HTTP 403|captcha|SecurityCompromiseError/i.test(
+          error.message,
+        )
+      ) {
+        throw new ScraperError(
+          "SHEIN blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.",
+          {
+            code: "SOURCE_BLOCKED",
+            status: 422,
+            supplier: "SHEIN",
+            retryWithSnapshot: true,
+            details: [error.message],
+          },
+        );
+      }
 
       throw new Error(`Failed to scrape SHEIN: ${error.message}`);
     }
@@ -7372,6 +7559,177 @@ export class NextScraper implements SupplierScraper {
   }
 }
 
+function extractAdidasProductId(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const fromPath = parsed.pathname.match(/\/([A-Z0-9]{5,})\.html/i)?.[1];
+    if (fromPath) return fromPath.toUpperCase();
+  } catch {}
+
+  const fallback = getProductIdFromUrl(url)?.replace(/\.html$/i, "");
+  return fallback ? fallback.toUpperCase() : undefined;
+}
+
+function adidasQuickViewEndpoint(url: string, productId: string): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const language =
+      parsed.pathname.split("/").filter(Boolean)[0]?.toLowerCase() || "en";
+
+    if (host.includes("adidas.ae")) {
+      const locale = language === "ar" ? "ar_AE" : "en_AE";
+      return `https://www.adidas.ae/on/demandware.store/Sites-adidas-AE-Site/${locale}/Product-ShowQuickView?pid=${encodeURIComponent(productId)}`;
+    }
+
+    if (host.includes("adidas.com")) {
+      return `https://www.adidas.com/on/demandware.store/Sites-adidas-US-Site/en_US/Product-ShowQuickView?pid=${encodeURIComponent(productId)}`;
+    }
+  } catch {}
+
+  return `https://www.adidas.ae/on/demandware.store/Sites-adidas-AE-Site/en_AE/Product-ShowQuickView?pid=${encodeURIComponent(productId)}`;
+}
+
+async function fetchAdidasQuickViewProduct(url: string): Promise<any> {
+  const productId = extractAdidasProductId(url);
+  if (!productId) throw new Error("No Adidas product id found in URL");
+
+  const response = await axios.get(adidasQuickViewEndpoint(url, productId), {
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en-AE,en;q=0.9",
+      "User-Agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+      Referer: url,
+    },
+    timeout: 20000,
+    responseType: "text",
+    validateStatus: (status: number) => status < 500,
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Adidas quick view returned HTTP ${response.status}`);
+  }
+
+  const data =
+    typeof response.data === "string"
+      ? parseJsonMaybeEncoded(response.data)
+      : response.data;
+  const product = data?.product;
+  if (!product?.id || !product?.productName) {
+    throw new Error("Adidas quick view did not expose product data");
+  }
+
+  return product;
+}
+
+function normalizeAdidasQuickViewProduct(
+  product: any,
+  url: string,
+): NormalizedProduct {
+  const title = cleanText(product?.productName);
+  const price =
+    parsePrice(
+      product?.price?.sales?.value ||
+        product?.price?.sales?.decimalPrice ||
+        product?.price?.sales?.formatted,
+    ) || 0;
+  const currency =
+    cleanText(product?.price?.sales?.currency) ||
+    detectCurrency(product?.price?.sales?.formatted, "AED");
+  const color = cleanColorOptionValue(product?.color);
+  const images: NormalizedProduct["images"] = [];
+
+  for (const image of [
+    ...(product?.images?.zoom || []),
+    ...(product?.images?.large || []),
+    ...(product?.images?.small || []),
+  ]) {
+    pushImage(images, image?.url, url, image?.alt || image?.title || title);
+  }
+
+  const sizeAttribute = (product?.variationAttributes || []).find(
+    (attribute: any) =>
+      /^size$/i.test(cleanText(attribute?.id || attribute?.attributeId)) ||
+      /^size$/i.test(cleanText(attribute?.displayName)),
+  );
+  const sizeValues = (sizeAttribute?.values || [])
+    .map((value: any) => ({
+      id: cleanText(value?.id || value?.value || value?.displayValue),
+      label: cleanProductOptionValue(
+        "Size",
+        value?.displayValue || value?.description || value?.value,
+      ),
+      selectable: value?.selectable !== false,
+      attId: cleanText(value?.attID),
+      raw: value,
+    }))
+    .filter((value: any) => value.label);
+  const uniqueSizes = uniqueCleanValues(sizeValues.map((value: any) => value.label));
+  const description = uniqueCleanValues([
+    product?.shortDescription,
+    product?.longDescription,
+    ...(product?.bullets || []),
+  ]).join("\n");
+  const productId =
+    extractAdidasProductId(url) || cleanText(product?.canonical || product?.id);
+  const defaultAvailable =
+    product?.available === true ||
+    sizeValues.some((value: any) => value.selectable);
+
+  return normalizeProductOptionsAndVariants({
+    source: {
+      supplier: "Adidas",
+      url,
+      productId,
+    },
+    title,
+    description,
+    brand: cleanText(product?.brand) || "Adidas",
+    currency,
+    price,
+    images: images.map((image, position) => ({ ...image, position })),
+    options: [
+      ...(color ? [{ name: "Color", values: [color] }] : []),
+      ...(uniqueSizes.length ? [{ name: "Size", values: uniqueSizes }] : []),
+    ],
+    variants: sizeValues.length
+      ? sizeValues.map((size: any) => ({
+          sourceVariantId:
+            size.attId || `${productId || product?.id}-${slugOption(size.label)}`,
+          sku: size.attId || `${productId || product?.id}-${size.id}`,
+          color,
+          size: size.label,
+          price,
+          currency,
+          optionValues: buildVariantOptionValues(color, size.label),
+          available: size.selectable,
+          stockStatus: size.selectable
+            ? ("in_stock" as const)
+            : ("out_of_stock" as const),
+          imageUrl: images[0]?.url,
+          raw: size.raw,
+        }))
+      : [
+          {
+            sourceVariantId: productId || product?.id || "default",
+            sku: productId || product?.id,
+            color,
+            price,
+            currency,
+            optionValues: buildVariantOptionValues(color),
+            available: defaultAvailable,
+            stockStatus: defaultAvailable ? "in_stock" : "out_of_stock",
+            imageUrl: images[0]?.url,
+            raw: product,
+          },
+        ],
+    raw: {
+      adidasQuickView: product,
+    },
+  });
+}
+
 export class AdidasScraper implements SupplierScraper {
   canHandle(url: string): boolean {
     return hostMatches(url, ["adidas.ae", "adidas.com"]);
@@ -7397,6 +7755,13 @@ export class AdidasScraper implements SupplierScraper {
 
   async scrape(url: string): Promise<NormalizedProduct> {
     const errors: string[] = [];
+
+    try {
+      const product = await fetchAdidasQuickViewProduct(url);
+      return normalizeAdidasQuickViewProduct(product, url);
+    } catch (error: any) {
+      errors.push(`quick view: ${error.message}`);
+    }
 
     // Try managed bypass first for Adidas (they block automated access)
     if (activeManagedBypassProviders().length > 0) {
