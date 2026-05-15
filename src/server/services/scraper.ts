@@ -2828,7 +2828,26 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     return hostMatches(url, ['marksandspencerme.com']);
   }
 
+  scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const product = parseGenericReaderMarkdown(snapshotText, url);
+    return normalizeProductOptionsAndVariants({
+      ...product,
+      source: {
+        supplier: 'Marks & Spencer',
+        url,
+        productId: getProductIdFromUrl(url),
+      },
+      brand: product.brand && product.brand !== 'Generic' ? product.brand : 'Marks & Spencer',
+      raw: {
+        ...(product.raw || {}),
+        pastedSnapshotFallback: true,
+      },
+    });
+  }
+
   async scrape(url: string): Promise<NormalizedProduct> {
+    const errors: string[] = [];
+
     try {
       const html = await fetchHtml(url, {
         'Accept-Language': 'en-AE,en;q=0.9',
@@ -2938,8 +2957,52 @@ export class MarksAndSpencerScraper implements SupplierScraper {
         },
       };
     } catch (error: any) {
-      throw new Error(`Failed to scrape Marks & Spencer: ${error.message}`);
+      errors.push(`direct: ${error.message}`);
     }
+
+    try {
+      const html = await fetchHtmlWithCurl(url, {
+        'Accept-Language': 'en-AE,en;q=0.9',
+        Referer: 'https://www.marksandspencerme.com/en-ae/',
+      });
+      return extractGenericProductFromHtml(html, url, 'Marks & Spencer');
+    } catch (error: any) {
+      errors.push(`curl: ${error.message}`);
+    }
+
+    try {
+      const markdown = await fetchReaderMarkdown(url);
+      return normalizeProductOptionsAndVariants({
+        ...parseGenericReaderMarkdown(markdown, url),
+        source: {
+          supplier: 'Marks & Spencer',
+          url,
+          productId: getProductIdFromUrl(url),
+        },
+        brand: 'Marks & Spencer',
+      });
+    } catch (error: any) {
+      errors.push(`reader: ${error.message}`);
+    }
+
+    const blockedSignals = errors.filter(error =>
+      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+    ).length;
+
+    if (blockedSignals >= Math.max(1, errors.length - 1)) {
+      throw new ScraperError(
+        'Marks & Spencer blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.',
+        {
+          code: 'SOURCE_BLOCKED',
+          status: 422,
+          supplier: 'Marks & Spencer',
+          retryWithSnapshot: true,
+          details: errors,
+        },
+      );
+    }
+
+    throw new Error(`Failed to scrape Marks & Spencer (${errors.join('; ')})`);
   }
 
   async checkAvailability(url: string): Promise<AvailabilitySnapshot> {
@@ -4853,6 +4916,23 @@ export class CentrepointScraper implements SupplierScraper {
     return hostMatches(url, ['centrepointstores.com']);
   }
 
+  scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const product = parseGenericReaderMarkdown(snapshotText, url);
+    return normalizeProductOptionsAndVariants({
+      ...product,
+      source: {
+        supplier: 'Centrepoint',
+        url,
+        productId: getProductIdFromUrl(url),
+      },
+      brand: product.brand && product.brand !== 'Generic' ? product.brand : 'Centrepoint',
+      raw: {
+        ...(product.raw || {}),
+        pastedSnapshotFallback: true,
+      },
+    });
+  }
+
   async scrape(url: string): Promise<NormalizedProduct> {
     const errors: string[] = [];
 
@@ -4889,6 +4969,23 @@ export class CentrepointScraper implements SupplierScraper {
       };
     } catch (error: any) {
       errors.push(`reader: ${error.message}`);
+    }
+
+    const blockedSignals = errors.filter(error =>
+      /HTTP 403|Cloudflare|security verification|access-denied|permission to access|Forbidden|no usable product html|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+    ).length;
+
+    if (blockedSignals >= Math.max(1, errors.length - 1)) {
+      throw new ScraperError(
+        'Centrepoint blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.',
+        {
+          code: 'SOURCE_BLOCKED',
+          status: 422,
+          supplier: 'Centrepoint',
+          retryWithSnapshot: true,
+          details: errors,
+        },
+      );
     }
 
     throw new Error(`Failed to scrape Centrepoint (${errors.join('; ')})`);
