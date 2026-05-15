@@ -1165,6 +1165,43 @@ function inferColorFromHmUrl(url: string): string | undefined {
   }
 }
 
+function hmStorefrontConfig(url: string): {
+  endpoint: string;
+  websiteCode: string;
+  storeViewCode: string;
+  storeCode: string;
+  language: string;
+} {
+  let host = 'ae.hm.com';
+  let country = 'ae';
+  let language = 'en';
+
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname.toLowerCase();
+    const hostCountry = host.split('.')[0];
+    if (/^[a-z]{2}$/.test(hostCountry)) country = hostCountry;
+    language = parsed.pathname.split('/').filter(Boolean)[0] || language;
+  } catch {}
+
+  const storefronts: Record<string, { websiteCode: string; storeViewCode: string; storeCode: string }> = {
+    ae: { websiteCode: 'are', storeViewCode: 'are_en', storeCode: 'hm_uae_store' },
+    eg: { websiteCode: 'egy', storeViewCode: 'egy_en', storeCode: 'hm_egypt_store' },
+  };
+  const storefront = storefronts[country] || storefronts.ae;
+  const storeViewCode = language === 'ar'
+    ? storefront.storeViewCode.replace(/_en$/, '_ar')
+    : storefront.storeViewCode;
+
+  return {
+    endpoint: `https://${host}/graphql`,
+    websiteCode: storefront.websiteCode,
+    storeViewCode,
+    storeCode: storefront.storeCode,
+    language,
+  };
+}
+
 function hmGraphqlPriceAmount(value: any): { price: number; currency: string } {
   const amount = value?.final?.amount || value?.regular?.amount || value?.amount || value;
   return {
@@ -1215,6 +1252,7 @@ function pushHmAssetImages(images: NormalizedProduct['images'], product: any, ur
 }
 
 async function fetchHmGraphqlProduct(url: string, sku: string): Promise<any> {
+  const storefront = hmStorefrontConfig(url);
   const query = `
     query GetProduct($skus:[String]) {
       products(skus:$skus) {
@@ -1255,23 +1293,28 @@ async function fetchHmGraphqlProduct(url: string, sku: string): Promise<any> {
     }
   `;
 
-  const response = await axios.post('https://ae.hm.com/graphql', {
+  const response = await axios.post(storefront.endpoint, {
     query,
     variables: { skus: [sku] },
   }, {
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
-      'Magento-Website-Code': 'are',
-      'Magento-Store-View-Code': 'are_en',
-      'Magento-Store-Code': 'hm_uae_store',
+      'Magento-Website-Code': storefront.websiteCode,
+      'Magento-Store-View-Code': storefront.storeViewCode,
+      'Magento-Store-Code': storefront.storeCode,
       'Magento-Customer-Group': '0',
-      'Store': 'are_en',
+      'Store': storefront.storeViewCode,
       'User-Agent': browserHeaders['User-Agent'],
       'Referer': url,
     },
     timeout: 30000,
   });
+
+  const errors = response.data?.errors || [];
+  if (errors.length > 0) {
+    throw new Error(errors[0]?.message || 'H&M GraphQL returned an error');
+  }
 
   return response.data?.data?.products?.[0];
 }
@@ -2647,9 +2690,10 @@ function extractGenericProductFromHtml(html: string, url: string, supplier = 'Ge
     $('.caption [itemprop="name"]').first().text() ||
     $('h4.title').first().text() ||
     $('h1').first().text() ||
-    $('[class*="title"]').first().text() ||
     $('[itemprop="name"]').first().text() ||
     $('meta[property="og:title"]').attr('content') ||
+    $('meta[name="twitter:title"]').attr('content') ||
+    $('[class*="title"]').first().text() ||
     $('title').text()
   );
 
@@ -2680,6 +2724,7 @@ function extractGenericProductFromHtml(html: string, url: string, supplier = 'Ge
   [
     $('meta[property="product:image"]').attr('content'),
     $('meta[property="og:image"]').attr('content'),
+    $('meta[name="twitter:image"]').attr('content'),
     $('meta[property="twitter:image:src"]').attr('content'),
   ].forEach(imageUrl => pushImage(images, imageUrl, url, title));
   const additionalImageLinks = String($('meta[property="product:additional_image_link"]').attr('content') || '');
@@ -2702,6 +2747,8 @@ function extractGenericProductFromHtml(html: string, url: string, supplier = 'Ge
   const priceText =
     offer?.price ||
     $('meta[property="product:price:amount"]').attr('content') ||
+    $('meta[property="product:price-amount"]').attr('content') ||
+    $('meta[name="twitter:data1"]').attr('content') ||
     $('[itemprop="price"]').first().attr('content') ||
     $('[itemprop="price"]').first().text() ||
     $('[aria-label="price" i]').first().text() ||
@@ -2712,6 +2759,7 @@ function extractGenericProductFromHtml(html: string, url: string, supplier = 'Ge
   const currencyText =
     offer?.priceCurrency ||
     $('meta[property="product:price:currency"]').attr('content') ||
+    $('meta[property="product:price-currency"]').attr('content') ||
     $('[itemprop="priceCurrency"]').first().attr('content') ||
     priceText;
 
@@ -5109,8 +5157,17 @@ function parseGenericReaderMarkdown(markdown: string, url: string): NormalizedPr
   }
 
   const lines = markdown.split(/\r?\n/).map(line => cleanText(line)).filter(Boolean);
+  const ignoredSnapshotTitleLine = /^(?:Home|Sign in|Search|Basket|Cart|Add to Basket|Add to Cart|Description|Product Details|Details|Size|Color|Colour)$/i;
   const titleLine = lines.find(line => /^#\s+/.test(line)) ||
     lines.find(line => /^Title:\s+/i.test(line)) ||
+    lines.find(line =>
+      line.length > 5 &&
+      !ignoredSnapshotTitleLine.test(line) &&
+      !/^colou?r\s*:/i.test(line) &&
+      !looksLikeCurrencyText(line) &&
+      !/^(?:\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|XS|S|M|L|XL|XXL)$/i.test(line) &&
+      !/^https?:\/\//i.test(line)
+    ) ||
     '';
   const title = cleanText(titleLine.replace(/^#\s+/, '').replace(/^Title:\s*/i, ''));
   if (!title || /access denied|just a moment|page not found/i.test(title)) {
@@ -5136,6 +5193,13 @@ function parseGenericReaderMarkdown(markdown: string, url: string): NormalizedPr
     ? lines.slice(descriptionStart + 1, descriptionStart + 12).join(' ')
     : cleanText(lines.slice(1, 8).filter(line => !looksLikeCurrencyText(line)).join(' '));
   const productId = getProductIdFromUrl(url);
+  const colorIndex = lines.findIndex(line => /^colou?r\s*:/i.test(line));
+  const color = colorIndex >= 0
+    ? cleanColorOptionValue(lines[colorIndex].split(':').slice(1).join(':') || lines[colorIndex + 1])
+    : undefined;
+  const sizeValues = uniqueCleanValues(lines.filter(line =>
+    /^(?:\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|XS|S|M|L|XL|XXL)$/i.test(line)
+  ));
 
   return normalizeProductOptionsAndVariants({
     source: {
@@ -5149,14 +5213,30 @@ function parseGenericReaderMarkdown(markdown: string, url: string): NormalizedPr
     currency,
     price,
     images: images.map((image, position) => ({ ...image, position })),
-    options: [{ name: 'Default', values: ['Default'] }],
-    variants: [{
-      sourceVariantId: productId || 'default',
-      price,
-      currency,
-      available: true,
-      stockStatus: 'unknown',
-    }],
+    options: [
+      ...(color ? [{ name: 'Color', values: [color] }] : []),
+      ...(sizeValues.length ? [{ name: 'Size', values: sizeValues }] : [{ name: 'Default', values: ['Default'] }]),
+    ],
+    variants: sizeValues.length
+      ? sizeValues.map(size => ({
+          sourceVariantId: `${productId || 'default'}-${slugOption(size)}`,
+          color,
+          size,
+          price,
+          currency,
+          optionValues: buildVariantOptionValues(color, size),
+          available: true,
+          stockStatus: 'unknown' as const,
+        }))
+      : [{
+          sourceVariantId: productId || 'default',
+          color,
+          price,
+          currency,
+          optionValues: buildVariantOptionValues(color),
+          available: true,
+          stockStatus: 'unknown',
+        }],
     raw: {
       readerFallback: true,
       extractedAt: new Date().toISOString(),
@@ -5356,6 +5436,23 @@ export class HmScraper implements SupplierScraper {
     return hostMatches(url, ['ae.hm.com', 'hm.com']);
   }
 
+  scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const product = parseGenericReaderMarkdown(snapshotText, url);
+    return {
+      ...product,
+      source: {
+        ...product.source,
+        supplier: 'H&M',
+        productId: product.source.productId || getProductIdFromUrl(url),
+      },
+      brand: product.brand && product.brand !== 'Generic' ? product.brand : 'H&M',
+      raw: {
+        ...(product.raw || {}),
+        pastedSnapshotFallback: true,
+      },
+    };
+  }
+
   async scrape(url: string): Promise<NormalizedProduct> {
     const html = await fetchHtml(url, {
       'Accept-Language': 'en-AE,en;q=0.9',
@@ -5374,8 +5471,25 @@ export class HmScraper implements SupplierScraper {
     try {
       const product = await fetchHmGraphqlProduct(url, sku);
       if (!product) return fallback;
-      return normalizeProductOptionsAndVariants(normalizeHmGraphqlProduct(product, fallback, url));
+      const normalized = normalizeProductOptionsAndVariants(normalizeHmGraphqlProduct(product, fallback, url));
+      if (normalized.price <= 0 || /client challenge|metadata/i.test(normalized.title)) {
+        throw new Error('H&M GraphQL did not expose usable product data');
+      }
+      return normalized;
     } catch (error: any) {
+      if (fallback.price <= 0 || /client challenge|metadata/i.test(fallback.title)) {
+        throw new ScraperError(
+          'H&M did not expose usable product data to server analysis. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.',
+          {
+            code: 'SOURCE_BLOCKED',
+            status: 422,
+            supplier: 'H&M',
+            retryWithSnapshot: true,
+            details: [error.message],
+          },
+        );
+      }
+
       return normalizeProductOptionsAndVariants({
         ...fallback,
         source: {
