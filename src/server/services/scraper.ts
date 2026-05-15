@@ -548,23 +548,46 @@ function buildNextBrowserHeaders(url: string): Record<string, string> {
   };
 }
 
+function buildNextRegionalUrls(url: string, styleId: string, productId: string): string[] {
+  const normalized = stripUrlHash(url);
+  const aeUrl = `https://www.next.ae/en/style/${styleId}/${productId}`;
+  const usUrl = `https://www.next.us/en/style/${styleId}/${productId}`;
+  const ukUrl = `https://www.next.co.uk/style/${styleId}/${productId}`;
+  const egUrl = `https://www.nextdirect.com/eg/en/style/${styleId}/${productId}`;
+  const egArUrl = `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`;
+
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('next.ae')) return [normalized, aeUrl, ukUrl, usUrl, egUrl];
+    if (host.includes('next.us')) return [normalized, usUrl, ukUrl, aeUrl, egUrl];
+    if (host.includes('nextdirect.com')) return [normalized, egUrl, egArUrl, ukUrl, aeUrl];
+    if (host.includes('next.co.uk') || host.includes('next.ie')) return [normalized, ukUrl, aeUrl, usUrl, egUrl];
+  } catch {}
+
+  return [normalized, aeUrl, ukUrl, usUrl, egUrl, egArUrl];
+}
+
+function nextScrapeMatchesRequestedRegion(url: string, pageUrl: string, currency: string): boolean {
+  try {
+    const requestedHost = new URL(url).hostname.toLowerCase();
+    const pageHost = new URL(pageUrl).hostname.toLowerCase();
+    if (requestedHost === pageHost) return true;
+    return currency === defaultNextCurrencyForUrl(url);
+  } catch {
+    return true;
+  }
+}
+
 function buildNextReaderUrls(url: string): string[] {
   const ids = getNextStyleIds(url);
-  const urls = [stripUrlHash(url)];
+  if (!ids) return [stripUrlHash(url)];
 
-  if (ids) {
-    const { styleId, productId } = ids;
-    urls.push(
-      `https://www.next.co.uk/style/${styleId}/${productId}`,
-      `https://www.next.co.uk/en/style/${styleId}/${productId}`,
-      `https://www.next.ie/en/style/${styleId}/${productId}`,
-      `https://www.next.us/en/style/${styleId}/${productId}`,
-      `https://www.nextdirect.com/eg/en/style/${styleId}/${productId}`,
-      `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`,
-    );
-  }
-
-  return [...new Set(urls)];
+  const { styleId, productId } = ids;
+  return [...new Set([
+    ...buildNextRegionalUrls(url, styleId, productId),
+    `https://www.next.ie/en/style/${styleId}/${productId}`,
+    `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`,
+  ])];
 }
 
 function buildNextHtmlFallbackUrls(url: string): string[] {
@@ -573,14 +596,10 @@ function buildNextHtmlFallbackUrls(url: string): string[] {
 
   const { styleId, productId } = ids;
   return [...new Set([
-    `https://www.next.co.uk/style/${styleId}/${productId}`,
-    `https://www.next.co.uk/en/style/${styleId}/${productId}`,
-    stripUrlHash(url),
-    `https://www.next.ie/en/style/${styleId}/${productId}`,
-    `https://www.next.us/en/style/${styleId}/${productId}`,
+    ...buildNextRegionalUrls(url, styleId, productId),
     `https://www.next.us/en/style/${styleId}/${productId}?json=true`,
-    `https://www.nextdirect.com/eg/en/style/${styleId}/${productId}`,
-    `https://www.nextdirect.com/eg/ar/style/${styleId}/${productId}`,
+    `https://www.next.co.uk/en/style/${styleId}/${productId}`,
+    `https://www.next.ie/en/style/${styleId}/${productId}`,
   ])];
 }
 
@@ -4322,7 +4341,10 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
   const fallbackPrice = parsePrice(productData?.offers?.price || $('[data-testid="product-price"]').first().text());
   const price = priceValues.length ? Math.min(...priceValues) : fallbackPrice;
   const maxPrice = priceValues.length ? Math.max(...priceValues) : price;
-  const currency = detectCurrency(offerList[0]?.priceCurrency || $('[data-testid="product-price"]').first().text(), offerList[0]?.priceCurrency || 'USD');
+  const currency = detectCurrency(
+    offerList[0]?.priceCurrency || $('[data-testid="product-price"]').first().text(),
+    defaultNextCurrencyForUrl(url) || offerList[0]?.priceCurrency || 'USD',
+  );
   const color = parseNextColourFromHtml($, title);
   if (color) {
     images.forEach(image => {
@@ -4830,9 +4852,16 @@ export class NextScraper implements SupplierScraper {
           response = await axios.get(directUrl, requestOptions);
           
           if (response.status === 200) {
-            console.log(`Successfully scraped Next using UA: ${uaInfo.ua.substring(0, 30)}...`);
             try {
-              return await enrichNextProductWithReaderColorways(extractNextProductFromHtml(response.data, url, directUrl), url);
+              const product = extractNextProductFromHtml(response.data, url, directUrl);
+              if (!nextScrapeMatchesRequestedRegion(url, directUrl, product.currency)) {
+                lastError = new Error(`Regional mismatch (${product.currency} from ${directUrl})`);
+                response = null;
+                continue;
+              }
+
+              console.log(`Successfully scraped Next using UA: ${uaInfo.ua.substring(0, 30)}...`);
+              return await enrichNextProductWithReaderColorways(product, url);
             } catch (htmlError) {
               lastError = htmlError;
               response = null;
@@ -4858,18 +4887,7 @@ export class NextScraper implements SupplierScraper {
           try {
             console.log(`Direct Next scraping failed, trying HTML fallback: ${htmlUrl}`);
             const htmlResponse = await axios.get(htmlUrl, {
-              headers: {
-                ...browserHeaders,
-                'accept-language': htmlUrl.includes('nextdirect.com/eg/ar') ? 'ar-EG,ar;q=0.9,en;q=0.8' : 'en-US,en;q=0.9',
-                'sec-ch-ua': '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'none',
-                'sec-fetch-user': '?1',
-                'cookie': htmlUrl.includes('next.us') ? 'Country=us; Language=en; OptanonAlertBoxClosed=2024-01-01T00:00:00.000Z;' : 'Country=eg; Language=en; OptanonAlertBoxClosed=2024-01-01T00:00:00.000Z;',
-              },
+              headers: buildNextBrowserHeaders(htmlUrl),
               timeout: 20000,
               validateStatus: (status: number) => status < 500,
             });
@@ -4878,26 +4896,48 @@ export class NextScraper implements SupplierScraper {
               throw new Error(`HTTP ${htmlResponse.status}`);
             }
 
-            return await enrichNextProductWithReaderColorways(extractNextProductFromHtml(htmlResponse.data, url, htmlUrl), url);
+            const product = extractNextProductFromHtml(htmlResponse.data, url, htmlUrl);
+            if (!nextScrapeMatchesRequestedRegion(url, htmlUrl, product.currency)) {
+              throw new Error(`Regional mismatch (${product.currency} from ${htmlUrl})`);
+            }
+
+            return await enrichNextProductWithReaderColorways(product, url);
           } catch (htmlError: any) {
             htmlErrors.push(`${htmlUrl}: ${htmlError.message}`);
+          }
+
+          try {
+            console.log(`Direct Next scraping failed, trying curl HTML fallback: ${htmlUrl}`);
+            const html = await fetchHtmlWithCurl(htmlUrl, buildNextBrowserHeaders(htmlUrl));
+            const product = extractNextProductFromHtml(html, url, htmlUrl);
+            if (!nextScrapeMatchesRequestedRegion(url, htmlUrl, product.currency)) {
+              throw new Error(`Regional mismatch (${product.currency} from ${htmlUrl})`);
+            }
+
+            return await enrichNextProductWithReaderColorways(product, url);
+          } catch (curlError: any) {
+            htmlErrors.push(`${htmlUrl} (curl): ${curlError.message}`);
           }
         }
 
         const readerErrors: string[] = [];
 
-        for (const readerUrl of buildNextReaderUrls(url)) {
-          try {
-            console.log(`Direct Next scraping failed, trying Reader fallback: ${readerUrl}`);
-            const markdown = await fetchReaderMarkdown(readerUrl);
-            return parseNextReaderMarkdown(markdown, url, readerUrl);
-          } catch (readerError: any) {
-            readerErrors.push(`${readerUrl}: ${readerError.message}`);
+        try {
+          console.log('Direct Next scraping failed, trying Reader fallback');
+          const reader = await fetchNextReaderMarkdown(url);
+          if (reader) {
+            return parseNextReaderMarkdown(reader.markdown, url, reader.readerUrl);
           }
+          readerErrors.push('reader: no usable markdown returned');
+        } catch (readerError: any) {
+          readerErrors.push(`reader: ${readerError.message}`);
         }
 
         const failureDetails = [`direct page: ${directError}`, ...htmlErrors, ...readerErrors];
-        if (isNextBlockedFailure(failureDetails)) {
+        const blockedByNext = isNextBlockedFailure(failureDetails) ||
+          failureDetails.every(error => /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|no usable markdown)/i.test(error));
+
+        if (blockedByNext) {
           throw nextBlockedScraperError(failureDetails);
         }
 
