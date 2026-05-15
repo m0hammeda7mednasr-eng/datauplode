@@ -4,7 +4,18 @@ function normalizeApiBaseUrl(value?: string) {
   const trimmed = value?.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
 
-  return trimmed.replace(/\/api$/i, '');
+  try {
+    const url = new URL(trimmed, window.location.origin);
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      url.pathname = '';
+      url.search = '';
+      url.hash = '';
+    }
+
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return trimmed.replace(/\/api(?:\/.*)?$/i, '');
+  }
 }
 
 function extractMessage(value: unknown): string | null {
