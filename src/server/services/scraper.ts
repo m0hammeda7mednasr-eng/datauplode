@@ -4142,39 +4142,105 @@ const MAX_FASHION_USER_AGENTS = [
   'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
 ];
 
+function maxFashionCookieForUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const country = parts[0] || 'ae';
+    const lang = parts[1] || 'en';
+    return `concept=max; country=${country}; lang=${lang}; device=desktop;`;
+  } catch {
+    return 'concept=max; country=ae; lang=en; device=desktop;';
+  }
+}
+
+function buildMaxFashionHeaders(url: string, userAgent = browserHeaders['User-Agent']): Record<string, string> {
+  return {
+    ...browserHeaders,
+    'User-Agent': userAgent,
+    'Accept-Language': 'en-AE,en;q=0.9',
+    Referer: 'https://www.maxfashion.com/ae/en/',
+    Cookie: maxFashionCookieForUrl(url),
+  };
+}
+
+function buildMaxFashionCurlHeaders(url: string): Record<string, string> {
+  return {
+    ...buildMaxFashionHeaders(url),
+    'Accept-Encoding': 'gzip, deflate',
+  };
+}
+
+function buildMaxFashionCandidateUrls(url: string): string[] {
+  const normalized = stripUrlHash(url);
+  const candidates = new Set<string>();
+
+  try {
+    const parsed = new URL(normalized);
+    const pathname = parsed.pathname
+      .replace(/withtshirt/gi, 'with-t-shirt')
+      .replace(/with-tshirt/gi, 'with-t-shirt')
+      .replace(/tshirt/gi, 't-shirt');
+
+    parsed.pathname = pathname;
+    candidates.add(parsed.toString());
+  } catch {}
+
+  candidates.add(normalized);
+  return [...candidates];
+}
+
 function isUsableMaxFashionHtml(html: string): boolean {
   if (!html) return false;
+  if (/productPageReducerBL|__NEXT_DATA__|"@type"\s*:\s*"Product"|property=["']og:type["'][^>]*content=["']product|property=["']product:title["']/i.test(html)) {
+    return true;
+  }
   if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(html)) return false;
 
-  return /productPageReducerBL|__NEXT_DATA__|"@type"\s*:\s*"Product"|property=["']og:type["'][^>]*content=["']product/i.test(html);
+  return false;
 }
 
 async function fetchMaxFashionProductHtml(url: string): Promise<string | null> {
-  for (const userAgent of MAX_FASHION_USER_AGENTS) {
-    try {
-      const response = await axios.get(url, {
-        headers: {
-          ...browserHeaders,
-          'User-Agent': userAgent,
-          'Accept-Language': 'en-AE,en;q=0.9',
-          Referer: 'https://www.maxfashion.com/ae/en/',
-        },
-        timeout: 20000,
-        validateStatus: (status: number) => status < 500,
-        ...buildScraperAxiosConfig(),
-      });
+  for (const pageUrl of buildMaxFashionCandidateUrls(url)) {
+    for (const userAgent of MAX_FASHION_USER_AGENTS) {
+      try {
+        const response = await axios.get(pageUrl, {
+          headers: buildMaxFashionHeaders(pageUrl, userAgent),
+          timeout: 20000,
+          validateStatus: (status: number) => status < 500,
+          ...buildScraperAxiosConfig(),
+        });
 
-      if (response.status !== 200) continue;
-      const html = typeof response.data === 'string' ? response.data : String(response.data);
-      if (!isUsableMaxFashionHtml(html)) continue;
+        if (response.status !== 200) continue;
+        const html = typeof response.data === 'string' ? response.data : String(response.data);
+        if (!isUsableMaxFashionHtml(html)) continue;
 
-      return html;
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 250));
+        return html;
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
     }
   }
 
   return null;
+}
+
+async function fetchMaxFashionProductHtmlWithCurl(url: string): Promise<string> {
+  const errors: string[] = [];
+
+  for (const pageUrl of buildMaxFashionCandidateUrls(url)) {
+    try {
+      const html = await fetchHtmlWithCurl(pageUrl, buildMaxFashionCurlHeaders(pageUrl));
+      if (!isUsableMaxFashionHtml(html)) {
+        throw new Error('curl returned Cloudflare challenge');
+      }
+      return html;
+    } catch (error: any) {
+      errors.push(`${pageUrl}: ${error.message}`);
+    }
+  }
+
+  throw new Error(errors.join('; ') || 'curl returned no usable product HTML');
 }
 
 export class MaxFashionScraper implements SupplierScraper {
@@ -4205,32 +4271,30 @@ export class MaxFashionScraper implements SupplierScraper {
     }
 
     try {
-      const html = await fetchHtmlWithCurl(url, {
-        'Accept-Language': 'en-AE,en;q=0.9',
-        Referer: 'https://www.maxfashion.com/ae/en/',
-      });
-      if (!isUsableMaxFashionHtml(html)) {
-        throw new Error('curl returned Cloudflare challenge');
-      }
+      const html = await fetchMaxFashionProductHtmlWithCurl(url);
       return parseMaxFashionHtml(html, url);
     } catch (error: any) {
       errors.push(`curl: ${error.message}`);
     }
 
     if (activeManagedBypassProviders().length > 0) {
-      try {
-        const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
-          deviceType: 'mobile',
-          jsRender: true,
-          premium: true,
-        });
-        if (!isUsableMaxFashionHtml(html)) {
-          throw new Error('managed bypass returned non-product HTML');
+      const bypassErrors: string[] = [];
+      for (const pageUrl of buildMaxFashionCandidateUrls(url)) {
+        try {
+          const html = await fetchHtmlViaManagedBypass(pageUrl, {
+            deviceType: 'mobile',
+            jsRender: false,
+            premium: true,
+          });
+          if (!isUsableMaxFashionHtml(html)) {
+            throw new Error('managed bypass returned non-product HTML');
+          }
+          return parseMaxFashionHtml(html, url);
+        } catch (error: any) {
+          bypassErrors.push(`${pageUrl}: ${error.message}`);
         }
-        return parseMaxFashionHtml(html, url);
-      } catch (error: any) {
-        errors.push(`managed bypass: ${error.message}`);
       }
+      errors.push(`managed bypass: ${bypassErrors.join('; ')}`);
     }
 
     try {
