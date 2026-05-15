@@ -30,7 +30,6 @@ function normalizeOrigin(value?: string | null) {
 function getAllowedOrigins() {
   const configuredOrigins = [
     process.env.FRONTEND_URL,
-    process.env.FRONTEND_UR,
     process.env.APP_URL,
     ...(process.env.CORS_ORIGINS || "").split(","),
   ];
@@ -50,7 +49,9 @@ function getAllowedOrigins() {
 
 function getListenHost() {
   const configuredHost = process.env.HOST || "0.0.0.0";
-  const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN);
+  const isRailway = Boolean(
+    process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN,
+  );
 
   if (isRailway && ["127.0.0.1", "localhost", "::1"].includes(configuredHost)) {
     return "0.0.0.0";
@@ -61,7 +62,9 @@ function getListenHost() {
 
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
-  return error?.code === "P1001" || message.includes("Can't reach database server");
+  return (
+    error?.code === "P1001" || message.includes("Can't reach database server")
+  );
 }
 
 async function seedDefaultPricingRules() {
@@ -97,19 +100,19 @@ async function startServer() {
   app.set("trust proxy", 1);
 
   const corsOptions: cors.CorsOptions = {
-      origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.has(origin)) {
-          callback(null, true);
-        } else {
-          console.log("❌ Blocked origin:", origin);
-          callback(null, false);
-        }
-      },
-      credentials: true,
-      methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization"],
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.has(origin)) {
+        callback(null, true);
+      } else {
+        console.log("❌ Blocked origin:", origin);
+        callback(null, false);
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   };
 
   app.use(cors(corsOptions));
@@ -154,7 +157,8 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
+        hmr:
+          process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
       },
       appType: "spa",
     });
