@@ -4060,7 +4060,14 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
 
 function isNextBlockedFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every(error => /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden)/i.test(error));
+  const blockedOrUnusableFallback = errors.every(error =>
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page)/i.test(error)
+  );
+  const blockedByNext = errors.some(error =>
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden)/i.test(error)
+  );
+
+  return blockedByNext && blockedOrUnusableFallback;
 }
 
 function nextBlockedScraperError(details: string[]): ScraperError {
