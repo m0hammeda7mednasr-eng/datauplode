@@ -18,11 +18,13 @@ import { cn } from '../lib/utils';
 import { toast } from 'sonner';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
+import { apiErrorMessage } from '../lib/api';
 
 const SCOPES = [
   'read_products', 'write_products', 
   'read_inventory', 'write_inventory',
-  'read_files', 'write_files'
+  'read_files', 'write_files',
+  'read_publications', 'write_publications'
 ];
 
 export default function Settings() {
@@ -44,7 +46,7 @@ export default function Settings() {
       toast.success('Shopify credentials saved');
     },
     onError: (err: any) => {
-      toast.error(err.response?.data?.error || 'Failed to save credentials');
+      toast.error(apiErrorMessage(err, 'Failed to save credentials'));
     }
   });
 
@@ -54,7 +56,7 @@ export default function Settings() {
       window.location.href = data.url;
     },
     onError: (err: any) => {
-      toast.error(err.response?.data?.error || 'Failed to initiate connection');
+      toast.error(apiErrorMessage(err, 'Failed to initiate connection'));
     }
   });
 
@@ -76,7 +78,7 @@ export default function Settings() {
   
   useEffect(() => {
     if (config?.scopes) {
-      setSelectedScopes(config.scopes);
+      setSelectedScopes([...new Set([...SCOPES, ...config.scopes])]);
     } else if (!config) {
       setSelectedScopes(SCOPES);
     }
@@ -101,7 +103,7 @@ export default function Settings() {
       toast.success(res.data.message);
     },
     onError: (err: any) => {
-      toast.error(err.response?.data?.error || 'Test failed');
+      toast.error(apiErrorMessage(err, 'Test failed'));
     }
   });
 

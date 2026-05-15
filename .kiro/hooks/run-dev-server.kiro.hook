@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "تشغيل المشروع",
+  "description": "يقوم بتشغيل سيرفر التطوير للمشروع",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "npm run dev",
+    "timeout": 0
+  },
+  "workspaceFolderName": "syncly---shopify-product-synchronizer (1)",
+  "shortName": "run-dev-server"
+}

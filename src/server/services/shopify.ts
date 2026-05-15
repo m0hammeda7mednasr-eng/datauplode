@@ -1,6 +1,6 @@
 import axios from 'axios';
+import crypto from 'crypto';
 import { decrypt } from './encryption.js';
-import { PrismaClient } from '@prisma/client';
 
 const DEFAULT_SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-04';
 
@@ -105,6 +105,101 @@ export class ShopifyService {
     return data.collections.edges.map((e: any) => e.node);
   }
 
+  static async getPublications(client: ShopifyGraphqlClient) {
+    const query = `
+      query SalesChannelPublications {
+        publications(first: 50) {
+          nodes {
+            id
+            autoPublish
+            supportsFuturePublishing
+            channels(first: 10) {
+              nodes {
+                id
+                name
+                handle
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await client.request(query);
+    return data.publications?.nodes || [];
+  }
+
+  static async publishProductToSalesChannels(client: ShopifyGraphqlClient, productId: string) {
+    const publications = await this.getPublications(client);
+    const publicationInput = publications
+      .filter((publication: any) => publication?.id)
+      .map((publication: any) => ({ publicationId: publication.id }));
+
+    if (publicationInput.length === 0) {
+      return { publishedCount: 0, publications: [], userErrors: [] };
+    }
+
+    const mutation = `
+      mutation publishProductToSalesChannels($id: ID!, $input: [PublicationInput!]!) {
+        publishablePublish(id: $id, input: $input) {
+          publishable {
+            availablePublicationsCount {
+              count
+            }
+            resourcePublicationsCount {
+              count
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    const data = await client.request(mutation, {
+      id: productId,
+      input: publicationInput,
+    });
+    const userErrors = data.publishablePublish?.userErrors || [];
+
+    return {
+      publishedCount: data.publishablePublish?.publishable?.resourcePublicationsCount?.count ?? publicationInput.length,
+      publications: publications.map((publication: any) => ({
+        id: publication.id,
+        channels: publication.channels?.nodes || [],
+        autoPublish: publication.autoPublish,
+      })),
+      userErrors,
+    };
+  }
+
+  static async getInventoryLocation(client: ShopifyGraphqlClient) {
+    const query = `
+      query {
+        locations(first: 10) {
+          nodes {
+            id
+            name
+            isActive
+            fulfillsOnlineOrders
+          }
+        }
+      }
+    `;
+    const data = await client.request(query);
+    const locations = data.locations?.nodes || [];
+    const location =
+      locations.find((entry: any) => entry.isActive && entry.fulfillsOnlineOrders) ||
+      locations.find((entry: any) => entry.isActive) ||
+      locations[0];
+
+    if (!location?.id) {
+      throw new Error('No Shopify inventory location found. Create or activate a Shopify location first.');
+    }
+
+    return location;
+  }
+
   static async createProduct(client: ShopifyGraphqlClient, input: any) {
     const mutation = `
       mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
@@ -142,16 +237,19 @@ export class ShopifyService {
     client: ShopifyGraphqlClient,
     productId: string,
     variants: any[],
+    media: any[] = [],
   ) {
     const mutation = `
       mutation productVariantsBulkCreate(
         $productId: ID!,
         $variants: [ProductVariantsBulkInput!]!,
+        $media: [CreateMediaInput!],
         $strategy: ProductVariantsBulkCreateStrategy
       ) {
         productVariantsBulkCreate(
           productId: $productId,
           variants: $variants,
+          media: $media,
           strategy: $strategy
         ) {
           productVariants {
@@ -159,7 +257,19 @@ export class ShopifyService {
             title
             price
             inventoryItem {
+              id
               sku
+              tracked
+            }
+            media(first: 10) {
+              nodes {
+                id
+                alt
+                mediaContentType
+                preview {
+                  status
+                }
+              }
             }
             selectedOptions {
               name
@@ -176,7 +286,143 @@ export class ShopifyService {
     return client.request(mutation, {
       productId,
       variants,
+      media,
       strategy: 'REMOVE_STANDALONE_VARIANT',
+    });
+  }
+
+  static async getProductInventoryVariants(client: ShopifyGraphqlClient, productId: string) {
+    const query = `
+      query ProductInventoryVariants($id: ID!) {
+        product(id: $id) {
+          variants(first: 250) {
+            nodes {
+              id
+              title
+              sku
+              inventoryItem {
+                id
+                sku
+                tracked
+              }
+              selectedOptions {
+                name
+                value
+              }
+              media(first: 10) {
+                nodes {
+                  id
+                  alt
+                  mediaContentType
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await client.request(query, { id: productId });
+    return data.product?.variants?.nodes || [];
+  }
+
+  static async updateVariantsBulkMedia(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    variants: any[],
+    media: any[] = [],
+  ) {
+    if (variants.length === 0) {
+      return { productVariantsBulkUpdate: { productVariants: [], userErrors: [] } };
+    }
+
+    const mutation = `
+      mutation productVariantsBulkUpdateMedia(
+        $productId: ID!,
+        $variants: [ProductVariantsBulkInput!]!,
+        $media: [CreateMediaInput!],
+        $allowPartialUpdates: Boolean
+      ) {
+        productVariantsBulkUpdate(
+          productId: $productId,
+          variants: $variants,
+          media: $media,
+          allowPartialUpdates: $allowPartialUpdates
+        ) {
+          productVariants {
+            id
+            media(first: 10) {
+              nodes {
+                id
+                alt
+                mediaContentType
+                preview {
+                  status
+                }
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    return client.request(mutation, {
+      productId,
+      variants,
+      media,
+      allowPartialUpdates: true,
+    });
+  }
+
+  static async setInventoryQuantities(
+    client: ShopifyGraphqlClient,
+    input: {
+      locationId: string;
+      quantities: Array<{ inventoryItemId: string; quantity: number }>;
+      referenceDocumentUri?: string;
+    },
+  ) {
+    if (input.quantities.length === 0) {
+      return { inventorySetQuantities: { inventoryAdjustmentGroup: null, userErrors: [] } };
+    }
+
+    const mutation = `
+      mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+        inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+          inventoryAdjustmentGroup {
+            reason
+            referenceDocumentUri
+            changes {
+              name
+              delta
+              quantityAfterChange
+            }
+          }
+          userErrors {
+            code
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    return client.request(mutation, {
+      idempotencyKey: crypto.randomUUID(),
+      input: {
+        name: 'available',
+        reason: 'correction',
+        referenceDocumentUri: input.referenceDocumentUri,
+        quantities: input.quantities.map(quantity => ({
+          inventoryItemId: quantity.inventoryItemId,
+          locationId: input.locationId,
+          quantity: quantity.quantity,
+          changeFromQuantity: null,
+        })),
+      },
     });
   }
 

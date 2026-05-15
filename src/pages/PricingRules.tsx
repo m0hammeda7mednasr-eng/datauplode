@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { 
   Plus, 
@@ -14,11 +14,13 @@ import {
 import axios from 'axios';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
+import { apiErrorMessage } from '../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 
 export default function PricingRules() {
   const queryClient = useQueryClient();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingRule, setEditingRule] = useState<any>(null);
   
   const { data: rules, isLoading } = useQuery({
     queryKey: ['pricing-rules'],
@@ -42,9 +44,23 @@ export default function PricingRules() {
       queryClient.invalidateQueries({ queryKey: ['pricing-rules'] });
       toast.success('New pricing rule created');
       setIsModalOpen(false);
+      setEditingRule(null);
     },
     onError: (error: any) => {
-      toast.error(error.response?.data?.error || 'Failed to create rule');
+      toast.error(apiErrorMessage(error, 'Failed to create rule'));
+    }
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async ({ id, data }: any) => axios.patch(`/api/pricing-rules/${id}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['pricing-rules'] });
+      toast.success('Pricing rule updated');
+      setIsModalOpen(false);
+      setEditingRule(null);
+    },
+    onError: (error: any) => {
+      toast.error(apiErrorMessage(error, 'Failed to update rule'));
     }
   });
 
@@ -56,12 +72,13 @@ export default function PricingRules() {
     }
   });
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const data = {
       name: formData.get('name'),
       supplierId: formData.get('supplierId') || null,
+      currency: formData.get('currency') || null,
       multiplier: parseFloat(formData.get('multiplier') as string) || 1.0,
       fixedMarkup: parseFloat(formData.get('fixedMarkup') as string) || 0.0,
       percentageMarkup: parseFloat(formData.get('percentageMarkup') as string) || 0.0,
@@ -70,7 +87,21 @@ export default function PricingRules() {
       maxPrice: formData.get('maxPrice') ? parseFloat(formData.get('maxPrice') as string) : null,
       isDefault: formData.get('isDefault') === 'on'
     };
-    createMutation.mutate(data);
+    if (editingRule) {
+      updateMutation.mutate({ id: editingRule.id, data });
+    } else {
+      createMutation.mutate(data);
+    }
+  };
+
+  const openCreateModal = () => {
+    setEditingRule(null);
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (rule: any) => {
+    setEditingRule(rule);
+    setIsModalOpen(true);
   };
 
   return (
@@ -81,7 +112,7 @@ export default function PricingRules() {
           <p className="text-slate-500 font-medium">Define how supplier prices are converted to your Shopify store.</p>
         </div>
         <button 
-          onClick={() => setIsModalOpen(true)}
+          onClick={openCreateModal}
           className="bg-primary text-white px-5 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 shadow-lg shadow-indigo-100 hover:opacity-90 transition-all"
         >
           <Plus className="h-4 w-4" />
@@ -130,6 +161,10 @@ export default function PricingRules() {
 
             <div className="space-y-2 pt-2">
               <div className="flex justify-between text-xs font-medium">
+                <span className="text-slate-500">Currency</span>
+                <span className="text-slate-900">{rule.currency || 'Any'}</span>
+              </div>
+              <div className="flex justify-between text-xs font-medium">
                 <span className="text-slate-500">Rounding</span>
                 <span className="text-slate-900">{rule.rounding || 'None'}</span>
               </div>
@@ -146,7 +181,11 @@ export default function PricingRules() {
             </div>
 
             <div className="pt-4 border-t border-slate-50 flex gap-2">
-              <button className="flex-1 text-[10px] font-black text-slate-500 uppercase tracking-widest py-2 border border-slate-100 rounded hover:bg-slate-50 transition-all">
+              <button
+                type="button"
+                onClick={() => openEditModal(rule)}
+                className="flex-1 text-[10px] font-black text-slate-500 uppercase tracking-widest py-2 border border-slate-100 rounded hover:bg-slate-50 transition-all"
+              >
                 Edit Configuration
               </button>
             </div>
@@ -154,7 +193,7 @@ export default function PricingRules() {
         ))}
 
         <button 
-          onClick={() => setIsModalOpen(true)}
+          onClick={openCreateModal}
           className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl p-6 flex flex-col items-center justify-center gap-3 text-center opacity-60 hover:opacity-100 transition-all cursor-pointer group"
         >
           <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 group-hover:bg-primary group-hover:text-white transition-colors">
@@ -181,16 +220,19 @@ export default function PricingRules() {
               className="bg-white rounded-2xl shadow-2xl border border-card-border w-full max-w-xl relative z-10 overflow-hidden"
             >
               <div className="px-6 py-4 border-b border-card-border flex justify-between items-center bg-slate-50/50">
-                <h2 className="font-bold text-lg text-slate-900">New Pricing Rule</h2>
+                <h2 className="font-bold text-lg text-slate-900">{editingRule ? 'Edit Pricing Rule' : 'New Pricing Rule'}</h2>
                 <button 
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    setEditingRule(null);
+                  }}
                   className="p-1 text-slate-400 hover:text-slate-900 transition-colors"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
-              <form onSubmit={handleSubmit} className="p-6 space-y-6">
+              <form key={editingRule?.id || 'new'} onSubmit={handleSubmit} className="p-6 space-y-6">
                 <div className="grid grid-cols-2 gap-6">
                   <div className="col-span-2 space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Rule Name</label>
@@ -198,6 +240,7 @@ export default function PricingRules() {
                       name="name" 
                       required 
                       placeholder="e.g. Zara Standard Markup"
+                      defaultValue={editingRule?.name || ''}
                       className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
                     />
                   </div>
@@ -207,6 +250,7 @@ export default function PricingRules() {
                     <div className="relative">
                       <select 
                         name="supplierId"
+                        defaultValue={editingRule?.supplierId || ''}
                         className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium appearance-none"
                       >
                         <option value="">Apply to All</option>
@@ -219,12 +263,22 @@ export default function PricingRules() {
                   </div>
 
                   <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Currency (Optional)</label>
+                    <input
+                      name="currency"
+                      placeholder="Any"
+                      defaultValue={editingRule?.currency || ''}
+                      className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium uppercase"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Rounding</label>
                     <div className="relative">
                       <select 
                         name="rounding"
                         className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium appearance-none"
-                        defaultValue="none"
+                        defaultValue={editingRule?.rounding || 'none'}
                       >
                         <option value="none">None</option>
                         <option value=".99">Round to .99</option>
@@ -242,7 +296,7 @@ export default function PricingRules() {
                         name="multiplier" 
                         type="number" 
                         step="0.01" 
-                        defaultValue="1.50"
+                        defaultValue={editingRule?.multiplier ?? '1.50'}
                         className="w-full pl-7 pr-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
                       />
                     </div>
@@ -256,8 +310,22 @@ export default function PricingRules() {
                         name="fixedMarkup" 
                         type="number" 
                         step="0.01" 
-                        defaultValue="0.00"
+                        defaultValue={editingRule?.fixedMarkup ?? '0.00'}
                         className="w-full pl-7 pr-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Percent Markup</label>
+                    <div className="relative">
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">%</div>
+                      <input
+                        name="percentageMarkup"
+                        type="number"
+                        step="0.01"
+                        defaultValue={editingRule?.percentageMarkup ?? '0.00'}
+                        className="w-full px-4 pr-7 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
                       />
                     </div>
                   </div>
@@ -269,6 +337,7 @@ export default function PricingRules() {
                       type="number" 
                       step="0.01" 
                       placeholder="No Minimum"
+                      defaultValue={editingRule?.minPrice ?? ''}
                       className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
                     />
                   </div>
@@ -280,12 +349,13 @@ export default function PricingRules() {
                       type="number" 
                       step="0.01" 
                       placeholder="No Maximum"
+                      defaultValue={editingRule?.maxPrice ?? ''}
                       className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-medium"
                     />
                   </div>
                   
                   <div className="col-span-2 py-2 flex items-center gap-3">
-                    <input type="checkbox" name="isDefault" id="isDefault" className="w-4 h-4 rounded text-primary focus:ring-primary border-slate-300" />
+                    <input type="checkbox" name="isDefault" id="isDefault" defaultChecked={Boolean(editingRule?.isDefault)} className="w-4 h-4 rounded text-primary focus:ring-primary border-slate-300" />
                     <label htmlFor="isDefault" className="text-sm font-bold text-slate-700">Set as default rule for new imports</label>
                   </div>
                 </div>
@@ -293,17 +363,20 @@ export default function PricingRules() {
                 <div className="pt-4 border-t border-slate-50 flex gap-3">
                   <button 
                     type="button"
-                    onClick={() => setIsModalOpen(false)}
+                    onClick={() => {
+                      setIsModalOpen(false);
+                      setEditingRule(null);
+                    }}
                     className="flex-1 px-6 py-3 rounded-xl border border-slate-200 text-xs font-black text-slate-500 uppercase tracking-widest hover:bg-slate-50 transition-all font-sans"
                   >
                     Cancel
                   </button>
                   <button 
                     type="submit"
-                    disabled={createMutation.isPending}
+                    disabled={createMutation.isPending || updateMutation.isPending}
                     className="flex-[1.5] bg-primary text-white px-6 py-3 rounded-xl text-xs font-black uppercase tracking-widest hover:opacity-90 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
                   >
-                    {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create Rule'}
+                    {createMutation.isPending || updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : editingRule ? 'Save Rule' : 'Create Rule'}
                   </button>
                 </div>
               </form>
@@ -356,4 +429,3 @@ function Loader2({ className }: { className?: string }) {
     </svg>
   );
 }
-

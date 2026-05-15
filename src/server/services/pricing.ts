@@ -1,6 +1,44 @@
 import { PricingRule } from '@prisma/client';
 
 export class PricingEngine {
+  static selectBestRule(
+    rules: PricingRule[],
+    context: { supplierId?: string | null; currency?: string | null } = {},
+  ): PricingRule | null {
+    if (!rules.length) return null;
+
+    const currency = String(context.currency || '').trim().toUpperCase();
+    const supplierId = context.supplierId || null;
+    const eligibleRules = rules.filter((rule) => {
+      const ruleCurrency = String(rule.currency || '').trim().toUpperCase();
+      const supplierMatches = !rule.supplierId || (supplierId && rule.supplierId === supplierId);
+      const currencyMatches = !ruleCurrency || !currency || ruleCurrency === currency;
+      return supplierMatches && currencyMatches;
+    });
+
+    const candidates = eligibleRules.length ? eligibleRules : rules;
+
+    return [...candidates].sort((a, b) => {
+      const scoreRule = (rule: PricingRule) => {
+        const ruleCurrency = String(rule.currency || '').trim().toUpperCase();
+        let score = 0;
+
+        if (supplierId && rule.supplierId === supplierId) score += 100;
+        else if (!rule.supplierId) score += 10;
+        else score -= 100;
+
+        if (currency && ruleCurrency === currency) score += 30;
+        else if (!ruleCurrency) score += 5;
+        else score -= 20;
+
+        if (rule.isDefault) score += 15;
+        return score;
+      };
+
+      return scoreRule(b) - scoreRule(a);
+    })[0] || null;
+  }
+
   static calculatePrice(basePrice: number, rule: PricingRule): number {
     let price = basePrice;
 

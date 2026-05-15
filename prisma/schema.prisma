@@ -85,7 +85,7 @@ model ShopifyProduct {
   sourceProduct   SourceProduct @relation(fields: [sourceProductId], references: [id])
   shopifyId       String   @unique // GID
   handle          String?
-  status          String   @default("draft") // draft, active, archived
+  status          String   @default("active") // draft, active, archived
   collectionIds   String?  // Comma-separated or JSON string of collection GIDs
   price           Float?   // Summary price for display
   
@@ -172,7 +172,7 @@ model ShopifyConnection {
   clientId        String
   clientSecretEnc String
   accessTokenEnc  String?
-  scopes          String   @default("read_products,write_products,read_inventory,write_inventory,read_files,write_files")
+  scopes          String   @default("read_products,write_products,read_inventory,write_inventory,read_files,write_files,read_publications,write_publications")
   isConnected     Boolean  @default(false)
   connectedAt     DateTime?
   oauthState      String?

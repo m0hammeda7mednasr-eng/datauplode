@@ -1,54 +1,86 @@
-import { Router } from 'express';
-import { prisma } from './db.js';
-import { ScraperService } from './services/scraper.js';
-import { PricingEngine } from './services/pricing.js';
-import { QueueService } from './services/queue.js';
-import { encrypt, decrypt } from './services/encryption.js';
-import { ShopifyService } from './services/shopify.js';
-import axios from 'axios';
-import crypto from 'crypto';
+import { Router } from "express";
+import { prisma } from "./db.js";
+import {
+  ScraperService,
+  normalizeProductImageList,
+} from "./services/scraper.js";
+import { PricingEngine } from "./services/pricing.js";
+import { QueueService } from "./services/queue.js";
+import { encrypt, decrypt } from "./services/encryption.js";
+import { ShopifyService } from "./services/shopify.js";
+import axios from "axios";
+import crypto from "crypto";
 
 const router = Router();
 const scraperService = new ScraperService();
 const DEFAULT_SHOPIFY_SCOPES = [
-  'read_products',
-  'write_products',
-  'read_inventory',
-  'write_inventory',
-  'read_files',
-  'write_files',
+  "read_products",
+  "write_products",
+  "read_inventory",
+  "write_inventory",
+  "read_files",
+  "write_files",
+  "read_publications",
+  "write_publications",
 ];
 const SHOPIFY_DOMAIN_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
 
 function firstQueryValue(value: any): string {
-  return String(Array.isArray(value) ? value[0] : value || '').trim();
+  return String(Array.isArray(value) ? value[0] : value || "").trim();
 }
 
 function normalizePublicUrl(value?: string | null) {
-  if (!value) return '';
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
+  if (!value) return "";
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 function getBackendUrl(req: any) {
   const configured = normalizePublicUrl(process.env.APP_URL);
-  if (configured) return configured;
+  const forwardedProto = firstQueryValue(req.get("x-forwarded-proto")).split(
+    ",",
+  )[0];
+  const forwardedHost = firstQueryValue(req.get("x-forwarded-host")).split(
+    ",",
+  )[0];
+  const protocol = forwardedProto || req.protocol || "http";
+  const host = forwardedHost || req.get("host");
+  const requestUrl = `${protocol}://${host}`;
 
-  const forwardedProto = firstQueryValue(req.get('x-forwarded-proto')).split(',')[0];
-  const forwardedHost = firstQueryValue(req.get('x-forwarded-host')).split(',')[0];
-  const protocol = forwardedProto || req.protocol || 'http';
-  const host = forwardedHost || req.get('host');
+  if (!configured) return requestUrl;
 
-  return `${protocol}://${host}`;
+  try {
+    const configuredUrl = new URL(configured);
+    const requestHost = new URL(requestUrl).hostname;
+    const configuredIsLocal = [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "0.0.0.0",
+    ].includes(configuredUrl.hostname.toLowerCase());
+
+    if (
+      configuredIsLocal &&
+      !["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(
+        requestHost.toLowerCase(),
+      )
+    ) {
+      return requestUrl;
+    }
+  } catch {
+    return requestUrl;
+  }
+
+  return configured;
 }
 
 function getFrontendUrl(req?: any) {
   return normalizePublicUrl(
     process.env.FRONTEND_URL ||
-    process.env.VITE_FRONTEND_URL ||
-    (req ? getBackendUrl(req) : '') ||
-    'https://datauplode.vercel.app'
+      process.env.VITE_FRONTEND_URL ||
+      (req ? getBackendUrl(req) : "") ||
+      "https://datauplode.vercel.app",
   );
 }
 
@@ -56,8 +88,12 @@ function getShopifyRedirectUri(req: any) {
   return `${getBackendUrl(req)}/api/shopify/callback`;
 }
 
-function redirectToFrontend(req: any, res: any, params: Record<string, string>) {
-  const redirectUrl = new URL('/settings', getFrontendUrl(req));
+function redirectToFrontend(
+  req: any,
+  res: any,
+  params: Record<string, string>,
+) {
+  const redirectUrl = new URL("/settings", getFrontendUrl(req));
   for (const [key, value] of Object.entries(params)) {
     redirectUrl.searchParams.set(key, value);
   }
@@ -65,19 +101,24 @@ function redirectToFrontend(req: any, res: any, params: Record<string, string>) 
 }
 
 function normalizeShopDomain(value: any) {
-  let domain = String(value || '').trim().toLowerCase();
-  domain = domain.replace(/^https?:\/\//, '');
-  domain = domain.replace(/\/admin.*$/, '');
-  domain = domain.replace(/\/.*$/, '');
+  let domain = String(value || "")
+    .trim()
+    .toLowerCase();
+  domain = domain.replace(/^https?:\/\//, "");
+  domain = domain.replace(/\/admin.*$/, "");
+  domain = domain.replace(/\/.*$/, "");
   return domain;
 }
 
 function assertShopDomain(value: any) {
   const domain = normalizeShopDomain(value);
   if (!SHOPIFY_DOMAIN_REGEX.test(domain)) {
-    throw Object.assign(new Error('Shop domain must be a valid .myshopify.com hostname'), {
-      statusCode: 400,
-    });
+    throw Object.assign(
+      new Error("Shop domain must be a valid .myshopify.com hostname"),
+      {
+        statusCode: 400,
+      },
+    );
   }
   return domain;
 }
@@ -85,7 +126,7 @@ function assertShopDomain(value: any) {
 function normalizeScopes(scopes: any) {
   const scopeList = Array.isArray(scopes)
     ? scopes
-    : String(scopes || '').split(',');
+    : String(scopes || "").split(",");
 
   const cleanedScopes = scopeList
     .map((scope: string) => String(scope).trim())
@@ -94,51 +135,252 @@ function normalizeScopes(scopes: any) {
   return cleanedScopes.length ? cleanedScopes : DEFAULT_SHOPIFY_SCOPES;
 }
 
+function normalizeLabel(value: any) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function labelContainsLabel(haystack: any, needle: any) {
+  const normalizedHaystack = normalizeLabel(haystack);
+  const normalizedNeedle = normalizeLabel(needle);
+  if (!normalizedHaystack || !normalizedNeedle) return false;
+  if (normalizedHaystack === normalizedNeedle) return true;
+
+  const escapedNeedle = normalizedNeedle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escapedNeedle}($|[^a-z0-9])`, "i").test(
+    normalizedHaystack,
+  );
+}
+
+function getVariantColor(variant: any) {
+  const optionValues = variant?.optionValues || {};
+  return String(
+    variant?.color || optionValues.Color || optionValues.Colour || "",
+  ).trim();
+}
+
+function hasMultipleVariantColors(variants: any[]) {
+  const colors = new Set(
+    variants.map(getVariantColor).map(normalizeLabel).filter(Boolean),
+  );
+
+  return colors.size > 1;
+}
+
+function parseRawObject(value: any) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return {};
+  }
+}
+
+function isNextProductPayload(productData: any) {
+  const supplier = normalizeLabel(productData?.source?.supplier);
+  const url = normalizeLabel(productData?.source?.url);
+  return (
+    supplier === "next" ||
+    url.includes("nextdirect.com") ||
+    url.includes("next.co.uk") ||
+    url.includes("next.ae") ||
+    url.includes("next.us")
+  );
+}
+
+function removeRelatedNextColorways(
+  productData: any,
+  variants: any[],
+  images: any[],
+) {
+  if (!isNextProductPayload(productData)) return { variants, images };
+
+  const currentVariants = variants.filter((variant: any) => {
+    const raw = parseRawObject(variant?.raw);
+    return !raw?.inferredFromColorwayCard && !raw?.colorwayUrl;
+  });
+  const safeVariants = currentVariants.length ? currentVariants : variants;
+  const allowedColors = new Set(
+    safeVariants.map(getVariantColor).map(normalizeLabel).filter(Boolean),
+  );
+
+  if (allowedColors.size === 0) return { variants: safeVariants, images };
+
+  return {
+    variants: safeVariants,
+    images: images.filter((image: any) => {
+      const imageColor = normalizeLabel(image?.color);
+      if (!imageColor) return true;
+      return allowedColors.has(imageColor);
+    }),
+  };
+}
+
+function resolveVariantImageUrl(
+  variant: any,
+  images: any[],
+  variants: any[] = [],
+) {
+  const directImageUrl = String(variant?.imageUrl || "").trim();
+  const selectedImageUrls = new Set(
+    images.map((image: any) => String(image?.url || "").trim()).filter(Boolean),
+  );
+
+  if (
+    directImageUrl &&
+    (selectedImageUrls.has(directImageUrl) || images.length === 0)
+  ) {
+    return directImageUrl;
+  }
+
+  const color = normalizeLabel(getVariantColor(variant));
+  if (color) {
+    const matchedImage = images.find((image: any) => {
+      const imageColor = normalizeLabel(image?.color);
+      const imageAlt = normalizeLabel(image?.alt);
+      return imageColor === color || labelContainsLabel(imageAlt, color);
+    });
+
+    if (matchedImage?.url) return String(matchedImage.url).trim();
+  }
+
+  if (images.length === 1 || !hasMultipleVariantColors(variants)) {
+    return images.find((image: any) => image?.url)?.url;
+  }
+
+  return undefined;
+}
+
+function asOptionalString(value: any) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function asOptionalNumber(value: any) {
+  if (value === null || value === undefined || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function asNumber(value: any, fallback: number) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
+function normalizePricingRuleInput(body: any) {
+  const name = String(body?.name || "").trim();
+  const rounding = String(body?.rounding || "none").trim();
+  const allowedRounding = ["none", ".99", ".00"];
+  const multiplier = asNumber(body?.multiplier, 1);
+
+  if (!name) {
+    throw Object.assign(new Error("Pricing rule name is required"), {
+      statusCode: 400,
+    });
+  }
+  if (!Number.isFinite(multiplier) || multiplier <= 0) {
+    throw Object.assign(new Error("Multiplier must be greater than zero"), {
+      statusCode: 400,
+    });
+  }
+  const minPrice = asOptionalNumber(body?.minPrice);
+  const maxPrice = asOptionalNumber(body?.maxPrice);
+  if (minPrice !== null && maxPrice !== null && maxPrice < minPrice) {
+    throw Object.assign(
+      new Error("Max price must be greater than or equal to min price"),
+      { statusCode: 400 },
+    );
+  }
+
+  return {
+    name,
+    supplierId: asOptionalString(body?.supplierId),
+    currency: asOptionalString(body?.currency)?.toUpperCase() || null,
+    multiplier,
+    fixedMarkup: asNumber(body?.fixedMarkup, 0),
+    percentageMarkup: asNumber(body?.percentageMarkup, 0),
+    rounding: allowedRounding.includes(rounding) ? rounding : "none",
+    minPrice,
+    maxPrice,
+    isDefault:
+      body?.isDefault === true ||
+      body?.isDefault === "true" ||
+      body?.isDefault === "on",
+  };
+}
+
+async function findBestPricingRuleForProduct(product: any) {
+  const [rules, supplier] = await Promise.all([
+    prisma.pricingRule.findMany(),
+    product?.source?.supplier
+      ? prisma.supplier
+          .findUnique({ where: { name: product.source.supplier } })
+          .catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  return PricingEngine.selectBestRule(rules, {
+    supplierId: supplier?.id,
+    currency: product?.currency,
+  });
+}
+
 function verifyShopifyHmac(query: any, clientSecret: string) {
   const hmac = firstQueryValue(query.hmac);
   if (!hmac) return false;
 
   const message = Object.keys(query)
-    .filter((key) => key !== 'hmac' && key !== 'signature')
+    .filter((key) => key !== "hmac" && key !== "signature")
     .sort()
     .map((key) => {
-      const value = Array.isArray(query[key]) ? query[key].join(',') : query[key];
+      const value = Array.isArray(query[key])
+        ? query[key].join(",")
+        : query[key];
       return `${key}=${value}`;
     })
-    .join('&');
+    .join("&");
 
   const digest = crypto
-    .createHmac('sha256', clientSecret)
+    .createHmac("sha256", clientSecret)
     .update(message)
-    .digest('hex');
+    .digest("hex");
 
-  const hmacBuffer = Buffer.from(hmac, 'hex');
-  const digestBuffer = Buffer.from(digest, 'hex');
+  const hmacBuffer = Buffer.from(hmac, "hex");
+  const digestBuffer = Buffer.from(digest, "hex");
 
-  return hmacBuffer.length === digestBuffer.length && crypto.timingSafeEqual(hmacBuffer, digestBuffer);
+  return (
+    hmacBuffer.length === digestBuffer.length &&
+    crypto.timingSafeEqual(hmacBuffer, digestBuffer)
+  );
 }
 
 // Analysis
-router.post('/imports/analyze', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL is required' });
+router.post("/imports/analyze", async (req, res) => {
+  const { url, pageText } = req.body;
+  if (!url) return res.status(400).json({ error: "URL is required" });
 
   try {
-    const data = await scraperService.scrape(url);
-    
-    // Find matching pricing rule
-    const rule = await prisma.pricingRule.findFirst({
-      where: { isDefault: true }
-    });
+    const snapshotText = typeof pageText === "string" ? pageText.trim() : "";
+    const data = snapshotText
+      ? await scraperService.scrapeSnapshot(url, snapshotText)
+      : await scraperService.scrape(url);
+    const rule = await findBestPricingRuleForProduct(data);
 
-    const calculatedPrice = rule ? PricingEngine.calculatePrice(data.price, rule) : data.price;
+    const calculatedPrice = rule
+      ? PricingEngine.calculatePrice(data.price, rule)
+      : data.price;
     const variants = data.variants.map((variant: any) => {
       const sourcePrice = variant.price || data.price;
       return {
         ...variant,
         price: sourcePrice,
         currency: variant.currency || data.currency,
-        calculatedPrice: rule ? PricingEngine.calculatePrice(sourcePrice, rule) : sourcePrice
+        calculatedPrice: rule
+          ? PricingEngine.calculatePrice(sourcePrice, rule)
+          : sourcePrice,
       };
     });
 
@@ -146,23 +388,29 @@ router.post('/imports/analyze', async (req, res) => {
       ...data,
       variants,
       calculatedPrice,
-      pricingRule: rule
+      pricingRule: rule,
     });
   } catch (error: any) {
-    res.status(422).json({ error: error.message || 'Failed to analyze product URL' });
+    res.status(error.status || 422).json({
+      error: error.message || "Failed to analyze product URL",
+      code: error.code,
+      supplier: error.supplier,
+      retryWithSnapshot: error.retryWithSnapshot,
+      details: error.details,
+    });
   }
 });
 
 // Products
-router.get('/products', async (req, res) => {
+router.get("/products", async (req, res) => {
   const { collectionId } = req.query;
-  
+
   const where: any = {};
   if (collectionId) {
     where.shopifyProduct = {
       collectionIds: {
-        contains: collectionId as string
-      }
+        contains: collectionId as string,
+      },
     };
   }
 
@@ -171,93 +419,237 @@ router.get('/products', async (req, res) => {
     include: {
       shopifyProduct: true,
       supplier: true,
+      images: { orderBy: { position: "asc" } },
     },
-    orderBy: { updatedAt: 'desc' }
+    orderBy: { updatedAt: "desc" },
   });
   res.json(products);
 });
 
-router.get('/products/:id', async (req, res) => {
+router.get("/products/:id", async (req, res) => {
   const product = await prisma.sourceProduct.findUnique({
     where: { id: req.params.id },
     include: {
       variants: true,
       images: true,
       shopifyProduct: {
-        include: { variants: true }
+        include: { variants: true },
       },
       supplier: true,
-      auditLogs: { orderBy: { createdAt: 'desc' }, take: 10 }
-    }
+      auditLogs: { orderBy: { createdAt: "desc" }, take: 10 },
+    },
   });
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+  if (!product) return res.status(404).json({ error: "Product not found" });
   res.json(product);
 });
 
+router.delete("/products/:id", async (req, res) => {
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const product = await tx.sourceProduct.findUnique({
+        where: { id: req.params.id },
+        include: {
+          variants: { select: { id: true } },
+          shopifyProduct: { select: { id: true, shopifyId: true } },
+        },
+      });
+
+      if (!product) {
+        throw Object.assign(new Error("Product not found"), {
+          statusCode: 404,
+        });
+      }
+
+      const sourceVariantIds = product.variants.map((variant) => variant.id);
+      if (product.shopifyProduct) {
+        await tx.shopifyVariant.deleteMany({
+          where: { shopifyProductId: product.shopifyProduct.id },
+        });
+      } else if (sourceVariantIds.length > 0) {
+        await tx.shopifyVariant.deleteMany({
+          where: { sourceVariantId: { in: sourceVariantIds } },
+        });
+      }
+
+      await tx.shopifyProduct.deleteMany({
+        where: { sourceProductId: product.id },
+      });
+      await tx.manualReviewItem.deleteMany({
+        where: { sourceProductId: product.id },
+      });
+      await tx.auditLog.deleteMany({ where: { sourceProductId: product.id } });
+      await tx.sourceImage.deleteMany({
+        where: { sourceProductId: product.id },
+      });
+      await tx.sourceVariant.deleteMany({
+        where: { sourceProductId: product.id },
+      });
+      await tx.sourceProduct.delete({ where: { id: product.id } });
+
+      return {
+        deletedProductId: product.id,
+        shopifyProductId: product.shopifyProduct?.shopifyId || null,
+      };
+    });
+
+    res.json({
+      success: true,
+      ...result,
+      shopifyDeleted: false,
+    });
+  } catch (error: any) {
+    res
+      .status(error.statusCode || 500)
+      .json({ error: error.message || "Failed to delete product" });
+  }
+});
+
 // Pricing Rules
-router.get('/pricing-rules', async (req, res) => {
-  const rules = await prisma.pricingRule.findMany();
+router.get("/pricing-rules", async (req, res) => {
+  const rules = await prisma.pricingRule.findMany({
+    orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+  });
   res.json(rules);
 });
 
-router.post('/pricing-rules', async (req, res) => {
-  const rule = await prisma.pricingRule.create({ data: req.body });
-  res.json(rule);
+router.post("/pricing-rules", async (req, res) => {
+  try {
+    const data = normalizePricingRuleInput(req.body);
+    const rule = await prisma.$transaction(async (tx) => {
+      if (data.isDefault) {
+        await tx.pricingRule.updateMany({ data: { isDefault: false } });
+      }
+
+      return tx.pricingRule.create({ data });
+    });
+
+    res.json(rule);
+  } catch (error: any) {
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
 });
 
-router.delete('/pricing-rules/:id', async (req, res) => {
+router.patch("/pricing-rules/:id", async (req, res) => {
+  try {
+    const data = normalizePricingRuleInput(req.body);
+    const rule = await prisma.$transaction(async (tx) => {
+      if (data.isDefault) {
+        await tx.pricingRule.updateMany({
+          where: { NOT: { id: req.params.id } },
+          data: { isDefault: false },
+        });
+      }
+
+      return tx.pricingRule.update({
+        where: { id: req.params.id },
+        data,
+      });
+    });
+
+    res.json(rule);
+  } catch (error: any) {
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
+
+router.delete("/pricing-rules/:id", async (req, res) => {
   try {
     await prisma.pricingRule.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (error: any) {
-    res.status(404).json({ error: error.message || 'Pricing rule not found' });
+    res.status(404).json({ error: error.message || "Pricing rule not found" });
   }
 });
 
 // Suppliers
-router.get('/suppliers', async (req, res) => {
+router.get("/suppliers", async (req, res) => {
   const suppliers = await prisma.supplier.findMany({
-    orderBy: { name: 'asc' }
+    orderBy: { name: "asc" },
   });
   res.json(suppliers);
 });
 
 // Sync Jobs
-router.get('/sync-jobs', async (req, res) => {
+router.get("/sync-jobs", async (req, res) => {
   const jobs = await prisma.syncJob.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 50
+    orderBy: { createdAt: "desc" },
+    take: 50,
   });
   res.json(jobs);
 });
 
 // Publishing
-router.post('/imports/publish', async (req, res) => {
+router.post("/imports/publish", async (req, res) => {
   const { productData, pricingRuleId, collections } = req.body;
-  if (!productData) return res.status(400).json({ error: 'Product data is required' });
-  if (!productData.source?.url) return res.status(400).json({ error: 'Product source URL is required' });
+  if (!productData)
+    return res.status(400).json({ error: "Product data is required" });
+  if (!productData.source?.url)
+    return res.status(400).json({ error: "Product source URL is required" });
 
   try {
+    const sourcePrice = Number(productData.price);
+    if (!PricingEngine.validatePrice(sourcePrice)) {
+      return res.status(400).json({ error: "Product source price is invalid" });
+    }
+
+    const selectedPricingRuleId = asOptionalString(pricingRuleId);
+    if (selectedPricingRuleId) {
+      const ruleExists = await prisma.pricingRule.findUnique({
+        where: { id: selectedPricingRuleId },
+        select: { id: true },
+      });
+
+      if (!ruleExists) {
+        return res
+          .status(400)
+          .json({ error: "Selected pricing rule was not found" });
+      }
+    }
+
     const connection = await prisma.shopifyConnection.findFirst({
       where: { isConnected: true },
-      select: { accessTokenEnc: true }
+      select: { accessTokenEnc: true },
     });
 
     if (!connection?.accessTokenEnc) {
-      return res.status(400).json({ error: 'Connect Shopify before publishing products.' });
+      return res
+        .status(400)
+        .json({ error: "Connect Shopify before publishing products." });
     }
 
-    const supplierName = String(productData.source?.supplier || 'Unknown Supplier').trim() || 'Unknown Supplier';
-    const images = Array.isArray(productData.images) ? productData.images : [];
-    const variants = Array.isArray(productData.variants) && productData.variants.length > 0
-      ? productData.variants
-      : [{
-          sourceVariantId: productData.source.productId || 'default',
-          price: productData.price,
-          currency: productData.currency,
-          available: true,
-          stockStatus: 'unknown'
-        }];
+    const supplierName =
+      String(productData.source?.supplier || "Unknown Supplier").trim() ||
+      "Unknown Supplier";
+    const requestedImages = Array.isArray(productData.images)
+      ? productData.images
+      : [];
+    const requestedVariants =
+      Array.isArray(productData.variants) && productData.variants.length > 0
+        ? productData.variants
+        : [
+            {
+              sourceVariantId: productData.source.productId || "default",
+              price: sourcePrice,
+              currency: productData.currency,
+              available: true,
+              stockStatus: "unknown",
+            },
+          ];
+    const nextSafePayload = removeRelatedNextColorways(
+      productData,
+      requestedVariants,
+      requestedImages,
+    );
+    const images = normalizeProductImageList(nextSafePayload.images, {
+      keepIfAllRejected: false,
+      maxImages: 30,
+    });
+    if (requestedImages.length > 0 && images.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Selected product images are not valid image URLs" });
+    }
+    const variants = nextSafePayload.variants;
     const collectionIds = Array.isArray(collections) ? collections : [];
 
     // 1. Create Source Product record
@@ -265,18 +657,23 @@ router.post('/imports/publish', async (req, res) => {
       const supplier = await tx.supplier.upsert({
         where: { name: supplierName },
         update: {},
-        create: { name: supplierName, baseUrl: productData.source.url }
+        create: { name: supplierName, baseUrl: productData.source.url },
       });
 
       const existingProduct = await tx.sourceProduct.findUnique({
         where: { url: productData.source.url },
-        include: { shopifyProduct: true }
+        include: { shopifyProduct: true },
       });
 
       if (existingProduct?.shopifyProduct) {
-        throw Object.assign(new Error('This product is already linked to Shopify. Use Sync Now from the product detail page.'), {
-          statusCode: 409
-        });
+        throw Object.assign(
+          new Error(
+            "This product is already linked to Shopify. Use Sync Now from the product detail page.",
+          ),
+          {
+            statusCode: 409,
+          },
+        );
       }
 
       const productRecord = {
@@ -286,12 +683,16 @@ router.post('/imports/publish', async (req, res) => {
         description: productData.description,
         brand: productData.brand,
         currency: productData.currency,
-        price: productData.price,
+        price: sourcePrice,
         raw: JSON.stringify({
           options: productData.options,
-          raw: productData.raw
+          raw: productData.raw,
+          import: {
+            pricingRuleId: selectedPricingRuleId,
+            selectedImageCount: images.length,
+          },
         }),
-        syncStatus: 'active',
+        syncStatus: "active",
       };
 
       const imageRecords = images
@@ -300,37 +701,52 @@ router.post('/imports/publish', async (req, res) => {
           url: img.url,
           alt: img.alt,
           color: img.color,
-          position: Number.isInteger(img.position) ? img.position : index
+          position: Number.isInteger(img.position) ? img.position : index,
         }));
 
-      const variantRecords = variants.map((v: any, index: number) => ({
-        sourceVariantId: v.sourceVariantId || v.sku || `${productData.source.productId || 'variant'}-${index}`,
-        sku: v.sku,
-        color: v.color,
-        size: v.size,
-        price: v.price || productData.price,
-        currency: v.currency || productData.currency,
-        available: v.available ?? true,
-        stockStatus: v.stockStatus || 'unknown',
-        imageUrl: v.imageUrl,
-        raw: JSON.stringify({
-          optionValues: v.optionValues,
-          calculatedPrice: v.calculatedPrice,
-          raw: v.raw
-        })
-      }));
+      const variantRecords = variants.map((v: any, index: number) => {
+        const resolvedImageUrl = resolveVariantImageUrl(v, images, variants);
+        const variantPrice = Number(v.price || sourcePrice);
+
+        return {
+          sourceVariantId:
+            v.sourceVariantId ||
+            v.sku ||
+            `${productData.source.productId || "variant"}-${index}`,
+          sku: v.sku,
+          color: v.color,
+          size: v.size,
+          price: PricingEngine.validatePrice(variantPrice)
+            ? variantPrice
+            : sourcePrice,
+          currency: v.currency || productData.currency,
+          available: v.available ?? true,
+          stockStatus: v.stockStatus || "unknown",
+          imageUrl: resolvedImageUrl,
+          raw: JSON.stringify({
+            optionValues: v.optionValues,
+            calculatedPrice: v.calculatedPrice,
+            imageUrl: resolvedImageUrl,
+            raw: v.raw,
+          }),
+        };
+      });
 
       if (existingProduct) {
-        await tx.sourceImage.deleteMany({ where: { sourceProductId: existingProduct.id } });
-        await tx.sourceVariant.deleteMany({ where: { sourceProductId: existingProduct.id } });
+        await tx.sourceImage.deleteMany({
+          where: { sourceProductId: existingProduct.id },
+        });
+        await tx.sourceVariant.deleteMany({
+          where: { sourceProductId: existingProduct.id },
+        });
 
         return tx.sourceProduct.update({
           where: { id: existingProduct.id },
           data: {
             ...productRecord,
             images: { create: imageRecords },
-            variants: { create: variantRecords }
-          }
+            variants: { create: variantRecords },
+          },
         });
       }
 
@@ -339,16 +755,16 @@ router.post('/imports/publish', async (req, res) => {
           ...productRecord,
           url: productData.source.url,
           images: { create: imageRecords },
-          variants: { create: variantRecords }
-        }
+          variants: { create: variantRecords },
+        },
       });
     });
 
     // 2. Queue the Shopify push
-    const job = await QueueService.addTask('PUBLISH_TO_SHOPIFY', {
+    const job = await QueueService.addTask("PUBLISH_TO_SHOPIFY", {
       sourceProductId: sourceProduct.id,
-      pricingRuleId,
-      collections: collectionIds
+      pricingRuleId: selectedPricingRuleId,
+      collections: collectionIds,
     });
 
     res.json({ success: true, productId: sourceProduct.id, jobId: job.id });
@@ -358,107 +774,162 @@ router.post('/imports/publish', async (req, res) => {
 });
 
 // Sync execution
-router.post('/products/:id/sync', async (req, res) => {
-  const job = await QueueService.addTask('SYNC_PRODUCT', {
-    sourceProductId: req.params.id
+router.post("/products/:id/sync", async (req, res) => {
+  const job = await QueueService.addTask("SYNC_PRODUCT", {
+    sourceProductId: req.params.id,
   });
   res.json({ success: true, jobId: job.id });
 });
 
-router.patch('/products/:id', async (req, res) => {
+router.patch("/products/:id", async (req, res) => {
   const { syncStatus } = req.body;
-  if (!syncStatus) return res.status(400).json({ error: 'Missing syncStatus' });
-  
+  if (!syncStatus) return res.status(400).json({ error: "Missing syncStatus" });
+
   const product = await prisma.sourceProduct.update({
     where: { id: req.params.id },
-    data: { syncStatus }
+    data: { syncStatus },
   });
   res.json(product);
 });
 
+router.delete("/products/:id", async (req, res) => {
+  try {
+    const product = await prisma.sourceProduct.findUnique({
+      where: { id: req.params.id },
+      include: { shopifyProduct: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // Delete related records first (cascade)
+    await prisma.$transaction([
+      prisma.auditLog.deleteMany({ where: { sourceProductId: req.params.id } }),
+      prisma.sourceImage.deleteMany({
+        where: { sourceProductId: req.params.id },
+      }),
+      prisma.sourceVariant.deleteMany({
+        where: { sourceProductId: req.params.id },
+      }),
+      prisma.manualReviewItem.deleteMany({
+        where: { sourceProductId: req.params.id },
+      }),
+      ...(product.shopifyProduct
+        ? [
+            prisma.shopifyVariant.deleteMany({
+              where: { shopifyProductId: product.shopifyProduct.id },
+            }),
+            prisma.shopifyProduct.delete({
+              where: { id: product.shopifyProduct.id },
+            }),
+          ]
+        : []),
+      prisma.sourceProduct.delete({ where: { id: req.params.id } }),
+    ]);
+
+    res.json({ success: true, message: "Product deleted successfully" });
+  } catch (error: any) {
+    console.error("Delete product error:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Failed to delete product" });
+  }
+});
+
 // Manual Review
-router.get('/manual-review', async (req, res) => {
+router.get("/manual-review", async (req, res) => {
   const items = await prisma.manualReviewItem.findMany({
-    where: { status: 'pending' },
-    include: { sourceProduct: true }
+    where: { status: "pending" },
+    include: { sourceProduct: true },
   });
   res.json(items);
 });
 
 // Manual Review resolution
-router.post('/manual-review/:id/:decision', async (req, res) => {
+router.post("/manual-review/:id/:decision", async (req, res) => {
   const { id, decision } = req.params;
-  const status = decision === 'approve' ? 'approved' : 'rejected';
-  
+  const status = decision === "approve" ? "approved" : "rejected";
+
   await prisma.manualReviewItem.update({
     where: { id },
-    data: { status, resolvedAt: new Date() }
+    data: { status, resolvedAt: new Date() },
   });
 
   res.json({ success: true });
 });
 
 // Settings - Shopify Connection
-router.get('/settings/shopify', async (req, res) => {
+router.get("/settings/shopify", async (req, res) => {
   try {
     const connection = await prisma.shopifyConnection.findFirst();
     if (!connection) {
       return res.json({
-        shopDomain: '',
-        clientId: '',
-        clientSecret: '',
+        shopDomain: "",
+        clientId: "",
+        clientSecret: "",
         hasClientSecret: false,
-        accessToken: 'Not Connected',
+        accessToken: "Not Connected",
         scopes: DEFAULT_SHOPIFY_SCOPES,
         isConnected: false,
         connectedAt: null,
         callbackUrl: getShopifyRedirectUri(req),
-        apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
+        apiVersion: process.env.SHOPIFY_API_VERSION || "2026-04",
       });
     }
-    
+
     res.json({
       shopDomain: connection.shopDomain,
       clientId: connection.clientId,
-      clientSecret: '****************',
+      clientSecret: "****************",
       hasClientSecret: Boolean(connection.clientSecretEnc),
-      accessToken: connection.accessTokenEnc ? 'Connected' : 'Not Connected',
-      scopes: connection.scopes.split(','),
+      accessToken: connection.accessTokenEnc ? "Connected" : "Not Connected",
+      scopes: connection.scopes.split(","),
       isConnected: connection.isConnected,
       connectedAt: connection.connectedAt,
       callbackUrl: getShopifyRedirectUri(req),
-      apiVersion: process.env.SHOPIFY_API_VERSION || '2026-04',
+      apiVersion: process.env.SHOPIFY_API_VERSION || "2026-04",
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch settings' });
+    res.status(500).json({ error: "Failed to fetch settings" });
   }
 });
 
-router.post('/settings/shopify', async (req, res) => {
+router.post("/settings/shopify", async (req, res) => {
   const { shopDomain, clientId, clientSecret, scopes } = req.body;
-  
+
   if (!shopDomain || !clientId) {
-    return res.status(400).json({ error: 'Missing required configuration fields' });
+    return res
+      .status(400)
+      .json({ error: "Missing required configuration fields" });
   }
 
   try {
     const normalizedShopDomain = assertShopDomain(shopDomain);
     const cleanClientId = String(clientId).trim();
-    const cleanClientSecret = String(clientSecret || '').trim();
-    const scopesStr = normalizeScopes(scopes).join(',');
+    const cleanClientSecret = String(clientSecret || "").trim();
+    const scopesStr = normalizeScopes(scopes).join(",");
     const existing = await prisma.shopifyConnection.findUnique({
       where: { shopDomain: normalizedShopDomain },
     });
 
     if (!existing && !cleanClientSecret) {
-      return res.status(400).json({ error: 'Client secret is required for a new Shopify connection' });
+      return res
+        .status(400)
+        .json({
+          error: "Client secret is required for a new Shopify connection",
+        });
     }
 
     const credentialsChanged = Boolean(
       existing &&
-      (existing.clientId !== cleanClientId || existing.scopes !== scopesStr || cleanClientSecret)
+      (existing.clientId !== cleanClientId ||
+        existing.scopes !== scopesStr ||
+        cleanClientSecret),
     );
-    const encryptedSecret = cleanClientSecret ? encrypt(cleanClientSecret) : existing?.clientSecretEnc;
+    const encryptedSecret = cleanClientSecret
+      ? encrypt(cleanClientSecret)
+      : existing?.clientSecretEnc;
 
     await prisma.shopifyConnection.upsert({
       where: { shopDomain: normalizedShopDomain },
@@ -475,14 +946,14 @@ router.post('/settings/shopify', async (req, res) => {
               oauthStateExpiresAt: null,
             }
           : {}),
-        updatedAt: new Date()
+        updatedAt: new Date(),
       },
       create: {
         shopDomain: normalizedShopDomain,
         clientId: cleanClientId,
         clientSecretEnc: encryptedSecret!,
-        scopes: scopesStr
-      }
+        scopes: scopesStr,
+      },
     });
 
     res.json({ success: true, callbackUrl: getShopifyRedirectUri(req) });
@@ -491,9 +962,10 @@ router.post('/settings/shopify', async (req, res) => {
   }
 });
 
-router.post('/settings/shopify/test', async (req, res) => {
+router.post("/settings/shopify/test", async (req, res) => {
   const { shopDomain } = req.body;
-  if (!shopDomain) return res.status(400).json({ error: 'Shop domain required' });
+  if (!shopDomain)
+    return res.status(400).json({ error: "Shop domain required" });
 
   try {
     const normalizedShopDomain = assertShopDomain(shopDomain);
@@ -503,29 +975,50 @@ router.post('/settings/shopify/test', async (req, res) => {
       maxRedirects: 0,
       validateStatus: (status) => status < 500,
     });
-    res.json({ success: true, message: 'Shopify domain is reachable' });
+    res.json({ success: true, message: "Shopify domain is reachable" });
   } catch (error: any) {
-    if (error.response?.status === 302 || error.response?.status === 200 || error.response?.status === 401) {
+    if (
+      error.response?.status === 302 ||
+      error.response?.status === 200 ||
+      error.response?.status === 401
+    ) {
       // 401 means reachable but unauthorized, which is expected for /admin without token
-      return res.json({ success: true, message: 'Shopify domain is reachable' });
+      return res.json({
+        success: true,
+        message: "Shopify domain is reachable",
+      });
     }
-    res.status(error.statusCode || 400).json({ error: error.message || 'Could not reach Shopify domain. Please check the URL.' });
+    res
+      .status(error.statusCode || 400)
+      .json({
+        error:
+          error.message ||
+          "Could not reach Shopify domain. Please check the URL.",
+      });
   }
 });
 
-router.post('/shopify/connect', async (req, res) => {
+router.post("/shopify/connect", async (req, res) => {
   try {
     const connection = await prisma.shopifyConnection.findFirst();
-    if (!connection) return res.status(400).json({ error: 'Shopify connection not configured' });
-    if (!connection.clientSecretEnc) return res.status(400).json({ error: 'Shopify client secret is missing' });
+    if (!connection)
+      return res
+        .status(400)
+        .json({ error: "Shopify connection not configured" });
+    if (!connection.clientSecretEnc)
+      return res
+        .status(400)
+        .json({ error: "Shopify client secret is missing" });
 
-    const state = crypto.randomBytes(16).toString('hex');
+    const state = crypto.randomBytes(16).toString("hex");
     const redirectUri = getShopifyRedirectUri(req);
-    const oauthUrl = new URL(`https://${connection.shopDomain}/admin/oauth/authorize`);
-    oauthUrl.searchParams.set('client_id', connection.clientId);
-    oauthUrl.searchParams.set('scope', connection.scopes);
-    oauthUrl.searchParams.set('redirect_uri', redirectUri);
-    oauthUrl.searchParams.set('state', state);
+    const oauthUrl = new URL(
+      `https://${connection.shopDomain}/admin/oauth/authorize`,
+    );
+    oauthUrl.searchParams.set("client_id", connection.clientId);
+    oauthUrl.searchParams.set("scope", connection.scopes);
+    oauthUrl.searchParams.set("redirect_uri", redirectUri);
+    oauthUrl.searchParams.set("state", state);
 
     await prisma.shopifyConnection.update({
       where: { id: connection.id },
@@ -541,26 +1034,34 @@ router.post('/shopify/connect', async (req, res) => {
   }
 });
 
-router.get('/shopify/callback', async (req, res) => {
+router.get("/shopify/callback", async (req, res) => {
   const code = firstQueryValue(req.query.code);
   const state = firstQueryValue(req.query.state);
   const shop = normalizeShopDomain(req.query.shop);
-  
-  if (!code || !shop || !state) return res.status(400).send('Invalid callback');
+
+  if (!code || !shop || !state) return res.status(400).send("Invalid callback");
 
   try {
     const shopDomain = assertShopDomain(shop);
-    const connection = await prisma.shopifyConnection.findUnique({ where: { shopDomain } });
-    if (!connection) return res.status(404).send('Connection not found');
+    const connection = await prisma.shopifyConnection.findUnique({
+      where: { shopDomain },
+    });
+    if (!connection) return res.status(404).send("Connection not found");
 
     const clientSecret = decrypt(connection.clientSecretEnc);
-    const stateExpired = !connection.oauthStateExpiresAt || connection.oauthStateExpiresAt < new Date();
-    if (!connection.oauthState || connection.oauthState !== state || stateExpired) {
-      return res.status(400).send('Invalid or expired OAuth state');
+    const stateExpired =
+      !connection.oauthStateExpiresAt ||
+      connection.oauthStateExpiresAt < new Date();
+    if (
+      !connection.oauthState ||
+      connection.oauthState !== state ||
+      stateExpired
+    ) {
+      return res.status(400).send("Invalid or expired OAuth state");
     }
 
     if (!verifyShopifyHmac(req.query, clientSecret)) {
-      return res.status(400).send('Invalid Shopify callback signature');
+      return res.status(400).send("Invalid Shopify callback signature");
     }
 
     const response = await axios.post(
@@ -572,14 +1073,15 @@ router.get('/shopify/callback', async (req, res) => {
       }).toString(),
       {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json',
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
         },
-      }
+      },
     );
 
     const { access_token, scope } = response.data;
-    if (!access_token) throw new Error('Shopify did not return an access token');
+    if (!access_token)
+      throw new Error("Shopify did not return an access token");
 
     await prisma.shopifyConnection.update({
       where: { id: connection.id },
@@ -590,20 +1092,23 @@ router.get('/shopify/callback', async (req, res) => {
         connectedAt: new Date(),
         oauthState: null,
         oauthStateExpiresAt: null,
-      }
+      },
     });
 
-    redirectToFrontend(req, res, { connected: 'true', shop: shopDomain });
+    redirectToFrontend(req, res, { connected: "true", shop: shopDomain });
   } catch (error: any) {
-    console.error('OAuth Error:', error.response?.data || error.message);
-    redirectToFrontend(req, res, { connected: 'false', error: 'shopify_oauth_failed' });
+    console.error("OAuth Error:", error.response?.data || error.message);
+    redirectToFrontend(req, res, {
+      connected: "false",
+      error: "shopify_oauth_failed",
+    });
   }
 });
 
-router.post('/shopify/disconnect', async (req, res) => {
+router.post("/shopify/disconnect", async (req, res) => {
   try {
     const connection = await prisma.shopifyConnection.findFirst();
-    if (!connection) return res.status(404).json({ error: 'Not configured' });
+    if (!connection) return res.status(404).json({ error: "Not configured" });
 
     await prisma.shopifyConnection.update({
       where: { id: connection.id },
@@ -613,7 +1118,7 @@ router.post('/shopify/disconnect', async (req, res) => {
         connectedAt: null,
         oauthState: null,
         oauthStateExpiresAt: null,
-      }
+      },
     });
 
     res.json({ success: true });
@@ -622,13 +1127,13 @@ router.post('/shopify/disconnect', async (req, res) => {
   }
 });
 
-router.get('/shopify/collections', async (req, res) => {
+router.get("/shopify/collections", async (req, res) => {
   try {
     const client = await ShopifyService.getClientFromDb(prisma);
     const collections = await ShopifyService.getCollections(client);
     res.json(collections);
   } catch (error: any) {
-    if (error.message === 'No active Shopify connection found') {
+    if (error.message === "No active Shopify connection found") {
       return res.json([]);
     }
 

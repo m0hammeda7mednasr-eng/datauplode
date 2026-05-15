@@ -3,9 +3,11 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { createServer as createHttpServer } from "http";
 import { createServer as createViteServer } from "vite";
 import apiRouter from "./src/server/api.js";
 import { prisma } from "./src/server/db.js";
+import { QueueService } from "./src/server/services/queue.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,9 +48,15 @@ function getAllowedOrigins() {
 
 async function startServer() {
   const app = express();
+  const httpServer = createHttpServer(app);
   const PORT = Number(process.env.PORT || 3000);
   const HOST = process.env.HOST || "0.0.0.0";
   const allowedOrigins = getAllowedOrigins();
+
+  console.log("🚀 Starting server...");
+  console.log("Environment:", process.env.NODE_ENV);
+  console.log("Port:", PORT);
+  console.log("Host:", HOST);
 
   app.set("trust proxy", 1);
 
@@ -60,6 +68,7 @@ async function startServer() {
         if (allowedOrigins.has(origin)) {
           callback(null, true);
         } else {
+          console.log("❌ Blocked origin:", origin);
           callback(null, false);
         }
       },
@@ -83,6 +92,7 @@ async function startServer() {
         uptimeSeconds: Math.round(process.uptime()),
       });
     } catch (error: any) {
+      console.error("❌ Health check failed:", error);
       res.status(503).json({
         ok: false,
         service: "syncly-api",
@@ -95,23 +105,32 @@ async function startServer() {
   // API routes
   app.use("/api", apiRouter);
 
+  console.log("✅ API routes mounted");
+
   // Seed default pricing rules if none exist
-  const ruleCount = await prisma.pricingRule.count();
-  if (ruleCount === 0) {
-    await prisma.pricingRule.createMany({
-      data: [
-        { name: "Standard (1.5x)", multiplier: 1.5, isDefault: true },
-        { name: "Egypt Market (24x)", multiplier: 24.0, rounding: ".99" },
-        { name: "Luxury (2x)", multiplier: 2.0, fixedMarkup: 10.0 },
-      ],
-    });
-    console.log("Seeded default pricing rules");
+  try {
+    const ruleCount = await prisma.pricingRule.count();
+    if (ruleCount === 0) {
+      await prisma.pricingRule.createMany({
+        data: [
+          { name: "Standard (1.5x)", multiplier: 1.5, isDefault: true },
+          { name: "Egypt Market (24x)", multiplier: 24.0, rounding: ".99" },
+          { name: "Luxury (2x)", multiplier: 2.0, fixedMarkup: 10.0 },
+        ],
+      });
+      console.log("✅ Seeded default pricing rules");
+    }
+  } catch (error: any) {
+    console.error("⚠️ Failed to seed pricing rules:", error.message);
   }
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -153,10 +172,11 @@ async function startServer() {
     }
   }
 
-  app.listen(PORT, HOST, () => {
+  httpServer.listen(PORT, HOST, () => {
     console.log(`Server running at http://${HOST}:${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
+    QueueService.startInventoryMonitor();
   });
 }
 
