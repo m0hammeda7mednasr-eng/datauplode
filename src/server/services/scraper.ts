@@ -149,6 +149,14 @@ function envFlag(name: string, defaultValue = false): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
+function managedBypassMode(): string {
+  return cleanText(process.env.SCRAPER_BYPASS_MODE || 'never').toLowerCase();
+}
+
+function managedBypassEnabled(): boolean {
+  return ['auto', 'always', 'on', 'enabled', 'true', '1'].includes(managedBypassMode());
+}
+
 function envNumber(name: string, defaultValue: number): number {
   const value = Number(cleanText(process.env[name]));
   return Number.isFinite(value) ? value : defaultValue;
@@ -172,7 +180,7 @@ function getManagedBypassUrlKey(url: string): string {
 }
 
 function reserveManagedBypassAttempt(url: string): string | undefined {
-  const mode = cleanText(process.env.SCRAPER_BYPASS_MODE || 'auto').toLowerCase();
+  const mode = managedBypassMode();
   if (mode === 'never' || mode === 'off' || mode === 'disabled') {
     return 'disabled by SCRAPER_BYPASS_MODE';
   }
@@ -223,6 +231,7 @@ function inferCountryCodeFromUrl(url: string): string | undefined {
 }
 
 function activeManagedBypassProviders(orderOverride?: ManagedBypassProvider[]): ManagedBypassProvider[] {
+  if (!managedBypassEnabled()) return [];
   if (orderOverride?.length) return [...orderOverride];
 
   const configured = cleanText(process.env.SCRAPER_BYPASS_PROVIDERS)

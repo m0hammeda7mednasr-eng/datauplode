@@ -7,8 +7,16 @@ import { ScraperService } from './scraper.js';
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 15);
 const INVENTORY_SYNC_BATCH_SIZE = Number(process.env.SYNC_INVENTORY_BATCH_SIZE || 25);
+const INVENTORY_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_INVENTORY_MIN_AGE_MINUTES || 1440);
 const MAX_SHOPIFY_MEDIA_ITEMS = 250;
 const scraperService = new ScraperService();
+
+function inventorySyncCutoffDate(): Date {
+  const minutes = Number.isFinite(INVENTORY_SYNC_MIN_AGE_MINUTES) && INVENTORY_SYNC_MIN_AGE_MINUTES > 0
+    ? INVENTORY_SYNC_MIN_AGE_MINUTES
+    : 1440;
+  return new Date(Date.now() - minutes * 60 * 1000);
+}
 
 function cleanOptionText(value: any): string {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -706,6 +714,9 @@ export class QueueService {
     const products = await prisma.sourceProduct.findMany({
       where: {
         syncStatus: 'active',
+        lastScrapedAt: {
+          lte: inventorySyncCutoffDate(),
+        },
         shopifyProduct: {
           is: {
             syncEnabled: true,
