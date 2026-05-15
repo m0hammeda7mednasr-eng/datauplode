@@ -19,6 +19,7 @@ function normalizeOrigin(value?: string | null) {
 
   try {
     const trimmed = value.trim();
+    if (!trimmed || /^(MY_|YOUR[_-])/i.test(trimmed)) return null;
     const url = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
     return new URL(url).origin;
   } catch {
@@ -29,6 +30,7 @@ function normalizeOrigin(value?: string | null) {
 function getAllowedOrigins() {
   const configuredOrigins = [
     process.env.FRONTEND_URL,
+    process.env.FRONTEND_UR,
     process.env.APP_URL,
     ...(process.env.CORS_ORIGINS || "").split(","),
   ];

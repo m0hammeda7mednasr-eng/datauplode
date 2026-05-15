@@ -92,6 +92,7 @@ function normalizePublicUrl(value?: string | null) {
   if (!value) return "";
   const trimmed = value.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
+  if (/^(MY_|YOUR[_-])/i.test(trimmed)) return "";
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
@@ -137,6 +138,7 @@ function getBackendUrl(req: any) {
 function getFrontendUrl(req?: any) {
   return normalizePublicUrl(
     process.env.FRONTEND_URL ||
+      process.env.FRONTEND_UR ||
       process.env.VITE_FRONTEND_URL ||
       (req ? getBackendUrl(req) : "") ||
       "https://datauplode.vercel.app",
