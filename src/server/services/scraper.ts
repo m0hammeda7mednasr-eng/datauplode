@@ -4484,8 +4484,19 @@ function parseMaxReaderMarkdown(markdown: string, url: string): NormalizedProduc
   }
 
   const lines = markdown.split(/\r?\n/).map(line => cleanText(line)).filter(Boolean);
+  const ignoredTitleLine = /^(?:Title:|URL Source:|Warning:|Markdown Content:|Home|Sign in|Search|Basket|Cart|Add to Basket|Add to Cart|Description and Care|Inclusive of VAT|Size|Color|Colour)$/i;
   const title = cleanText(
-    (lines.find(line => /^#\s+/.test(line)) || '')
+    (
+      lines.find(line => /^#\s+/.test(line)) ||
+      lines.find(line =>
+        line.length > 8 &&
+        !ignoredTitleLine.test(line) &&
+        !/^https?:\/\//i.test(line) &&
+        !/AED|د\.?إ|درهم|Inclusive of VAT/i.test(line) &&
+        !/^\d+\s*-\s*\d+\s*(?:MTHS?|MONTHS?|YRS?|YEARS?)$/i.test(line)
+      ) ||
+      ''
+    )
       .replace(/^#\s+/, '')
       .replace(/\s*\|\s*Max.*$/i, '')
   );

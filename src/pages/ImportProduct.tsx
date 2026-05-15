@@ -1,6 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Search, Loader2, AlertTriangle, Image as ImageIcon, Check, FolderOpen, RefreshCw, ChevronDown } from 'lucide-react';
+import { Search, Loader2, AlertTriangle, Image as ImageIcon, Check, FolderOpen, RefreshCw, ChevronDown, ExternalLink } from 'lucide-react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
@@ -172,7 +172,7 @@ export default function ImportProduct() {
 
   const handleAnalyzeSnapshot = () => {
     if (!url || !nextSnapshotText.trim()) {
-      toast.error('Paste the Next product page text first.');
+      toast.error('Paste the product page text first.');
       return;
     }
 
@@ -366,7 +366,7 @@ export default function ImportProduct() {
                 <div>
                   <div className="text-xs font-black uppercase tracking-widest">{blockedSupplierName} blocked server analysis</div>
                   <p className="mt-1 text-xs font-semibold leading-relaxed text-amber-900">
-                    Paste the visible product text from the opened {blockedSupplierName} page and analyze the snapshot.
+                    Use a browser page snapshot for this product so Syncly does not spend managed bypass credits.
                   </p>
                 </div>
                 <textarea
@@ -376,7 +376,16 @@ export default function ImportProduct() {
                   placeholder="Product title, price, product code, colour, size, description..."
                   className="w-full rounded-lg border border-amber-200 bg-white p-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-amber-300"
                 />
-                <div className="flex justify-end">
+                <div className="flex flex-wrap justify-end gap-2">
+                  <a
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2 rounded-md border border-amber-300 bg-white px-4 py-2 text-xs font-black uppercase tracking-widest text-amber-800 shadow-sm"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Open Page
+                  </a>
                   <button
                     type="button"
                     onClick={handleAnalyzeSnapshot}
