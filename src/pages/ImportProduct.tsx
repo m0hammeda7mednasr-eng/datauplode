@@ -153,7 +153,10 @@ export default function ImportProduct() {
     },
     onError: (error: any) => {
       const responsePayload = error?.response?.data;
-      if (responsePayload?.code === 'SOURCE_BLOCKED' && responsePayload?.retryWithSnapshot) {
+      if (
+        responsePayload?.retryWithSnapshot &&
+        (responsePayload?.code === 'SOURCE_BLOCKED' || responsePayload?.code === 'NEXT_SIZE_VALUES_MISSING')
+      ) {
         setBlockedImport(responsePayload);
       }
       toast.error(apiErrorMessage(error, 'Failed to analyze product'));
@@ -323,6 +326,7 @@ export default function ImportProduct() {
         ? 'SHEIN blocked the product media response, so this analysis used a product snapshot without image URLs.'
         : null)
     );
+  const blockedSupplierName = blockedImport?.supplier || analysisResult?.source?.supplier || 'Supplier';
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-12">
@@ -360,9 +364,9 @@ export default function ImportProduct() {
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <div className="min-w-0 flex-1 space-y-3">
                 <div>
-                  <div className="text-xs font-black uppercase tracking-widest">Next blocked server analysis</div>
+                  <div className="text-xs font-black uppercase tracking-widest">{blockedSupplierName} blocked server analysis</div>
                   <p className="mt-1 text-xs font-semibold leading-relaxed text-amber-900">
-                    Paste the visible product text from the opened Next page and analyze the snapshot.
+                    Paste the visible product text from the opened {blockedSupplierName} page and analyze the snapshot.
                   </p>
                 </div>
                 <textarea

@@ -93,6 +93,45 @@ const browserHeaders = {
   'Upgrade-Insecure-Requests': '1',
 };
 
+function buildScraperAxiosConfig() {
+  const proxyUrl = cleanText(process.env.SCRAPER_HTTP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
+  if (!proxyUrl) return {};
+
+  try {
+    const parsed = new URL(proxyUrl);
+    const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
+    return {
+      proxy: {
+        protocol: parsed.protocol.replace(':', ''),
+        host: parsed.hostname,
+        port,
+        ...(parsed.username
+          ? {
+              auth: {
+                username: decodeURIComponent(parsed.username),
+                password: decodeURIComponent(parsed.password),
+              },
+            }
+          : {}),
+      },
+    };
+  } catch {
+    return {};
+  }
+}
+
+function scraperProxyUrl(): string | undefined {
+  const proxyUrl = cleanText(process.env.SCRAPER_HTTP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
+  return proxyUrl || undefined;
+}
+
+function isUsableNextProductHtml(html: string): boolean {
+  return html.includes('data-testid="product-title"') ||
+    html.includes('data-testid="product-now-price"') ||
+    html.includes('"@type":"Product"') ||
+    html.includes('"@type": "Product"');
+}
+
 const execFileAsync = promisify(execFile);
 
 const nextDomains = ['next.co.uk', 'nextdirect.com', 'next.ae', 'next.us'];
@@ -529,6 +568,22 @@ function stripUrlHash(url: string): string {
   return cleanText(url).split('#')[0];
 }
 
+const NEXT_MOBILE_USER_AGENTS = [
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+];
+
+function buildNextMobileHeaders(url: string, userAgent = NEXT_MOBILE_USER_AGENTS[0]): Record<string, string> {
+  return {
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language': defaultNextLanguageForUrl(url),
+    'cache-control': 'no-cache',
+    pragma: 'no-cache',
+    'user-agent': userAgent,
+    cookie: nextCookieForUrl(url),
+  };
+}
+
 function buildNextBrowserHeaders(url: string): Record<string, string> {
   return {
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -546,6 +601,51 @@ function buildNextBrowserHeaders(url: string): Record<string, string> {
     'user-agent': browserHeaders['User-Agent'],
     cookie: nextCookieForUrl(url),
   };
+}
+
+async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
+  const attempts: Array<{ headers: Record<string, string>; label: string }> = [
+    ...NEXT_MOBILE_USER_AGENTS.map((userAgent, index) => ({
+      headers: buildNextMobileHeaders(pageUrl, userAgent),
+      label: `mobile-${index + 1}`,
+    })),
+    { headers: buildNextBrowserHeaders(pageUrl), label: 'desktop' },
+  ];
+
+  for (let retry = 0; retry < 3; retry += 1) {
+    for (const attempt of attempts) {
+      try {
+        const response = await axios.get(pageUrl, {
+          headers: attempt.headers,
+          timeout: 25000,
+          validateStatus: (status: number) => status < 500,
+          ...buildScraperAxiosConfig(),
+        });
+
+        if (response.status !== 200) continue;
+
+        const html = String(response.data);
+        if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) continue;
+
+        return html;
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1200 * (retry + 1)));
+  }
+
+  for (const mobileUserAgent of NEXT_MOBILE_USER_AGENTS) {
+    try {
+      const html = await fetchHtmlWithCurl(pageUrl, buildNextMobileHeaders(pageUrl, mobileUserAgent));
+      if (!isBlockedNextHtml(html) && isUsableNextProductHtml(html)) {
+        return html;
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 function buildNextRegionalUrls(url: string, styleId: string, productId: string): string[] {
@@ -595,12 +695,7 @@ function buildNextHtmlFallbackUrls(url: string): string[] {
   if (!ids) return [stripUrlHash(url)];
 
   const { styleId, productId } = ids;
-  return [...new Set([
-    ...buildNextRegionalUrls(url, styleId, productId),
-    `https://www.next.us/en/style/${styleId}/${productId}?json=true`,
-    `https://www.next.co.uk/en/style/${styleId}/${productId}`,
-    `https://www.next.ie/en/style/${styleId}/${productId}`,
-  ])];
+  return [...new Set(buildNextRegionalUrls(url, styleId, productId))];
 }
 
 function isBlockedReaderMarkdown(markdown: string): boolean {
@@ -1229,28 +1324,42 @@ async function fetchHtml(url: string, extraHeaders: Record<string, string> = {})
 
 async function fetchHtmlWithCurl(url: string, requestHeaders: Record<string, string> = {}): Promise<string> {
   const curlExecutable = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  const userAgent = requestHeaders['user-agent'] || requestHeaders['User-Agent'] || browserHeaders['User-Agent'];
   const curlArgs = [
     '-L',
     '--compressed',
     '-sS',
     '-A',
-    browserHeaders['User-Agent'],
+    userAgent,
   ];
+  const proxyUrl = scraperProxyUrl();
+  if (proxyUrl) {
+    curlArgs.push('--proxy', proxyUrl);
+  }
 
   for (const [key, value] of Object.entries(requestHeaders)) {
+    if (/^user-agent$/i.test(key)) continue;
     curlArgs.push('-H', `${key}: ${value}`);
   }
 
   curlArgs.push(url);
 
-  const { stdout } = await execFileAsync(
-    curlExecutable,
-    curlArgs,
-    {
-      timeout: 60000,
-      maxBuffer: 30 * 1024 * 1024,
+  let stdout: string | Buffer;
+  try {
+    ({ stdout } = await execFileAsync(
+      curlExecutable,
+      curlArgs,
+      {
+        timeout: 60000,
+        maxBuffer: 30 * 1024 * 1024,
+      }
+    ));
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      throw new Error('curl executable is not available on this host');
     }
-  );
+    throw error;
+  }
 
   const html = typeof stdout === 'string' ? stdout : String(stdout);
   if (!html.trim()) throw new Error('curl returned an empty response');
@@ -3784,31 +3893,83 @@ function parseMaxFashionHtml(html: string, url: string): NormalizedProduct {
   return extractGenericProductFromHtml(html, url, 'Max Fashion');
 }
 
+const MAX_FASHION_USER_AGENTS = [
+  browserHeaders['User-Agent'],
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+];
+
+function isUsableMaxFashionHtml(html: string): boolean {
+  if (!html) return false;
+  if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(html)) return false;
+
+  return /productPageReducerBL|__NEXT_DATA__|"@type"\s*:\s*"Product"|property=["']og:type["'][^>]*content=["']product/i.test(html);
+}
+
+async function fetchMaxFashionProductHtml(url: string): Promise<string | null> {
+  for (const userAgent of MAX_FASHION_USER_AGENTS) {
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          ...browserHeaders,
+          'User-Agent': userAgent,
+          'Accept-Language': 'en-AE,en;q=0.9',
+          Referer: 'https://www.maxfashion.com/ae/en/',
+        },
+        timeout: 20000,
+        validateStatus: (status: number) => status < 500,
+        ...buildScraperAxiosConfig(),
+      });
+
+      if (response.status !== 200) continue;
+      const html = typeof response.data === 'string' ? response.data : String(response.data);
+      if (!isUsableMaxFashionHtml(html)) continue;
+
+      return html;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+
+  return null;
+}
+
 export class MaxFashionScraper implements SupplierScraper {
   canHandle(url: string): boolean {
     return hostMatches(url, ['maxfashion.com']);
+  }
+
+  scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const product = parseMaxReaderMarkdown(snapshotText, url);
+    return {
+      ...product,
+      raw: {
+        ...(product.raw || {}),
+        pastedSnapshotFallback: true,
+      },
+    };
   }
 
   async scrape(url: string): Promise<NormalizedProduct> {
     const errors: string[] = [];
 
     try {
-      const html = await fetchHtml(url, {
-        'Accept-Language': 'en-AE,en;q=0.9',
-        'Referer': 'https://www.maxfashion.com/ae/en/',
-      });
-
-      if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(html)) {
-        throw new Error('Cloudflare challenge');
-      }
-
+      const html = await fetchMaxFashionProductHtml(url);
+      if (!html) throw new Error('No usable product HTML returned');
       return parseMaxFashionHtml(html, url);
     } catch (error: any) {
       errors.push(`direct: ${error.message}`);
     }
 
     try {
-      const html = await fetchHtmlWithCurl(url);
+      const html = await fetchHtmlWithCurl(url, {
+        'Accept-Language': 'en-AE,en;q=0.9',
+        Referer: 'https://www.maxfashion.com/ae/en/',
+      });
+      if (!isUsableMaxFashionHtml(html)) {
+        throw new Error('curl returned Cloudflare challenge');
+      }
       return parseMaxFashionHtml(html, url);
     } catch (error: any) {
       errors.push(`curl: ${error.message}`);
@@ -3821,6 +3982,23 @@ export class MaxFashionScraper implements SupplierScraper {
       errors.push(`reader: ${error.message}`);
     }
 
+    const blockedSignals = errors.filter(error =>
+      /HTTP 403|Cloudflare|security verification|access-denied|no usable product html|curl executable is not available|Reader fallback returned an access-denied/i.test(error)
+    ).length;
+
+    if (blockedSignals >= Math.max(1, errors.length - 1)) {
+      throw new ScraperError(
+        'Max Fashion blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.',
+        {
+          code: 'SOURCE_BLOCKED',
+          status: 422,
+          supplier: 'Max Fashion',
+          retryWithSnapshot: true,
+          details: errors,
+        },
+      );
+    }
+
     throw new Error(`Failed to scrape Max Fashion: product page is protected by Cloudflare and no product JSON was exposed (${errors.join('; ')})`);
   }
 
@@ -3829,15 +4007,17 @@ export class MaxFashionScraper implements SupplierScraper {
   }
 }
 
-async function fetchReaderMarkdown(url: string): Promise<string> {
+async function fetchReaderMarkdown(url: string, extraHeaders: Record<string, string> = {}): Promise<string> {
   const { data, status } = await axios.get(`https://r.jina.ai/${url}`, {
     headers: {
       'Accept': 'text/plain',
       'User-Agent': browserHeaders['User-Agent'],
+      ...extraHeaders,
     },
     timeout: 30000,
     responseType: 'text',
     validateStatus: status => status < 500,
+    ...buildScraperAxiosConfig(),
   });
 
   if (status !== 200) {
@@ -3856,6 +4036,25 @@ async function fetchReaderMarkdown(url: string): Promise<string> {
   return text;
 }
 
+function nextPriceLineMatchesRegion(url: string, priceLine: string | undefined): boolean {
+  if (!priceLine) return false;
+  const currency = defaultNextCurrencyForUrl(url);
+  if (currency === 'AED') return /AED|د\.?إ|درهم/i.test(priceLine);
+  if (currency === 'USD') return /USD|\$/i.test(priceLine);
+  if (currency === 'GBP') return /GBP|£/i.test(priceLine);
+  if (currency === 'EGP') return /EGP|ج\.?\s*م|جنيه/i.test(priceLine);
+  return true;
+}
+
+function nextReaderMarkdownMatchesRegion(url: string, markdown: string): boolean {
+  const currency = defaultNextCurrencyForUrl(url);
+  if (currency === 'AED') return /AED\s*[\d,.]+|[\d,.]+\s*AED|د\.?إ\s*[\d,.]+|[\d,.]+\s*د\.?إ|درهم/i.test(markdown);
+  if (currency === 'USD') return /USD\s*[\d,.]+|[\d,.]+\s*USD|(?:^|[^\d])\$\s*[\d,.]+/m.test(markdown);
+  if (currency === 'GBP') return /GBP\s*[\d,.]+|[\d,.]+\s*GBP|£\s*[\d,.]+/i.test(markdown);
+  if (currency === 'EGP') return /EGP\s*[\d,.]+|[\d,.]+\s*EGP|ج\.?\s*م\s*[\d,.]+|جنيه/i.test(markdown);
+  return true;
+}
+
 async function fetchNextReaderMarkdown(url: string): Promise<{ markdown: string; readerUrl: string } | null> {
   const tried = new Set<string>();
 
@@ -3865,9 +4064,15 @@ async function fetchNextReaderMarkdown(url: string): Promise<{ markdown: string;
     tried.add(normalized);
 
     try {
-      const markdown = await fetchReaderMarkdown(normalized);
+      const markdown = await fetchReaderMarkdown(normalized, isNextUrl(normalized) ? {
+        'User-Agent': NEXT_MOBILE_USER_AGENTS[0],
+        'X-User-Agent': NEXT_MOBILE_USER_AGENTS[0],
+      } : {});
       if (markdown.length < 400) {
         throw new Error('Reader fallback returned an unexpectedly short page');
+      }
+      if (!nextReaderMarkdownMatchesRegion(url, markdown)) {
+        throw new Error('Reader fallback returned a different regional storefront');
       }
 
       return { markdown, readerUrl: normalized };
@@ -3898,10 +4103,25 @@ function parseMaxReaderMarkdown(markdown: string, url: string): NormalizedProduc
   const vatIndex = lines.findIndex(line => /Inclusive of VAT/i.test(line));
   const priceWindow = vatIndex >= 0 ? lines.slice(Math.max(0, vatIndex - 6), vatIndex + 1) : lines;
   const priceLine =
-    priceWindow.reverse().find(line => parsePrice(line) > 0) ||
+    [...priceWindow].reverse().find(line => parsePrice(line) > 0) ||
     lines.find(line => /AED|د\.?إ|درهم/i.test(line) && parsePrice(line) > 0);
-  const price = parsePrice(priceLine);
+  let price = parsePrice(priceLine);
   const currency = detectCurrency(markdown, 'AED');
+  const titleIndex = lines.findIndex(line => cleanText(line.replace(/^#\s+/, '')) === title);
+  const nearbyPriceLine = lines
+    .slice(titleIndex >= 0 ? titleIndex : 0, (titleIndex >= 0 ? titleIndex : 0) + 24)
+    .find(line =>
+      /AED|Ø¯\.?Ø¥|Ø¯Ø±Ù‡Ù…|USD|GBP|EUR|\$/i.test(line) &&
+      parsePrice(line) > 0 &&
+      !/^\d+\s*-\s*\d+\s*(?:MTHS?|MONTHS?|YRS?|YEARS?)$/i.test(line) &&
+      !/^(?:Size|Color|Colour|Product Code)/i.test(line)
+    );
+  if (
+    (!price || price <= 0 || /^\d+\s*-\s*\d+\s*(?:MTHS?|MONTHS?|YRS?|YEARS?)$/i.test(cleanText(priceLine))) &&
+    nearbyPriceLine
+  ) {
+    price = parsePrice(nearbyPriceLine);
+  }
 
   const colorIndex = lines.findIndex(line => /^Color\s*:/i.test(line));
   const color = colorIndex >= 0 ? cleanText(lines[colorIndex].split(':').pop() || lines[colorIndex + 1]) : undefined;
@@ -4167,14 +4387,15 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
     throw new Error('Reader fallback did not expose a product title');
   }
 
-  const priceLine = lines
-    .slice(titleIndex, productCodeIndex > titleIndex ? productCodeIndex : titleIndex + 30)
-    .find(line => /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line)) ||
-    lines.find(line => /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line));
-
-  const snapshotPriceLine = lines
-    .slice(titleIndex, productCodeIndex > titleIndex ? productCodeIndex : titleIndex + 30)
-    .find(looksLikeNextPriceText) ||
+  const priceWindow = lines.slice(
+    titleIndex,
+    productCodeIndex > titleIndex ? productCodeIndex : titleIndex + 30,
+  );
+  const regionalPriceLine =
+    priceWindow.find(line => looksLikeNextPriceText(line) && nextPriceLineMatchesRegion(url, line)) ||
+    lines.find(line => looksLikeNextPriceText(line) && nextPriceLineMatchesRegion(url, line));
+  const snapshotPriceLine =
+    priceWindow.find(looksLikeNextPriceText) ||
     lines.find(looksLikeNextPriceText);
   const descriptionText = descriptionFromNextSnapshotLines(lines);
 
@@ -4185,14 +4406,22 @@ function parseNextSnapshotText(snapshotText: string, url: string, snapshotUrl = 
   const arabicBrandMatch = title.match(/\s\u0645\u0646\s+(.+)$/);
   const englishBrandMatch = title.match(/\bfrom\s+(.+)$/i);
   const brand = cleanText(arabicBrandMatch?.[1] || englishBrandMatch?.[1] || 'Next');
-  const effectivePriceLine = snapshotPriceLine || priceLine ||
-    lines
-      .slice(titleIndex, productCodeIndex > titleIndex ? productCodeIndex : titleIndex + 30)
-      .find(looksLikeCurrencyText) ||
-    lines.find(looksLikeCurrencyText);
+  const effectivePriceLine = regionalPriceLine ||
+    (!rawFlags.readerFallback
+      ? snapshotPriceLine ||
+        priceWindow.find(line => /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line)) ||
+        lines.find(line => /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line)) ||
+        priceWindow.find(looksLikeCurrencyText) ||
+        lines.find(looksLikeCurrencyText)
+      : undefined);
+
+  if (rawFlags.readerFallback && !effectivePriceLine) {
+    throw new Error('Reader fallback did not expose a regional product price');
+  }
+
   const priceRange = parsePriceRange(effectivePriceLine);
   const price = priceRange.min;
-  const currency = detectCurrency(effectivePriceLine, defaultNextCurrencyForUrl(url));
+  const currency = defaultNextCurrencyForUrl(url) || detectCurrency(effectivePriceLine, 'USD');
   const color = parseNextColourFromMarkdown(lines) || inferNextColourFromTitle(title);
   if (color) {
     images.forEach(image => {
@@ -4281,6 +4510,37 @@ function isBlockedNextHtml(html: string): boolean {
     /404\s*\|\s*Page Not Found|Oops'\s+Something's gone wrong/i.test(html);
 }
 
+function extractNextSizesFromHtml($: cheerio.CheerioAPI, title: string, description: string): string[] {
+  const sizes: string[] = [];
+
+  $('[data-testid="size-select"] option, [data-testid="size-select"] [role="option"]').each((_, el) => {
+    const value = cleanText($(el).attr('value') || $(el).text());
+    const size = cleanProductOptionValue('Size', value);
+    if (size && !/^(?:choose|select)\s+size$/i.test(size)) sizes.push(size);
+  });
+
+  $('[data-testid="item-form-size-control"] button[aria-label]').each((_, el) => {
+    const label = cleanText($(el).attr('aria-label'));
+    const match = label.match(/^(.+?)\s+available$/i);
+    if (!match) return;
+    const size = cleanProductOptionValue('Size', match[1]);
+    if (size) sizes.push(size);
+  });
+
+  const explicitSizes = uniqueCleanValues(sizes);
+  if (explicitSizes.length) return explicitSizes;
+
+  const babySizes = inferNextBabySizes(`${title} ${description}`);
+  if (babySizes.length) return babySizes;
+
+  const hasSizePicker = $('[data-testid="size-select"], [data-testid="item-form-size-control"]').length > 0;
+  if (hasSizePicker && /\b(?:slippers?|mules?|slider slippers?|toe thong slippers?)\b/i.test(`${title} ${description}`)) {
+    return ['S', 'M', 'L'];
+  }
+
+  return [];
+}
+
 function extractNextProductFromHtml(html: string, url: string, pageUrl = url): NormalizedProduct {
   if (isBlockedNextHtml(html)) {
     throw new Error('Next HTML returned an access-denied or missing page');
@@ -4309,13 +4569,20 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
   }
 
   const offerList = Array.isArray(productData?.offers) ? productData.offers : [productData?.offers].filter(Boolean);
-  const productCode = cleanText(productData?.sku || $('[data-testid="product-code"]').first().text() || getProductIdFromUrl(url) || '');
+  const productCode = cleanText(
+    productData?.sku ||
+    $('[data-testid="product-code"]').first().text() ||
+    $('[data-testid="product-code"]').first().attr('content') ||
+    getProductIdFromUrl(url) ||
+    '',
+  );
   const title = cleanText(
     productData?.name ||
+    $('[data-testid="product-title"]').first().text() ||
     $('[data-testid="pdp-title"]').first().text() ||
     $('h1').first().text() ||
     $('meta[property="og:title"]').attr('content') ||
-    $('title').text()
+    $('title').text().replace(/^Buy\s+/i, '').replace(/\s*\|\s*Next.*$/i, '')
   );
 
   if (!title || /^(Access Denied|404|Page Not Found)$/i.test(title)) {
@@ -4325,7 +4592,9 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
   const description = cleanText(
     productData?.description
       ? cheerio.load(productData.description).text()
-      : $('[data-testid="product-description"]').first().text() || $('meta[name="description"]').attr('content')
+      : $('[data-testid="item-description"]').first().text() ||
+        $('[data-testid="product-description"]').first().text() ||
+        $('meta[name="description"]').attr('content')
   );
 
   const brandValue = productData?.brand;
@@ -4337,22 +4606,29 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
     pushNextProductImage(images, typeof imageUrl === 'string' ? imageUrl : imageUrl?.url, pageUrl, itemNumber);
   }
 
+  const priceText = cleanText(
+    $('[data-testid="product-now-price"]').first().text() ||
+    $('[data-testid="product-price"]').first().text() ||
+    productData?.offers?.price,
+  );
   const priceValues = offerList.map((offer: any) => parsePrice(offer?.price)).filter((price: number) => price > 0);
-  const fallbackPrice = parsePrice(productData?.offers?.price || $('[data-testid="product-price"]').first().text());
+  const priceRangeFromDom = parsePriceRange(priceText);
+  const fallbackPrice = priceRangeFromDom.min || parsePrice(productData?.offers?.price || priceText);
   const price = priceValues.length ? Math.min(...priceValues) : fallbackPrice;
-  const maxPrice = priceValues.length ? Math.max(...priceValues) : price;
+  const maxPrice = priceValues.length ? Math.max(...priceValues) : (priceRangeFromDom.max || price);
   const currency = detectCurrency(
-    offerList[0]?.priceCurrency || $('[data-testid="product-price"]').first().text(),
+    offerList[0]?.priceCurrency || priceText,
     defaultNextCurrencyForUrl(url) || offerList[0]?.priceCurrency || 'USD',
   );
-  const color = parseNextColourFromHtml($, title);
+  const color = cleanColorOptionValue($('[data-testid="selected-colour-label"]').first().text()) ||
+    parseNextColourFromHtml($, title);
   if (color) {
     images.forEach(image => {
       image.color ||= color;
     });
   }
   const variantsFromOffers = variantsFromJsonLdOffers(productData?.offers, productCode, color);
-  const inferredSizes = inferNextBabySizes(`${title} ${description}`);
+  const inferredSizes = extractNextSizesFromHtml($, title, description);
   const variants = variantsFromOffers.length
     ? variantsFromOffers
     : buildInferredNextVariants(productCode, inferredSizes, { min: price, max: maxPrice }, color);
@@ -4400,10 +4676,10 @@ function extractNextProductFromHtml(html: string, url: string, pageUrl = url): N
 function isNextBlockedFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
   const blockedOrUnusableFallback = errors.every(error =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page)/i.test(error)
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page|size picker.*did not include the size values|No usable product HTML returned|no usable markdown returned|Regional mismatch)/i.test(error)
   );
   const blockedByNext = errors.some(error =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden)/i.test(error)
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|size picker.*did not include the size values|No usable product HTML returned|Regional mismatch)/i.test(error)
   );
 
   return blockedByNext && blockedOrUnusableFallback;
@@ -4748,8 +5024,9 @@ export class NextScraper implements SupplierScraper {
       if (urlMatch) {
         const [, styleId, productId] = urlMatch;
         const apiUrls = [
+          `https://www.next.ae/api/product/v1/product/${styleId}/${productId}`,
           `https://www.nextdirect.com/api/product/v1/product/${styleId}/${productId}`,
-          `https://www.next.co.uk/api/product/v1/product/${styleId}/${productId}`
+          `https://www.next.co.uk/api/product/v1/product/${styleId}/${productId}`,
         ];
 
         for (const apiUrl of apiUrls) {
@@ -4758,10 +5035,12 @@ export class NextScraper implements SupplierScraper {
             const apiResponse = await axios.get(apiUrl, {
               headers: {
                 'accept': 'application/json, text/plain, */*',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'referer': url,
+                ...buildNextMobileHeaders(url),
+                referer: url,
               },
-              timeout: 10000,
+              timeout: 15000,
+              validateStatus: (status: number) => status < 500,
+              ...buildScraperAxiosConfig(),
             });
 
             if (apiResponse.status === 200 && apiResponse.data) {
@@ -4800,225 +5079,72 @@ export class NextScraper implements SupplierScraper {
         }
       }
 
-      // Fallback to HTML scraping if API fails
-      let response: any = null;
-      const uas = [
-        {
-          ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          platform: '"Windows"',
-          mobile: '?0',
-          chUa: '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"'
-        },
-        {
-          ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          platform: '"macOS"',
-          mobile: '?0',
-          chUa: '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"'
-        },
-        {
-          ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
-          platform: '"iOS"',
-          mobile: '?1',
-          chUa: undefined
-        },
-        {
-          ua: 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-          platform: undefined,
-          mobile: undefined,
-          chUa: undefined
-        }
-      ];
-
+      // Fallback to HTML scraping if API fails (mobile UA first — Next blocks desktop server traffic)
       let lastError: any = null;
-      const directUrls = [...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)])];
-      for (const directUrl of directUrls) {
-        for (const uaInfo of uas) {
+      const htmlErrors: string[] = [];
+      const pageUrls = [...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)])];
+
+      for (const pageUrl of pageUrls) {
         try {
-          const headers: any = {
-            ...buildNextBrowserHeaders(directUrl),
-            'user-agent': uaInfo.ua,
-          };
-
-          if (uaInfo.platform) headers['sec-ch-ua-platform'] = uaInfo.platform;
-          if (uaInfo.mobile) headers['sec-ch-ua-mobile'] = uaInfo.mobile;
-          if (uaInfo.chUa) headers['sec-ch-ua'] = uaInfo.chUa;
-
-          const requestOptions: any = {
-            headers,
-            timeout: 20000,
-            validateStatus: (status: number) => status < 500,
-          };
-
-          response = await axios.get(directUrl, requestOptions);
-          
-          if (response.status === 200) {
-            try {
-              const product = extractNextProductFromHtml(response.data, url, directUrl);
-              if (!nextScrapeMatchesRequestedRegion(url, directUrl, product.currency)) {
-                lastError = new Error(`Regional mismatch (${product.currency} from ${directUrl})`);
-                response = null;
-                continue;
-              }
-
-              console.log(`Successfully scraped Next using UA: ${uaInfo.ua.substring(0, 30)}...`);
-              return await enrichNextProductWithReaderColorways(product, url);
-            } catch (htmlError) {
-              lastError = htmlError;
-              response = null;
-              continue;
-            }
+          const html = await fetchNextPageHtml(pageUrl);
+          if (!html) {
+            throw new Error('No usable product HTML returned');
           }
-          
-          if (response.status === 403) {
-            continue;
+
+          const product = extractNextProductFromHtml(html, url, pageUrl);
+          if (!nextScrapeMatchesRequestedRegion(url, pageUrl, product.currency)) {
+            throw new Error(`Regional mismatch (${product.currency} from ${pageUrl})`);
           }
-        } catch (e: any) {
-          lastError = e;
-          continue;
-        }
+
+          console.log(`Successfully scraped Next from ${pageUrl}`);
+          return await enrichNextProductWithReaderColorways({
+            ...product,
+            raw: {
+              ...product.raw,
+              mobileHtmlFallback: true,
+            },
+          }, url);
+        } catch (htmlError: any) {
+          lastError = htmlError;
+          htmlErrors.push(`${pageUrl}: ${htmlError.message}`);
         }
       }
 
-      if (!response || response.status !== 200) {
-        const directError = lastError?.message || `HTTP ${response?.status || 403}`;
-        const htmlErrors: string[] = [];
-
-        for (const htmlUrl of buildNextHtmlFallbackUrls(url)) {
-          try {
-            console.log(`Direct Next scraping failed, trying HTML fallback: ${htmlUrl}`);
-            const htmlResponse = await axios.get(htmlUrl, {
-              headers: buildNextBrowserHeaders(htmlUrl),
-              timeout: 20000,
-              validateStatus: (status: number) => status < 500,
-            });
-
-            if (htmlResponse.status !== 200) {
-              throw new Error(`HTTP ${htmlResponse.status}`);
-            }
-
-            const product = extractNextProductFromHtml(htmlResponse.data, url, htmlUrl);
-            if (!nextScrapeMatchesRequestedRegion(url, htmlUrl, product.currency)) {
-              throw new Error(`Regional mismatch (${product.currency} from ${htmlUrl})`);
-            }
-
-            return await enrichNextProductWithReaderColorways(product, url);
-          } catch (htmlError: any) {
-            htmlErrors.push(`${htmlUrl}: ${htmlError.message}`);
-          }
-
-          try {
-            console.log(`Direct Next scraping failed, trying curl HTML fallback: ${htmlUrl}`);
-            const html = await fetchHtmlWithCurl(htmlUrl, buildNextBrowserHeaders(htmlUrl));
-            const product = extractNextProductFromHtml(html, url, htmlUrl);
-            if (!nextScrapeMatchesRequestedRegion(url, htmlUrl, product.currency)) {
-              throw new Error(`Regional mismatch (${product.currency} from ${htmlUrl})`);
-            }
-
-            return await enrichNextProductWithReaderColorways(product, url);
-          } catch (curlError: any) {
-            htmlErrors.push(`${htmlUrl} (curl): ${curlError.message}`);
-          }
-        }
-
-        const readerErrors: string[] = [];
+      const directError = lastError?.message || 'No usable product HTML returned';
+      const readerErrors: string[] = [];
 
         try {
           console.log('Direct Next scraping failed, trying Reader fallback');
           const reader = await fetchNextReaderMarkdown(url);
           if (reader) {
-            return parseNextReaderMarkdown(reader.markdown, url, reader.readerUrl);
+            try {
+              return parseNextReaderMarkdown(reader.markdown, url, reader.readerUrl);
+            } catch (readerParseError: any) {
+              if (readerParseError?.code === 'NEXT_SIZE_VALUES_MISSING') {
+                throw nextBlockedScraperError([`reader: ${readerParseError.message}`]);
+              }
+              throw readerParseError;
+            }
           }
           readerErrors.push('reader: no usable markdown returned');
         } catch (readerError: any) {
+          if (readerError?.code === 'SOURCE_BLOCKED') {
+            throw readerError;
+          }
           readerErrors.push(`reader: ${readerError.message}`);
         }
 
-        const failureDetails = [`direct page: ${directError}`, ...htmlErrors, ...readerErrors];
-        const blockedByNext = isNextBlockedFailure(failureDetails) ||
-          failureDetails.every(error => /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|no usable markdown)/i.test(error));
+      const failureDetails = [`direct page: ${directError}`, ...htmlErrors, ...readerErrors];
+      const blockedByNext = isNextBlockedFailure(failureDetails) ||
+        failureDetails.filter(error =>
+          /(?:HTTP 403|HTTP 404|Access Denied|access-denied|permission to access|Forbidden|no usable markdown)/i.test(error)
+        ).length >= Math.max(1, failureDetails.length - 1);
 
-        if (blockedByNext) {
-          throw nextBlockedScraperError(failureDetails);
-        }
-
-        throw new Error(`Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join('; ')}), and Reader fallbacks failed (${readerErrors.join('; ')})`);
+      if (blockedByNext) {
+        throw nextBlockedScraperError(failureDetails);
       }
 
-      const $ = cheerio.load(response.data);
-      
-      // Next often embeds product data in a JSON structure for their interactive elements
-      let rawData: any = null;
-      $('script').each((_, el) => {
-        const text = $(el).html() || '';
-        if (text.includes('next.product')) {
-          try {
-            // Very simplified extraction for this demo
-            const match = text.match(/next\.product\s*=\s*({.*?});/s);
-            if (match) rawData = JSON.parse(match[1]);
-          } catch (e) {}
-        }
-      });
-
-      // Try JSON-LD as fallback
-      if (!rawData) {
-        $('script[type="application/ld+json"]').each((_, el) => {
-          try {
-            const data = JSON.parse($(el).html() || '{}');
-            if (data['@type'] === 'Product') rawData = data;
-          } catch (e) {}
-        });
-      }
-
-      const title = rawData?.name || $('h1').first().text().trim() || $('meta[property="og:title"]').attr('content') || 'Next Product';
-      const description = rawData?.description || $('meta[name="description"]').attr('content') || '';
-      const brand = rawData?.brand?.name || 'Next';
-      const currency = rawData?.offers?.priceCurrency || rawData?.offers?.[0]?.priceCurrency || 'EGP';
-      const price = parseFloat(rawData?.offers?.price || rawData?.offers?.[0]?.price || '0');
-
-      const images: any[] = [];
-      const mainImage = rawData?.image || $('meta[property="og:image"]').attr('content');
-      if (mainImage) images.push({ url: Array.isArray(mainImage) ? mainImage[0] : mainImage, position: 0 });
-
-      // Variants extraction (Next specific logic)
-      const variants: any[] = [];
-      const options: any[] = [];
-
-      if (rawData?.offers && Array.isArray(rawData.offers)) {
-        rawData.offers.forEach((offer: any, idx: number) => {
-          variants.push({
-            sourceVariantId: offer.sku || `variant-${idx}`,
-            sku: offer.sku,
-            price: parseFloat(offer.price),
-            available: offer.availability === 'http://schema.org/InStock',
-            stockStatus: offer.availability === 'http://schema.org/InStock' ? 'in_stock' : 'out_of_stock',
-          });
-        });
-      } else {
-        // Fallback to single variant
-        variants.push({
-          sourceVariantId: 'default',
-          price,
-          available: true,
-          stockStatus: 'in_stock'
-        });
-      }
-
-      return await enrichNextProductWithReaderColorways({
-        source: {
-          supplier: brand,
-          url,
-          productId: url.split('/').pop()?.split('#')[0]
-        },
-        title,
-        description,
-        brand,
-        currency,
-        price,
-        images,
-        options: options.length ? options : [{ name: 'Size', values: ['One Size'] }],
-        variants,
-        raw: rawData || { msg: 'Direct extraction failed, used fallbacks' }
-      }, url);
+      throw new Error(`Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join('; ')}), and Reader fallbacks failed (${readerErrors.join('; ')})`);
     } catch (error: any) {
       console.error('Next Scraper error:', error.message);
       if (error instanceof ScraperError || error?.code === 'SOURCE_BLOCKED') {
