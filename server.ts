@@ -53,6 +53,24 @@ function isDatabaseUnavailableError(error: any) {
   return error?.code === "P1001" || message.includes("Can't reach database server");
 }
 
+async function seedDefaultPricingRules() {
+  try {
+    const ruleCount = await prisma.pricingRule.count();
+    if (ruleCount === 0) {
+      await prisma.pricingRule.createMany({
+        data: [
+          { name: "Standard (1.5x)", multiplier: 1.5, isDefault: true },
+          { name: "Egypt Market (24x)", multiplier: 24.0, rounding: ".99" },
+          { name: "Luxury (2x)", multiplier: 2.0, fixedMarkup: 10.0 },
+        ],
+      });
+      console.log("Seeded default pricing rules");
+    }
+  } catch (error: any) {
+    console.error("Failed to seed pricing rules:", error.message);
+  }
+}
+
 async function startServer() {
   const app = express();
   const httpServer = createHttpServer(app);
@@ -119,23 +137,6 @@ async function startServer() {
 
   console.log("✅ API routes mounted");
 
-  // Seed default pricing rules if none exist
-  try {
-    const ruleCount = await prisma.pricingRule.count();
-    if (ruleCount === 0) {
-      await prisma.pricingRule.createMany({
-        data: [
-          { name: "Standard (1.5x)", multiplier: 1.5, isDefault: true },
-          { name: "Egypt Market (24x)", multiplier: 24.0, rounding: ".99" },
-          { name: "Luxury (2x)", multiplier: 2.0, fixedMarkup: 10.0 },
-        ],
-      });
-      console.log("✅ Seeded default pricing rules");
-    }
-  } catch (error: any) {
-    console.error("⚠️ Failed to seed pricing rules:", error.message);
-  }
-
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -188,6 +189,7 @@ async function startServer() {
     console.log(`Server running at http://${HOST}:${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
+    void seedDefaultPricingRules();
     QueueService.startInventoryMonitor();
   });
 }
