@@ -5421,7 +5421,7 @@ export class NextScraper implements SupplierScraper {
           try {
             const html = await fetchHtmlViaManagedBypass(pageUrl, {
               deviceType: 'mobile',
-              jsRender: true,
+              jsRender: false,
               premium: true,
             });
             if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {

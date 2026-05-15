@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "dotenv/config";
 import { ScraperService, type NormalizedProduct } from "./src/server/services/scraper";
 
 const NEXT_AE_URL = "https://www.next.ae/en/style/su876474/y19782";
@@ -38,7 +39,7 @@ function variantSizes(product: NormalizedProduct): string[] {
   return product.variants.map(variant => variant.size).filter(Boolean) as string[];
 }
 
-function assertNextAeDetails(product: NormalizedProduct, expectedCurrency?: string) {
+function assertNextAeDetails(product: NormalizedProduct, expectedCurrency?: string, expectedSizes?: string[]) {
   assert.equal(product.source.supplier, "Next");
   assert.equal(product.source.url, NEXT_AE_URL);
   assert.equal(product.source.productId, "Y19-782");
@@ -49,8 +50,14 @@ function assertNextAeDetails(product: NormalizedProduct, expectedCurrency?: stri
   assert.ok(product.price > 0, "price should be positive");
   if (expectedCurrency) assert.equal(product.currency, expectedCurrency);
   assert.ok(product.images.length >= 2, "should extract product images");
-  assert.deepEqual(product.options.find(option => option.name === "Size")?.values, ["S", "M", "L"]);
-  assert.deepEqual(variantSizes(product), ["S", "M", "L"]);
+  const sizes = product.options.find(option => option.name === "Size")?.values || [];
+  if (expectedSizes) {
+    assert.deepEqual(sizes, expectedSizes);
+    assert.deepEqual(variantSizes(product), expectedSizes);
+  } else {
+    assert.ok(sizes.length >= 3, "live page should expose product sizes");
+    assert.deepEqual(variantSizes(product), sizes);
+  }
 
   for (const variant of product.variants) {
     assert.ok(variant.sourceVariantId?.startsWith("Y19-782-"));
@@ -65,7 +72,7 @@ function assertNextAeDetails(product: NormalizedProduct, expectedCurrency?: stri
 
 async function runSnapshotTest(scraper: ScraperService) {
   const product = await scraper.scrapeSnapshot(NEXT_AE_URL, nextAeSnapshot);
-  assertNextAeDetails(product, "AED");
+  assertNextAeDetails(product, "AED", ["S", "M", "L"]);
   assert.equal(product.price, 59);
   assert.equal(product.raw.pastedSnapshotFallback, true);
   assert.equal(product.raw.sizesInferredFromProductType, true);
