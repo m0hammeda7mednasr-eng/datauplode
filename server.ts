@@ -48,6 +48,17 @@ function getAllowedOrigins() {
   );
 }
 
+function getListenHost() {
+  const configuredHost = process.env.HOST || "0.0.0.0";
+  const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN);
+
+  if (isRailway && ["127.0.0.1", "localhost", "::1"].includes(configuredHost)) {
+    return "0.0.0.0";
+  }
+
+  return configuredHost;
+}
+
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
   return error?.code === "P1001" || message.includes("Can't reach database server");
@@ -75,7 +86,7 @@ async function startServer() {
   const app = express();
   const httpServer = createHttpServer(app);
   const PORT = Number(process.env.PORT || 3000);
-  const HOST = process.env.HOST || "0.0.0.0";
+  const HOST = getListenHost();
   const allowedOrigins = getAllowedOrigins();
 
   console.log("🚀 Starting server...");
@@ -85,8 +96,7 @@ async function startServer() {
 
   app.set("trust proxy", 1);
 
-  app.use(
-    cors({
+  const corsOptions: cors.CorsOptions = {
       origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl)
         if (!origin) return callback(null, true);
@@ -100,8 +110,10 @@ async function startServer() {
       credentials: true,
       methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization"],
-    }),
-  );
+  };
+
+  app.use(cors(corsOptions));
+  app.options("*", cors(corsOptions));
 
   app.use(express.json({ limit: "2mb" }));
 

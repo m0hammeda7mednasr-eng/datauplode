@@ -1,6 +1,6 @@
 import axios from 'axios';
 import crypto from 'crypto';
-import { decrypt } from './encryption.js';
+import { decrypt, isDecryptionError } from './encryption.js';
 
 const DEFAULT_SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-04';
 
@@ -80,11 +80,22 @@ export class ShopifyService {
       throw new Error('No active Shopify connection found');
     }
 
-    return new ShopifyGraphqlClient({
-      shopDomain: connection.shopDomain,
-      accessToken: decrypt(connection.accessTokenEnc),
-      apiVersion: DEFAULT_SHOPIFY_API_VERSION
-    });
+    try {
+      return new ShopifyGraphqlClient({
+        shopDomain: connection.shopDomain,
+        accessToken: decrypt(connection.accessTokenEnc),
+        apiVersion: DEFAULT_SHOPIFY_API_VERSION
+      });
+    } catch (error) {
+      if (isDecryptionError(error)) {
+        throw Object.assign(
+          new Error('Shopify connection needs to be reconnected. The stored token cannot be decrypted with the current encryption key.'),
+          { code: 'SHOPIFY_RECONNECT_REQUIRED', statusCode: 409 },
+        );
+      }
+
+      throw error;
+    }
   }
 
   static async getCollections(client: ShopifyGraphqlClient) {

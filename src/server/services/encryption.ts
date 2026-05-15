@@ -31,3 +31,12 @@ export function decrypt(text: string): string {
   decrypted = Buffer.concat([decrypted, decipher.final()]);
   return decrypted.toString();
 }
+
+export function isDecryptionError(error: unknown) {
+  const message = String((error as Error)?.message || '');
+  return (
+    message.includes('bad decrypt') ||
+    message.includes('wrong final block length') ||
+    message.includes('Invalid initialization vector')
+  );
+}

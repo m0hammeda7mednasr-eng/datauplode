@@ -6,7 +6,7 @@ import {
 } from "./services/scraper.js";
 import { PricingEngine } from "./services/pricing.js";
 import { QueueService } from "./services/queue.js";
-import { encrypt, decrypt } from "./services/encryption.js";
+import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
 import axios from "axios";
 import crypto from "crypto";
@@ -82,6 +82,10 @@ function getApiErrorCode(error: any) {
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
   return error?.code === "P1001" || message.includes("Can't reach database server");
+}
+
+function isShopifyReconnectRequired(error: any) {
+  return error?.code === "SHOPIFY_RECONNECT_REQUIRED" || isDecryptionError(error);
 }
 
 function firstQueryValue(value: any): string {
@@ -939,15 +943,30 @@ router.get("/settings/shopify", async (req, res) => {
       });
     }
 
+    const tokenNeedsReconnect = Boolean(connection.accessTokenEnc && (() => {
+      try {
+        decrypt(connection.accessTokenEnc);
+        return false;
+      } catch (error) {
+        return isDecryptionError(error);
+      }
+    })());
+    const connected = Boolean(connection.isConnected && connection.accessTokenEnc && !tokenNeedsReconnect);
+
     res.json({
       shopDomain: connection.shopDomain,
       clientId: connection.clientId,
       clientSecret: "****************",
       hasClientSecret: Boolean(connection.clientSecretEnc),
-      accessToken: connection.accessTokenEnc ? "Connected" : "Not Connected",
+      accessToken: connected
+        ? "Connected"
+        : tokenNeedsReconnect
+          ? "Reconnect Required"
+          : "Not Connected",
       scopes: connection.scopes.split(","),
-      isConnected: connection.isConnected,
+      isConnected: connected,
       connectedAt: connection.connectedAt,
+      reconnectRequired: tokenNeedsReconnect,
       callbackUrl: getShopifyRedirectUri(req),
       apiVersion: process.env.SHOPIFY_API_VERSION || "2026-04",
     });
@@ -1070,6 +1089,29 @@ router.post("/shopify/connect", async (req, res) => {
       return res
         .status(400)
         .json({ error: "Shopify client secret is missing" });
+
+    let clientSecret = "";
+    try {
+      clientSecret = decrypt(connection.clientSecretEnc);
+    } catch (error) {
+      if (isDecryptionError(error)) {
+        await prisma.shopifyConnection.update({
+          where: { id: connection.id },
+          data: {
+            accessTokenEnc: null,
+            isConnected: false,
+            connectedAt: null,
+            oauthState: null,
+            oauthStateExpiresAt: null,
+          },
+        });
+        return res.status(409).json({
+          error: "Saved Shopify secret cannot be decrypted. Re-save the client secret, then connect again.",
+          code: "SHOPIFY_SECRET_RECONNECT_REQUIRED",
+        });
+      }
+      throw error;
+    }
 
     const state = crypto.randomBytes(16).toString("hex");
     const redirectUri = getShopifyRedirectUri(req);
@@ -1194,6 +1236,10 @@ router.get("/shopify/collections", async (req, res) => {
     const collections = await ShopifyService.getCollections(client);
     res.json(collections);
   } catch (error: any) {
+    if (isShopifyReconnectRequired(error)) {
+      return res.json([]);
+    }
+
     if (error.message === "No active Shopify connection found") {
       return res.json([]);
     }

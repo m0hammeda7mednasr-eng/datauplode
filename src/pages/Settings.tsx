@@ -159,6 +159,11 @@ export default function Settings() {
                     <CheckCircle2 size={14} />
                     CONNECTED
                   </div>
+                ) : config?.reconnectRequired ? (
+                  <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border border-amber-100 rounded-full text-amber-700 text-xs font-bold">
+                    <AlertCircle size={14} />
+                    RECONNECT REQUIRED
+                  </div>
                 ) : (
                   <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-100 rounded-full text-slate-400 text-xs font-bold">
                     <AlertCircle size={14} />
@@ -166,6 +171,12 @@ export default function Settings() {
                   </div>
                 )}
               </div>
+
+              {config?.reconnectRequired && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs font-semibold leading-relaxed text-amber-900">
+                  Shopify credentials were saved with an older encryption key. Re-save the client secret, then connect the store again.
+                </div>
+              )}
 
               <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-8">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -198,12 +209,16 @@ export default function Settings() {
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Client Secret / API Secret</label>
                     <input 
                       name="clientSecret"
-                      required={!config?.hasClientSecret}
+                      required={!config?.hasClientSecret || config?.reconnectRequired}
                       type="password" 
                       placeholder={config?.hasClientSecret ? "Saved secret - leave blank to keep it" : "Enter Client Secret"}
                       className="w-full px-4 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary outline-none transition-all text-sm font-mono"
                     />
-                    <p className="text-[10px] text-slate-400 italic">Credentials are encrypted at rest for maximum security.</p>
+                    <p className="text-[10px] text-slate-400 italic">
+                      {config?.reconnectRequired
+                        ? 'Required now so the saved secret can be encrypted with the current server key.'
+                        : 'Credentials are encrypted at rest for maximum security.'}
+                    </p>
                   </div>
                 </div>
 

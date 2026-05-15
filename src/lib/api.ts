@@ -3,9 +3,19 @@ import axios from 'axios';
 function normalizeApiBaseUrl(value?: string) {
   const trimmed = value?.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
+  if (/\$\{[^}]+\}|^(MY_|YOUR[_-])/i.test(trimmed)) return '';
 
   try {
     const url = new URL(trimmed, window.location.origin);
+    const isRemoteApp = !['localhost', '127.0.0.1', '::1'].includes(
+      window.location.hostname.toLowerCase(),
+    );
+    const isLocalApi = ['localhost', '127.0.0.1', '::1'].includes(
+      url.hostname.toLowerCase(),
+    );
+
+    if (isRemoteApp && isLocalApi) return '';
+
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
       url.pathname = '';
       url.search = '';
