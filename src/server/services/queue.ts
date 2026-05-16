@@ -829,6 +829,10 @@ export class QueueService {
             if (!createdVariants || createdVariants.length === 0) {
               throw new Error('Shopify did not return created variants');
             }
+            const verifiedShopifyProduct = await ShopifyService.getProductBasic(
+              client,
+              shopifyProductResult.id,
+            );
 
             // 4. Save to DB
             const dbShopifyProduct = await prisma.shopifyProduct.create({
@@ -896,12 +900,141 @@ export class QueueService {
               productMediaSubmitted: productMedia.length,
               variantImagesRequested: variantPayloads.filter((variantPayload: any) => variantPayload.imageUrl).length,
               variantImagesLinked: createdVariants.filter((variant: any) => (variant.media?.nodes || []).length > 0).length,
+              variantsLinked: createdVariants.length,
+              variantsExpected: variantPayloads.length,
+              variantsVerified: createdVariants.length === variantPayloads.length,
+              shopifyVerified: Boolean(verifiedShopifyProduct?.id),
+              shopifyStatus: String(verifiedShopifyProduct?.status || shopifyProductResult.status || 'ACTIVE').toLowerCase(),
               salesChannelsPublished: publicationResult.publishedCount,
               salesChannels: publicationResult.publications
                 .flatMap((publication: any) => publication.channels || [])
                 .map((channel: any) => channel.name || channel.handle)
                 .filter(Boolean),
               publicationWarning: publicationResult.warning,
+            };
+            break;
+          }
+          case 'REPUBLISH_TO_SHOPIFY': {
+            const { sourceProductId } = payload;
+            if (!sourceProductId) throw new Error('Missing sourceProductId');
+
+            const product = await prisma.sourceProduct.findUnique({
+              where: { id: sourceProductId },
+              include: {
+                shopifyProduct: { include: { variants: true } },
+              },
+            });
+            if (!product) throw new Error('Source product not found');
+
+            if (!product.shopifyProduct) {
+              const publishJob = await this.addTask('PUBLISH_TO_SHOPIFY', {
+                sourceProductId,
+              });
+              result = {
+                republishMode: 'publish_new',
+                queuedPublishJobId: publishJob.id,
+              };
+              break;
+            }
+
+            const client = await ShopifyService.getClientFromDb(prisma);
+            const existingShopifyProduct = await ShopifyService.getProductBasic(
+              client,
+              product.shopifyProduct.shopifyId,
+            );
+
+            if (!existingShopifyProduct) {
+              const collectionIds = product.shopifyProduct.collectionIds
+                ?.split(',')
+                .map((collectionId: string) => collectionId.trim())
+                .filter(Boolean);
+
+              await prisma.$transaction(async (tx) => {
+                await tx.shopifyVariant.deleteMany({
+                  where: { shopifyProductId: product.shopifyProduct!.id },
+                });
+                await tx.shopifyProduct.delete({
+                  where: { id: product.shopifyProduct!.id },
+                });
+                await tx.sourceProduct.update({
+                  where: { id: sourceProductId },
+                  data: { syncStatus: 'pending' },
+                });
+              });
+
+              const publishJob = await this.addTask('PUBLISH_TO_SHOPIFY', {
+                sourceProductId,
+                collections: collectionIds || [],
+              });
+              result = {
+                republishMode: 'recreate_deleted_shopify_product',
+                queuedPublishJobId: publishJob.id,
+              };
+              break;
+            }
+
+            const updateResponse = await ShopifyService.updateProductStatus(
+              client,
+              product.shopifyProduct.shopifyId,
+              'ACTIVE',
+            );
+            const updateErrors = updateResponse.productUpdate?.userErrors || [];
+            if (updateErrors.length > 0) {
+              throw new Error(`Shopify Product Update Error: ${updateErrors[0].message}`);
+            }
+
+            const publicationResult = await ShopifyService.publishProductToSalesChannels(
+              client,
+              product.shopifyProduct.shopifyId,
+            );
+            const publicationErrors = publicationResult.userErrors || [];
+            const verifiedShopifyProduct = await ShopifyService.getProductBasic(
+              client,
+              product.shopifyProduct.shopifyId,
+            );
+            const verifiedShopifyVariants = await ShopifyService.getProductInventoryVariants(
+              client,
+              product.shopifyProduct.shopifyId,
+            );
+
+            await prisma.shopifyProduct.update({
+              where: { id: product.shopifyProduct.id },
+              data: {
+                handle:
+                  verifiedShopifyProduct?.handle ||
+                  updateResponse.productUpdate?.product?.handle ||
+                  existingShopifyProduct.handle,
+                status: String(
+                  verifiedShopifyProduct?.status ||
+                    updateResponse.productUpdate?.product?.status ||
+                    'ACTIVE',
+                ).toLowerCase(),
+              },
+            });
+            await prisma.sourceProduct.update({
+              where: { id: sourceProductId },
+              data: { syncStatus: 'active' },
+            });
+
+            result = {
+              republishMode: 'existing_shopify_product',
+              shopifyId: product.shopifyProduct.shopifyId,
+              shopifyVerified: Boolean(verifiedShopifyProduct?.id),
+              shopifyStatus: String(verifiedShopifyProduct?.status || 'ACTIVE').toLowerCase(),
+              variantsLinked: product.shopifyProduct.variants.length,
+              variantsVerifiedOnShopify: verifiedShopifyVariants.length,
+              variantsVerified:
+                product.shopifyProduct.variants.length === 0 ||
+                verifiedShopifyVariants.length >= product.shopifyProduct.variants.length,
+              salesChannelsPublished: publicationResult.publishedCount,
+              salesChannels: publicationResult.publications
+                .flatMap((publication: any) => publication.channels || [])
+                .map((channel: any) => channel.name || channel.handle)
+                .filter(Boolean),
+              publicationWarning:
+                publicationErrors.length > 0
+                  ? `Shopify publication warning: ${publicationErrors[0].message}`
+                  : null,
             };
             break;
           }
@@ -932,7 +1065,7 @@ export class QueueService {
       } catch (error: any) {
         try {
           const payload = JSON.parse(job.payload || '{}');
-          if ((job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY') && payload.sourceProductId) {
+          if ((job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY' || job.type === 'REPUBLISH_TO_SHOPIFY') && payload.sourceProductId) {
             await prisma.sourceProduct.update({
               where: { id: payload.sourceProductId },
               data: { syncStatus: 'error' },

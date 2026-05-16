@@ -4,6 +4,7 @@ import {
   ArrowLeft, 
   ExternalLink, 
   RefreshCw, 
+  UploadCloud,
   Pause, 
   Play, 
   Settings, 
@@ -49,6 +50,18 @@ export default function ProductDetail() {
     onSuccess: () => {
       toast.success('Manual sync triggered');
       queryClient.invalidateQueries({ queryKey: ['product', id] });
+    }
+  });
+
+  const republishMutation = useMutation({
+    mutationFn: async () => axios.post(`/api/products/${id}/republish`),
+    onSuccess: () => {
+      toast.success('Republish job started');
+      queryClient.invalidateQueries({ queryKey: ['product', id] });
+      queryClient.invalidateQueries({ queryKey: ['products'] });
+    },
+    onError: (error: any) => {
+      toast.error(error?.response?.data?.error || 'Failed to republish product');
     }
   });
 
@@ -130,6 +143,14 @@ export default function ProductDetail() {
             >
               {syncMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Zap size={14} />}
               Sync Now
+            </button>
+            <button
+              onClick={() => republishMutation.mutate()}
+              disabled={republishMutation.isPending}
+              className="bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {republishMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud size={14} />}
+              Republish
             </button>
           </div>
         </div>

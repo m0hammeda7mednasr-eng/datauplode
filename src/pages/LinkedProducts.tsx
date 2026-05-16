@@ -6,6 +6,7 @@ import {
   Filter, 
   ExternalLink, 
   RefreshCw, 
+  UploadCloud,
   CheckCircle2,
   X,
   Eye,
@@ -55,6 +56,14 @@ export default function LinkedProducts() {
       loading: 'Queuing sync job...',
       success: 'Sync job started!',
       error: 'Failed to start sync'
+    });
+  };
+
+  const handleRepublish = async (id: string) => {
+    toast.promise(axios.post(`/api/products/${id}/republish`), {
+      loading: 'Queuing republish job...',
+      success: 'Republish job started!',
+      error: (error) => apiErrorMessage(error, 'Failed to republish product')
     });
   };
 
@@ -220,6 +229,13 @@ export default function LinkedProducts() {
                       className="p-2 hover:bg-zinc-100 rounded-lg transition-all text-zinc-400 hover:text-zinc-900" title="Sync Now"
                     >
                       <RefreshCw className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => handleRepublish(p.id)}
+                      className="p-2 hover:bg-emerald-50 rounded-lg transition-all text-zinc-400 hover:text-emerald-600"
+                      title="Republish to Shopify"
+                    >
+                      <UploadCloud className="h-4 w-4" />
                     </button>
                     <button 
                       onClick={() => navigate(`/products/${p.id}`)}

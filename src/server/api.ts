@@ -1018,6 +1018,33 @@ router.post("/products/:id/sync", async (req, res) => {
   res.json({ success: true, jobId: job.id });
 });
 
+router.post("/products/:id/republish", async (req, res) => {
+  const product = await prisma.sourceProduct.findUnique({
+    where: { id: req.params.id },
+    select: { id: true },
+  });
+
+  if (!product) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+
+  const connection = await prisma.shopifyConnection.findFirst({
+    where: { isConnected: true },
+    select: { accessTokenEnc: true },
+  });
+
+  if (!connection?.accessTokenEnc) {
+    return res
+      .status(400)
+      .json({ error: "Connect Shopify before republishing products." });
+  }
+
+  const job = await QueueService.addTask("REPUBLISH_TO_SHOPIFY", {
+    sourceProductId: req.params.id,
+  });
+  res.json({ success: true, jobId: job.id });
+});
+
 router.patch("/products/:id", async (req, res) => {
   const { syncStatus } = req.body;
   if (!syncStatus) return res.status(400).json({ error: "Missing syncStatus" });
