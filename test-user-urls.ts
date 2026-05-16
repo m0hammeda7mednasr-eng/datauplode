@@ -13,6 +13,7 @@ const testUrls = [
   { name: "Mothercare", url: "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4" },
   { name: "Zara", url: "https://www.zara.com/ae/en/-p01473692.html?v1=511134201" },
   { name: "Centrepoint", url: "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE" },
+  { name: "Centrepoint dress pack", url: "https://www.centrepointstores.com/ae/en/buy-pack-of-2-juniors-round-neck-aline-dress-with-print/p/PE002PJES26MULTICOLORMULTISHADE" },
 ];
 
 function validate(product: Awaited<ReturnType<ScraperService["scrape"]>>) {
