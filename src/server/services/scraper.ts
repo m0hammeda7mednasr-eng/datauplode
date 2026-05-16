@@ -1984,6 +1984,58 @@ async function fetchHtmlWithCurl(
   return html;
 }
 
+async function fetchHtmlWithPlaywright(
+  url: string,
+  requestHeaders: Record<string, string> = {},
+): Promise<string> {
+  const { chromium } = await import("playwright");
+  const userAgent =
+    requestHeaders["user-agent"] ||
+    requestHeaders["User-Agent"] ||
+    browserHeaders["User-Agent"];
+
+  const extraHTTPHeaders = Object.fromEntries(
+    Object.entries(requestHeaders).filter(
+      ([key, value]) => !/^user-agent$/i.test(key) && Boolean(value),
+    ),
+  );
+
+  const browser = await chromium.launch({
+    headless: true,
+  });
+
+  try {
+    const context = await browser.newContext({
+      userAgent,
+      extraHTTPHeaders,
+    });
+    const page = await context.newPage();
+    const response = await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+    });
+    await page.waitForTimeout(1500);
+    const html = await page.content();
+    await context.close();
+
+    if (!html.trim()) throw new Error("playwright returned an empty response");
+    if (
+      response &&
+      response.status() >= 400 &&
+      /access denied|forbidden|blocked|captcha|just a moment/i.test(html)
+    ) {
+      throw new Error(`playwright returned HTTP ${response.status()}`);
+    }
+    if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(html)) {
+      throw new Error("playwright returned Cloudflare challenge");
+    }
+
+    return html;
+  } finally {
+    await browser.close();
+  }
+}
+
 function extractProductJsonLdFromHtml(html: string): any {
   const $ = cheerio.load(html);
   let productData: any = null;
@@ -2216,6 +2268,71 @@ function looksLikeAssetOptionValue(value: string): boolean {
   return false;
 }
 
+function looksLikeUiNoiseOptionValue(value: string): boolean {
+  const cleaned = cleanText(value);
+  if (!cleaned) return true;
+
+  const normalized = cleaned.toLowerCase();
+  if (/^(?:#|@)/.test(normalized)) return true;
+  if (/https?:\/\//i.test(normalized)) return true;
+  if (normalized.length > 85) return true;
+
+  if (
+    /\b(?:home|shop|menu|search|basket|cart|account|wishlist|shopping list|subscribe|support|about us|contact us|privacy|terms|store locator|corporate website|gift card|email signup|open menu|open search(?: panel)?|close|previous|next|to top|check availability|click to change the country|flag image|logo|cookies?|free shipping|shipping|delivery|returns?|promotions?|offers?|inspiration|love it for longer|explore by product|nursery|baby girls?|baby boys?|newborn baby)\b/i.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:usa|uk|uae|egypt|saudi|qatar|kuwait|bahrain|oman)(?:\s*,?\s*(?:\$|usd|aed|egp|sar|qar|kwd|bhd|omr))?$/i.test(
+      cleaned,
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeSizeOptionValue(value: string): boolean {
+  const cleaned = cleanText(value);
+  if (!cleaned) return false;
+
+  if (
+    /^(?:xxxs|xxs|xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl|5xl|small|medium|large|x-?small|x-?large|xx-?large|one size|free size|os|o\/s|nb|n\/b|newborn|preemie)$/i.test(
+      cleaned,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^\d{1,3}(?:\.\d+)?$/.test(cleaned) ||
+    /^\d{1,3}\s*(?:c|k|t|y)$/i.test(cleaned) ||
+    /^\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?(?:\s*(?:cm|mm|in|inch|inches|mths?|months?|yrs?|years?|y|m|mths))?$/i.test(
+      cleaned,
+    ) ||
+    /^(?:up to\s+)?\d+\s*(?:mths?|months?|yrs?|years?|y|m)$/i.test(cleaned) ||
+    /^\d+(?:\.\d+)?\s*(?:cm|mm|in|inch|inches)$/i.test(cleaned) ||
+    /^\d+\s*(?:y|m|t)$/i.test(cleaned)
+  ) {
+    return true;
+  }
+
+  if (
+    /\b(?:months?|mths?|yrs?|years?|newborn|preemie|toddler|baby)\b/i.test(
+      cleaned,
+    ) &&
+    (/\d/.test(cleaned) || /\b(?:newborn|preemie)\b/i.test(cleaned))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function extractLabeledOptionValue(
   value: string | undefined,
   optionName: "Color" | "Size",
@@ -2255,9 +2372,14 @@ function cleanColorOptionValue(value: string | undefined): string {
   if (
     !cleaned ||
     cleaned.length > 60 ||
+    cleaned.length < 2 ||
     isDefaultOptionValue(cleaned) ||
     looksLikeAssetOptionValue(cleaned) ||
+    looksLikeUiNoiseOptionValue(cleaned) ||
     !/[A-Za-z\u0600-\u06FF]/.test(cleaned) ||
+    /^[a-z]$/i.test(cleaned) ||
+    /^size:?$/i.test(cleaned) ||
+    cleaned.split(/\s+/).length > 10 ||
     /^(?:selected|current|available|unavailable|add to|buy now|wishlist|share|quantity|qty|availability|delivery|shipping|view|more)$/i.test(
       cleaned,
     ) ||
@@ -2284,11 +2406,16 @@ function cleanProductOptionValue(
     .replace(/\s*(?:sold out|out of stock|unavailable)\s*$/i, "")
     .trim();
 
+  if (name === "Size" && !looksLikeSizeOptionValue(cleaned)) {
+    return "";
+  }
+
   if (
     !cleaned ||
     cleaned.length > 60 ||
     isDefaultOptionValue(cleaned) ||
     looksLikeAssetOptionValue(cleaned) ||
+    looksLikeUiNoiseOptionValue(cleaned) ||
     /^(?:add to|buy now|wishlist|share|quantity|qty|availability|delivery|shipping)$/i.test(
       cleaned,
     )
@@ -2507,6 +2634,12 @@ function buildOptionMatrixVariants(
       }
     }
     combinations.splice(0, combinations.length, ...next.slice(0, 250));
+  }
+
+  if (combinations.length > 180) {
+    // DOM option extraction can include noisy navigation text on some stores.
+    // Avoid generating large synthetic variant matrices in that case.
+    return [];
   }
 
   return combinations.slice(0, 250).map((optionValues, index) => {
@@ -7450,6 +7583,42 @@ export class NextScraper implements SupplierScraper {
         }
       }
 
+      const playwrightErrors: string[] = [];
+      for (const pageUrl of pageUrls) {
+        try {
+          const html = await fetchHtmlWithPlaywright(
+            pageUrl,
+            buildNextMobileHeaders(pageUrl),
+          );
+          if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
+            throw new Error("Playwright returned non-product HTML");
+          }
+
+          const product = extractNextProductFromHtml(html, url, pageUrl);
+          if (
+            !nextScrapeMatchesRequestedRegion(url, pageUrl, product.currency)
+          ) {
+            throw new Error(
+              `Regional mismatch (${product.currency} from ${pageUrl})`,
+            );
+          }
+
+          console.log(`Successfully scraped Next via Playwright from ${pageUrl}`);
+          return await enrichNextProductWithReaderColorways(
+            {
+              ...product,
+              raw: {
+                ...product.raw,
+                playwrightFallback: true,
+              },
+            },
+            url,
+          );
+        } catch (playwrightError: any) {
+          playwrightErrors.push(`${pageUrl}: ${playwrightError.message}`);
+        }
+      }
+
       const bypassErrors: string[] = [];
       if (activeManagedBypassProviders().length > 0) {
         for (const pageUrl of pageUrls) {
@@ -7525,6 +7694,7 @@ export class NextScraper implements SupplierScraper {
       const failureDetails = [
         `direct page: ${directError}`,
         ...htmlErrors,
+        ...playwrightErrors,
         ...bypassErrors,
         ...readerErrors,
       ];
@@ -7541,7 +7711,7 @@ export class NextScraper implements SupplierScraper {
       }
 
       throw new Error(
-        `Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join("; ")}), managed bypass fallbacks failed (${bypassErrors.join("; ")}), and Reader fallbacks failed (${readerErrors.join("; ")})`,
+        `Failed to scrape direct page (${directError}), HTML fallbacks failed (${htmlErrors.join("; ")}), Playwright fallbacks failed (${playwrightErrors.join("; ")}), managed bypass fallbacks failed (${bypassErrors.join("; ")}), and Reader fallbacks failed (${readerErrors.join("; ")})`,
       );
     } catch (error: any) {
       console.error("Next Scraper error:", error.message);
