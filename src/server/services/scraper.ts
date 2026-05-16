@@ -180,9 +180,7 @@ function managedBypassMode(): string {
 }
 
 function managedBypassEnabled(): boolean {
-  return ["auto", "always", "on", "enabled", "true", "1"].includes(
-    managedBypassMode(),
-  );
+  return false;
 }
 
 function envNumber(name: string, defaultValue: number): number {

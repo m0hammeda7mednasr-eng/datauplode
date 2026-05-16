@@ -10,7 +10,8 @@ import {
   AlertCircle, 
   History, 
   DollarSign,
-  PackageSearch
+  PackageSearch,
+  ShieldCheck
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -23,6 +24,11 @@ import SyncJobs from './pages/SyncJobs';
 import ManualReview from './pages/ManualReview';
 import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
+import ScraperPage from './pages/ScraperPage';
+import ScraperJobPage from './pages/ScraperJobPage';
+import ProductReviewPage from './pages/ProductReviewPage';
+import ProductEditorPage from './pages/ProductEditorPage';
+import SourcesPage from './pages/SourcesPage';
 
 const queryClient = new QueryClient();
 
@@ -80,6 +86,9 @@ function Sidebar() {
       case '/sync-jobs': return 'Sync Jobs';
       case '/review': return 'Manual Review';
       case '/settings': return 'Settings';
+      case '/scraper': return 'Scraper';
+      case '/products/review': return 'Product Review';
+      case '/sources': return 'Sources';
       default: return 'Overview';
     }
   };
@@ -96,6 +105,8 @@ function Sidebar() {
       <nav className="flex-1 mt-4">
         <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={location.pathname === '/'} />
         <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
+        <SidebarItem to="/scraper" icon={PackageSearch} label="Extractor" active={location.pathname.startsWith('/scraper')} />
+        <SidebarItem to="/products/review" icon={ShieldCheck} label="Product Review" active={location.pathname.startsWith('/products/review')} />
         <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
         <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
         <SidebarItem to="/pricing" icon={DollarSign} label="Pricing Rules" active={location.pathname === '/pricing'} />
@@ -103,6 +114,7 @@ function Sidebar() {
       </nav>
 
       <div className="mb-4">
+        <SidebarItem to="/sources" icon={PackageSearch} label="Sources" active={location.pathname === '/sources'} />
         <SidebarItem to="/settings" icon={Settings} label="Settings" active={location.pathname === '/settings'} />
       </div>
     </aside>
@@ -119,12 +131,17 @@ export default function App() {
             <Routes>
               <Route path="/" element={<><TopBar breadcrumb="Dashboard" /><main className="flex-1 p-8 overflow-y-auto"><Dashboard /></main></>} />
               <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
+              <Route path="/scraper" element={<><TopBar breadcrumb="Scraper" /><main className="flex-1 p-8 overflow-y-auto"><ScraperPage /></main></>} />
+              <Route path="/scraper/jobs/:id" element={<><TopBar breadcrumb="Extraction Job" /><main className="flex-1 p-8 overflow-y-auto"><ScraperJobPage /></main></>} />
+              <Route path="/products/review" element={<><TopBar breadcrumb="Product Review" /><main className="flex-1 p-8 overflow-y-auto"><ProductReviewPage /></main></>} />
+              <Route path="/products/review/:id" element={<><TopBar breadcrumb="Extracted Product" /><main className="flex-1 p-8 overflow-y-auto"><ProductEditorPage /></main></>} />
               <Route path="/products" element={<><TopBar breadcrumb="Linked Products" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
               <Route path="/products/:id" element={<><TopBar breadcrumb="Product Details" /><main className="flex-1 p-8 overflow-y-auto"><ProductDetail /></main></>} />
               <Route path="/pricing" element={<><TopBar breadcrumb="Pricing Rules" /><main className="flex-1 p-8 overflow-y-auto"><PricingRules /></main></>} />
               <Route path="/sync-jobs" element={<><TopBar breadcrumb="Sync Jobs" /><main className="flex-1 p-8 overflow-y-auto"><SyncJobs /></main></>} />
               <Route path="/review" element={<><TopBar breadcrumb="Manual Review" /><main className="flex-1 p-8 overflow-y-auto"><ManualReview /></main></>} />
               <Route path="/settings" element={<><TopBar breadcrumb="Settings" /><main className="flex-1 p-8 overflow-y-auto"><SettingsPage /></main></>} />
+              <Route path="/sources" element={<><TopBar breadcrumb="Sources" /><main className="flex-1 p-8 overflow-y-auto"><SourcesPage /></main></>} />
             </Routes>
           </div>
         </div>

@@ -9,10 +9,12 @@ import { PricingEngine } from "./services/pricing.js";
 import { QueueService } from "./services/queue.js";
 import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
+import scraperRoutes from "./routes/scraper.routes.js";
 import axios from "axios";
 import crypto from "crypto";
 
 const router = Router();
+router.use(scraperRoutes);
 const scraperService = new ScraperService();
 const DEFAULT_SHOPIFY_SCOPES = [
   "read_products",
