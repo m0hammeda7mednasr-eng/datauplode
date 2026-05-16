@@ -1,9 +1,17 @@
 [
   {
-    "name": "Next UAE (su759706)",
+    "name": "MaxFashion 1",
+    "url": "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM",
+    "success": true,
+    "status": "manual_snapshot_required",
+    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
+    "error": "Max Fashion blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+  },
+  {
+    "name": "Next UAE 1",
     "url": "https://www.next.ae/en/style/su759706/w59264#w59264",
     "success": true,
-    "durationMs": 62605,
+    "durationMs": 32586,
     "supplier": "Next",
     "title": "White Strawberry Baby Short Sleeve Dresse 2 Pack (0mths-3yrs)",
     "price": 91,
@@ -36,10 +44,66 @@
     "issues": []
   },
   {
-    "name": "Next UAE (sv124809)",
+    "name": "Mothercare",
+    "url": "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4",
+    "success": true,
+    "durationMs": 532,
+    "supplier": "Mothercare",
+    "title": "3 Pack Mothercare Newborn Bibs",
+    "price": 40,
+    "currency": "AED",
+    "brand": "Mothercare",
+    "imageCount": 4,
+    "variantCount": 1,
+    "options": [
+      {
+        "name": "Default",
+        "values": [
+          "Default"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "M&S UAE 1",
+    "url": "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D",
+    "success": true,
+    "durationMs": 948,
+    "supplier": "Marks & Spencer",
+    "title": "Denim Striped Bibshort with T-Shirt (0-3 Yrs)",
+    "price": 99,
+    "currency": "AED",
+    "brand": "M&S",
+    "imageCount": 3,
+    "variantCount": 7,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "DENIM"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "0-3 Months",
+          "3-6 Months",
+          "6-9 Months",
+          "9-12 Months",
+          "18-24 Months",
+          "2-3 Years",
+          "12-18 Months"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Next UAE 2",
     "url": "https://www.next.ae/en/style/sv124809/g44412#g44412",
     "success": true,
-    "durationMs": 56725,
+    "durationMs": 30243,
     "supplier": "Next",
     "title": "River Island Pink Stripe Puff Sleeve Top & Bow Wide Leg Set",
     "price": 186,
@@ -68,54 +132,39 @@
     "issues": []
   },
   {
-    "name": "Max Fashion",
-    "url": "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM",
+    "name": "Next UAE 3",
+    "url": "https://www.next.ae/en/style/su741308/h44364#h44364",
     "success": true,
-    "durationMs": 11021,
-    "supplier": "Max Fashion",
-    "title": "Stitch Embroidered Denim Dungaree with T-shirt",
-    "price": 65,
-    "currency": "AED",
-    "brand": "MAX",
-    "imageCount": 8,
-    "variantCount": 5,
-    "options": [
-      {
-        "name": "Color",
-        "values": [
-          "Multicolour"
-        ]
-      },
-      {
-        "name": "Size",
-        "values": [
-          "3-6 mths",
-          "6-9 mths",
-          "9-12 mths",
-          "12-18 mths",
-          "18-24 mths"
-        ]
-      }
-    ],
-    "issues": []
+    "status": "manual_snapshot_required",
+    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
+    "error": "Next blocked automated server access to this product page (HTTP 403). Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
   },
   {
-    "name": "M&S UAE",
-    "url": "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D",
+    "name": "MaxFashion 2",
+    "url": "https://www.maxfashion.com/ae/en/buy-minnie-mouse-print-tshirt-and-short-leggings-set/p/B26KIGFECHAR324AEEXWHITELIGHT",
     "success": true,
-    "durationMs": 591,
+    "status": "manual_snapshot_required",
+    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
+    "error": "Max Fashion blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+  },
+  {
+    "name": "M&S UAE 2",
+    "url": "https://www.marksandspencerme.com/en-ae/l/pure-cotton-romper-with-bib-0-3-yrs-/p/T784671D",
+    "success": true,
+    "durationMs": 1628,
     "supplier": "Marks & Spencer",
-    "title": "Denim Striped Bibshort with T-Shirt (0-3 Yrs)",
-    "price": 89.1,
+    "title": "Pure Cotton Romper with Bib (0-3 Yrs)",
+    "price": 85,
     "currency": "AED",
     "brand": "M&S",
-    "imageCount": 3,
-    "variantCount": 7,
+    "imageCount": 1,
+    "variantCount": 13,
     "options": [
       {
         "name": "Color",
         "values": [
-          "DENIM"
+          "NAVY",
+          "ECRU"
         ]
       },
       {
@@ -134,215 +183,281 @@
     "issues": []
   },
   {
-    "name": "H&M UAE",
-    "url": "https://ae.hm.com/en/buy-2-piece-set-light-blue-white-striped",
+    "name": "Primark US",
+    "url": "https://www.primark.com/en-us/p/0-36mths-shirred-top-and-shorts-set-blue-991167715505",
     "success": true,
-    "durationMs": 533,
-    "supplier": "H&M",
-    "title": "2-piece set",
-    "price": 69,
-    "currency": "AED",
-    "brand": "H&M",
-    "imageCount": 5,
-    "variantCount": 7,
+    "durationMs": 2376,
+    "supplier": "Generic",
+    "title": "0-36mths | Shirred Top and Shorts Set",
+    "price": 18,
+    "currency": "USD",
+    "brand": "Primark US",
+    "imageCount": 2,
+    "variantCount": 250,
     "options": [
       {
         "name": "Color",
         "values": [
-          "Light Blue White Striped"
+          "To Top",
+          "Store Locator",
+          "Corporate Website",
+          "Love It For Longer",
+          "Inspiration",
+          "Email Signup",
+          "#Primania",
+          "Gift Card",
+          "Search",
+          "shopping list",
+          "my account",
+          "Newborn Baby",
+          "Baby Girls",
+          "Baby Boys",
+          "Explore By Product",
+          "Nursery",
+          "Close",
+          "open menu",
+          "PRIMARK logo",
+          "open search panel",
+          "Blue",
+          "Size:",
+          "CHECK AVAILABILITY",
+          "s",
+          "USA, $, click to change the country",
+          "USA flag image",
+          "USA, $"
+        ],
+        "swatches": {
+          "Newborn Baby": {
+            "color": "#000000"
+          },
+          "Baby Girls": {
+            "color": "#000000"
+          },
+          "Baby Boys": {
+            "color": "#000000"
+          },
+          "Explore By Product": {
+            "color": "#000000"
+          },
+          "Nursery": {
+            "color": "#000000"
+          },
+          "USA, $, click to change the country": {
+            "image": "https://primedia.primark.com/i/primark/United%20States"
+          },
+          "USA flag image": {
+            "image": "https://primedia.primark.com/i/primark/United%20States"
+          },
+          "USA, $": {
+            "image": "https://primedia.primark.com/i/primark/United%20States"
+          }
+        }
+      },
+      {
+        "name": "Size",
+        "values": [
+          "To Top",
+          "Close",
+          "Store Locator",
+          "Corporate Website",
+          "Love It For Longer",
+          "Inspiration",
+          "Email Signup",
+          "#Primania",
+          "Gift Card",
+          "PRIMARK logo",
+          "shopping list",
+          "my account",
+          "Newborn Baby",
+          "Baby Girls",
+          "Baby Boys",
+          "Explore By Product",
+          "Nursery",
+          "open menu",
+          "open search panel",
+          "0-36mths | Shirred Top and Shorts Set",
+          "add to shopping list",
+          "Blue",
+          "Size:",
+          "Guide",
+          "CHECK AVAILABILITY",
+          "Previous",
+          "Next",
+          "Buy a gift card",
+          "Buy personalized Primark gift cards today!",
+          "USA, $, click to change the country",
+          "USA, $"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Carters AE",
+    "url": "https://ae.carters.com/purelysoft-baby-girls-flamingo-print-dress-ivory-1u662210/",
+    "success": true,
+    "durationMs": 1499,
+    "supplier": "Generic",
+    "title": "PurelySoft Baby Girls Flamingo Print Dress, Ivory",
+    "price": 65,
+    "currency": "AED",
+    "brand": "Carters",
+    "imageCount": 2,
+    "variantCount": 37,
+    "options": [
+      {
+        "name": "Size",
+        "values": [
+          "carters link",
+          "Carter's",
+          "oshkosh link",
+          "OshKosh",
+          "skiphop link",
+          "Skip Hop",
+          "store logo",
+          "Baby PREEMIE - 24M",
+          "Baby Girl Preemie to 24 Months",
+          "Baby Girl",
+          "Baby Boy Preemie to 24 Months",
+          "Baby Boy",
+          "Baby Neutral",
+          "Toddler 2T - 5T",
+          "Toddler Girl 2T to 5T",
+          "Toddler Girl",
+          "Toddler Boy 2T to 5T",
+          "Toddler Boy",
+          "Kid 4 - 14",
+          "Girl",
+          "Kid Boy 4 to 14",
+          "Boy",
+          "Brands",
+          "Kid Girl",
+          "Kid Boy",
+          "Skiphop",
+          "Home",
+          "Clothing",
+          "1",
+          "Add to Cart",
+          "Support",
+          "About Us",
+          "Subscribe",
+          "The store will not work correctly when cookies are disabled.",
+          "Free Shipping on AED 100+",
+          "40% Off",
+          "important for a comfortable fit."
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Adidas AE",
+    "url": "https://www.adidas.ae/en/adidas-disney-sl-72-rs-elastic-lace-shoes/IH1707.html",
+    "success": true,
+    "durationMs": 506,
+    "supplier": "Adidas",
+    "title": "ADIDAS DISNEY SL 72 RS ELASTIC LACE SHOES",
+    "price": 329,
+    "currency": "AED",
+    "brand": "ADIDAS",
+    "imageCount": 27,
+    "variantCount": 12,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Blush Pink / Cloud White / Icey Blue"
         ]
       },
       {
         "name": "Size",
         "values": [
-          "1.5-2 Years",
-          "4-6 Months",
+          "19",
+          "20",
+          "21",
+          "22",
+          "23",
+          "23.5",
+          "24",
+          "25",
+          "25.5",
+          "26",
+          "26.5",
+          "27"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "Shein AR",
+    "url": "https://ar.shein.com/SHEIN-3pcs-Set-Unisex-Baby-Boy-Girl-Cute-Bear-Pattern-Blue-Sleeveless-Vest-White-Short-Sleeve-Shirt-And-Navy-Blue-Shorts-Set-Spring-Summer-Baby-Boy-Clothes-Outfits-Easter-Gift-Sthings-For-Baby-Toddler-Summer-Outfits-Toddler-Two-Piece-Set-p-380067052.html?src_module=all&src_identifier=on=PRODUCT_ITEMS_COMPONENT%60cn=PRODUCT_ITEMS_COMPONENT_2%60hz=0%60ps=4_1_0%60jc=itemPicking_1004557657&src_tab_page_id=page_home1778867739774&mallCode=1&imgRatio=3-4&detailBusinessFrom=0-2",
+    "success": true,
+    "status": "manual_snapshot_required",
+    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
+    "error": "SHEIN blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+  },
+  {
+    "name": "Lefties XE",
+    "url": "https://www.lefties.com/xe/kids/girl/new-in/embroidered-textured-dress-c1030267676p732631353.html?colorId=653&parentId=732634941",
+    "success": true,
+    "durationMs": 9044,
+    "supplier": "Lefties",
+    "title": "Embroidered textured dress",
+    "price": 89,
+    "currency": "AED",
+    "brand": "Lefties",
+    "imageCount": 6,
+    "variantCount": 6,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "LILAC PINK"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "4-5 years",
+          "5-6 years",
+          "7-8 years",
+          "9-10 years",
+          "11-12 years",
+          "13-14 years"
+        ]
+      }
+    ],
+    "issues": []
+  },
+  {
+    "name": "H&M EG",
+    "url": "https://eg.hm.com/en/buy-2-piece-cotton-set-light-blue-cream",
+    "success": true,
+    "durationMs": 531,
+    "supplier": "H&M",
+    "title": "2-piece cotton set",
+    "price": 1399,
+    "currency": "EGP",
+    "brand": "H&M",
+    "imageCount": 7,
+    "variantCount": 6,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Light Blue Cream"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
           "6-9 Months",
           "9-12 Months",
           "12-18 Months",
           "2-3 Years",
-          "3-4 Years"
-        ]
-      }
-    ],
-    "issues": []
-  },
-  {
-    "name": "Lefties UAE",
-    "url": "https://www.lefties.com/ae/woman/shoes/minimalist-chunky-sole-sneaker-c1030267545p730276495.html",
-    "success": true,
-    "durationMs": 1278,
-    "supplier": "Lefties",
-    "title": "Minimalist chunky sole sneaker",
-    "price": 99,
-    "currency": "AED",
-    "brand": "Lefties",
-    "imageCount": 7,
-    "variantCount": 8,
-    "options": [
-      {
-        "name": "Color",
-        "values": [
-          "WHITE"
-        ]
-      },
-      {
-        "name": "Size",
-        "values": [
-          "98",
-          "35",
-          "36",
-          "37",
-          "38",
-          "39",
-          "40",
-          "41"
-        ]
-      }
-    ],
-    "issues": []
-  },
-  {
-    "name": "Gap UAE",
-    "url": "https://www.gap.ae/product/218613975",
-    "success": true,
-    "durationMs": 1417,
-    "supplier": "Gap",
-    "title": "ColdControl Max Relaxed Midi Puffer Jacket",
-    "price": 199,
-    "currency": "AED",
-    "brand": "Gap",
-    "imageCount": 9,
-    "variantCount": 5,
-    "options": [
-      {
-        "name": "Color",
-        "values": [
-          "BLACK 1"
-        ],
-        "swatches": {
-          "BLACK 1": {
-            "image": "https://production.atgwasl.com/dw/image/v2/BDSP_PRD/on/demandware.static/-/Sites-GAP-master-catalog/default/dw5588ecbc/images/hi-res/GAP/218/218613974/218613974_000_in.jpg"
-          }
-        }
-      },
-      {
-        "name": "Size",
-        "values": [
-          "L",
-          "M",
-          "S",
-          "XL",
-          "XS"
-        ]
-      }
-    ],
-    "issues": []
-  },
-  {
-    "name": "Adidas UAE",
-    "url": "https://www.adidas.ae/en/clot-samba-by-edison-chen-trainers/KJ0274.html",
-    "success": true,
-    "durationMs": 406,
-    "supplier": "Adidas",
-    "title": "CLOT Samba By Edison Chen Trainers",
-    "price": 599,
-    "currency": "AED",
-    "brand": "ADIDAS",
-    "imageCount": 30,
-    "variantCount": 24,
-    "options": [
-      {
-        "name": "Color",
-        "values": [
-          "Cloud White / Core Black / Cloud White"
-        ]
-      },
-      {
-        "name": "Size",
-        "values": [
-          "36",
-          "36 2/3",
-          "37 1/3",
-          "38",
-          "38 2/3",
-          "39 1/3",
-          "40",
-          "40 2/3",
-          "41 1/3",
-          "42",
-          "42 2/3",
-          "43 1/3",
-          "44",
-          "44 2/3",
-          "45 1/3",
-          "46",
-          "46 2/3",
-          "47 1/3",
-          "48",
-          "48 2/3",
-          "49 1/3",
-          "50",
-          "50 2/3",
-          "51 1/3"
-        ]
-      }
-    ],
-    "issues": []
-  },
-  {
-    "name": "Mothercare",
-    "url": "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4",
-    "success": true,
-    "durationMs": 572,
-    "supplier": "Mothercare",
-    "title": "3 Pack Mothercare Newborn Bibs",
-    "price": 40,
-    "currency": "AED",
-    "brand": "Mothercare",
-    "imageCount": 4,
-    "variantCount": 1,
-    "options": [
-      {
-        "name": "Default",
-        "values": [
-          "Default"
-        ]
-      }
-    ],
-    "issues": []
-  },
-  {
-    "name": "Zara",
-    "url": "https://www.zara.com/ae/en/-p01473692.html?v1=511134201",
-    "success": true,
-    "durationMs": 272,
-    "supplier": "Zara",
-    "title": "CRAB PRINT KNIT PLAYSUIT",
-    "price": 159,
-    "currency": "AED",
-    "brand": "Zara",
-    "imageCount": 6,
-    "variantCount": 4,
-    "options": [
-      {
-        "name": "Color",
-        "values": [
-          "Ecru"
-        ],
-        "swatches": {
-          "Ecru": {
-            "color": "#E2D2C2"
-          }
-        }
-      },
-      {
-        "name": "Size",
-        "values": [
-          "3-6 months (68 cm)",
-          "6-9 months (74 cm)",
-          "9-12 months (80 cm)",
-          "12-18 months (86 cm)"
+          "3-4 Years",
+          "2Y"
         ]
       }
     ],
@@ -352,7 +467,7 @@
     "name": "Centrepoint",
     "url": "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE",
     "success": true,
-    "durationMs": 2327,
+    "durationMs": 5213,
     "supplier": "Centrepoint",
     "title": "Juniors Round Neck Short Sleeve T-shirt and Dungaree Set with Alligator Applique",
     "price": 45,

@@ -99,6 +99,66 @@ model ProductWarning {
   createdAt          DateTime         @default(now())
 }
 
+model SourceScan {
+  id                String                   @id @default(cuid())
+  sourceUrl         String                   @unique
+  domain            String
+  brandKey          String?
+  brandName         String?
+  region            String?
+  status            String                   @default("PENDING") // PENDING, COMPLETED, FAILED
+  reportJson        String?                  // JSON of SourceCapabilityReport
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  completedAt       DateTime?
+  warnings          SourceScanWarning[]
+  limitProfile      SourceLimitProfile?
+  capabilityReport  SourceCapabilityReport?
+}
+
+model SourceCapabilityReport {
+  id           String      @id @default(cuid())
+  sourceScanId String      @unique
+  sourceScan   SourceScan  @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  reportJson   String
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  warnings     SourceWarning[]
+}
+
+model SourceWarning {
+  id                 String                  @id @default(cuid())
+  sourceCapabilityReportId String
+  sourceCapabilityReport SourceCapabilityReport @relation(fields: [sourceCapabilityReportId], references: [id], onDelete: Cascade)
+  code               String
+  message            String
+  createdAt          DateTime                @default(now())
+}
+
+model SourceScanWarning {
+  id           String     @id @default(cuid())
+  sourceScanId String
+  sourceScan   SourceScan @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  code         String
+  message      String
+  createdAt    DateTime   @default(now())
+}
+
+model SourceLimitProfile {
+  id                   String     @id @default(cuid())
+  sourceScanId         String     @unique
+  sourceScan           SourceScan @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  maxConcurrency       Int        @default(1)
+  minDelayMs           Int        @default(3000)
+  maxRequestsPerMinute Int        @default(15)
+  maxProductsPerRun    Int        @default(100)
+  maxPagesPerRun       Int        @default(30)
+  retryCount           Int        @default(3)
+  timeoutMs            Int        @default(15000)
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+}
+
 model ExtractionLog {
   id        String   @id @default(cuid())
   jobId     String?

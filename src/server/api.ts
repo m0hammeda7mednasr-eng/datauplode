@@ -1,4 +1,9 @@
-import { Router, type NextFunction, type Request, type Response } from "express";
+import {
+  Router,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import { prisma } from "./db.js";
 import {
   ScraperService,
@@ -10,11 +15,13 @@ import { QueueService } from "./services/queue.js";
 import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
 import scraperRoutes from "./routes/scraper.routes.js";
+import sourceCapabilityRoutes from "./routes/source-capability.routes.js";
 import axios from "axios";
 import crypto from "crypto";
 
 const router = Router();
 router.use(scraperRoutes);
+router.use(sourceCapabilityRoutes);
 const scraperService = new ScraperService();
 const DEFAULT_SHOPIFY_SCOPES = [
   "read_products",
@@ -27,7 +34,10 @@ const DEFAULT_SHOPIFY_SCOPES = [
   "write_publications",
 ];
 const SHOPIFY_DOMAIN_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
-const analyzeProductCache = new Map<string, { expiresAt: number; product: NormalizedProduct }>();
+const analyzeProductCache = new Map<
+  string,
+  { expiresAt: number; product: NormalizedProduct }
+>();
 
 function envNumber(name: string, defaultValue: number): number {
   const value = Number(String(process.env[name] || "").trim());
@@ -89,10 +99,18 @@ function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
 
 function deriveOptionsFromStoredVariants(variants: any[]) {
   const colors = [
-    ...new Set(variants.map((variant) => String(variant.color || "").trim()).filter(Boolean)),
+    ...new Set(
+      variants
+        .map((variant) => String(variant.color || "").trim())
+        .filter(Boolean),
+    ),
   ];
   const sizes = [
-    ...new Set(variants.map((variant) => String(variant.size || "").trim()).filter(Boolean)),
+    ...new Set(
+      variants
+        .map((variant) => String(variant.size || "").trim())
+        .filter(Boolean),
+    ),
   ];
   const options = [];
   if (colors.length) options.push({ name: "Color", values: colors });
@@ -100,7 +118,9 @@ function deriveOptionsFromStoredVariants(variants: any[]) {
   return options.length ? options : [{ name: "Default", values: ["Default"] }];
 }
 
-function sourceProductToNormalizedProduct(sourceProduct: any): NormalizedProduct {
+function sourceProductToNormalizedProduct(
+  sourceProduct: any,
+): NormalizedProduct {
   const sourceRaw = readJsonObject(sourceProduct.raw);
   const variants = (sourceProduct.variants || []).map((variant: any) => {
     const variantRaw = readJsonObject(variant.raw);
@@ -136,12 +156,15 @@ function sourceProductToNormalizedProduct(sourceProduct: any): NormalizedProduct
       color: image.color || undefined,
       position: Number.isInteger(image.position) ? image.position : index,
     })),
-    options: Array.isArray(sourceRaw.options) && sourceRaw.options.length
-      ? sourceRaw.options
-      : deriveOptionsFromStoredVariants(variants),
+    options:
+      Array.isArray(sourceRaw.options) && sourceRaw.options.length
+        ? sourceRaw.options
+        : deriveOptionsFromStoredVariants(variants),
     variants,
     raw: {
-      ...(sourceRaw.raw && typeof sourceRaw.raw === "object" ? sourceRaw.raw : {}),
+      ...(sourceRaw.raw && typeof sourceRaw.raw === "object"
+        ? sourceRaw.raw
+        : {}),
       cachedFromSourceProductId: sourceProduct.id,
       cachedAt: new Date().toISOString(),
     },
@@ -151,11 +174,7 @@ function sourceProductToNormalizedProduct(sourceProduct: any): NormalizedProduct
 function wrapAsyncHandler(handler: any) {
   if (handler.length > 3 || handler.__synclyAsyncWrapped) return handler;
 
-  const wrapped = function (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ) {
+  const wrapped = function (req: Request, res: Response, next: NextFunction) {
     try {
       const result = handler(req, res, next);
       if (result && typeof result.then === "function") {
@@ -204,11 +223,15 @@ function getApiErrorCode(error: any) {
 
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
-  return error?.code === "P1001" || message.includes("Can't reach database server");
+  return (
+    error?.code === "P1001" || message.includes("Can't reach database server")
+  );
 }
 
 function isShopifyReconnectRequired(error: any) {
-  return error?.code === "SHOPIFY_RECONNECT_REQUIRED" || isDecryptionError(error);
+  return (
+    error?.code === "SHOPIFY_RECONNECT_REQUIRED" || isDecryptionError(error)
+  );
 }
 
 function firstQueryValue(value: any): string {
@@ -557,24 +580,25 @@ router.post("/imports/analyze", async (req, res) => {
     if (!data && !snapshotText) {
       const normalizedUrl = normalizeAnalyzeCacheUrl(url);
       const cacheMs = getAnalyzeCacheMs();
-      const cachedSourceProduct = cacheMs > 0
-        ? await prisma.sourceProduct.findFirst({
-            where: {
-              OR: [
-                { url },
-                ...(normalizedUrl !== url ? [{ url: normalizedUrl }] : []),
-              ],
-              lastScrapedAt: {
-                gte: new Date(Date.now() - cacheMs),
+      const cachedSourceProduct =
+        cacheMs > 0
+          ? await prisma.sourceProduct.findFirst({
+              where: {
+                OR: [
+                  { url },
+                  ...(normalizedUrl !== url ? [{ url: normalizedUrl }] : []),
+                ],
+                lastScrapedAt: {
+                  gte: new Date(Date.now() - cacheMs),
+                },
               },
-            },
-            include: {
-              supplier: true,
-              images: { orderBy: { position: "asc" } },
-              variants: true,
-            },
-          })
-        : null;
+              include: {
+                supplier: true,
+                images: { orderBy: { position: "asc" } },
+                variants: true,
+              },
+            })
+          : null;
 
       if (cachedSourceProduct) {
         data = sourceProductToNormalizedProduct(cachedSourceProduct);
@@ -1010,7 +1034,8 @@ router.post("/products/:id/sync", async (req, res) => {
   }
   if (!product.shopifyProduct) {
     return res.status(409).json({
-      error: "Product is not linked to Shopify yet. Publish it to Shopify before running Sync Now.",
+      error:
+        "Product is not linked to Shopify yet. Publish it to Shopify before running Sync Now.",
     });
   }
 
@@ -1144,15 +1169,22 @@ router.get("/settings/shopify", async (req, res) => {
       });
     }
 
-    const tokenNeedsReconnect = Boolean(connection.accessTokenEnc && (() => {
-      try {
-        decrypt(connection.accessTokenEnc);
-        return false;
-      } catch (error) {
-        return isDecryptionError(error);
-      }
-    })());
-    const connected = Boolean(connection.isConnected && connection.accessTokenEnc && !tokenNeedsReconnect);
+    const tokenNeedsReconnect = Boolean(
+      connection.accessTokenEnc &&
+      (() => {
+        try {
+          decrypt(connection.accessTokenEnc);
+          return false;
+        } catch (error) {
+          return isDecryptionError(error);
+        }
+      })(),
+    );
+    const connected = Boolean(
+      connection.isConnected &&
+      connection.accessTokenEnc &&
+      !tokenNeedsReconnect,
+    );
 
     res.json({
       shopDomain: connection.shopDomain,
@@ -1195,11 +1227,9 @@ router.post("/settings/shopify", async (req, res) => {
     });
 
     if (!existing && !cleanClientSecret) {
-      return res
-        .status(400)
-        .json({
-          error: "Client secret is required for a new Shopify connection",
-        });
+      return res.status(400).json({
+        error: "Client secret is required for a new Shopify connection",
+      });
     }
 
     const credentialsChanged = Boolean(
@@ -1269,13 +1299,11 @@ router.post("/settings/shopify/test", async (req, res) => {
         message: "Shopify domain is reachable",
       });
     }
-    res
-      .status(error.statusCode || 400)
-      .json({
-        error:
-          error.message ||
-          "Could not reach Shopify domain. Please check the URL.",
-      });
+    res.status(error.statusCode || 400).json({
+      error:
+        error.message ||
+        "Could not reach Shopify domain. Please check the URL.",
+    });
   }
 });
 
@@ -1307,7 +1335,8 @@ router.post("/shopify/connect", async (req, res) => {
           },
         });
         return res.status(409).json({
-          error: "Saved Shopify secret cannot be decrypted. Re-save the client secret, then connect again.",
+          error:
+            "Saved Shopify secret cannot be decrypted. Re-save the client secret, then connect again.",
           code: "SHOPIFY_SECRET_RECONNECT_REQUIRED",
         });
       }

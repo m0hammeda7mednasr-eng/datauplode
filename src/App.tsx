@@ -29,6 +29,7 @@ import ScraperJobPage from './pages/ScraperJobPage';
 import ProductReviewPage from './pages/ProductReviewPage';
 import ProductEditorPage from './pages/ProductEditorPage';
 import SourcesPage from './pages/SourcesPage';
+import SourceScanPage from './pages/scraper/SourceScanPage';
 
 const queryClient = new QueryClient();
 
@@ -87,6 +88,7 @@ function Sidebar() {
       case '/review': return 'Manual Review';
       case '/settings': return 'Settings';
       case '/scraper': return 'Scraper';
+      case '/scraper/source-scan': return 'Source Scan';
       case '/products/review': return 'Product Review';
       case '/sources': return 'Sources';
       default: return 'Overview';
@@ -105,7 +107,8 @@ function Sidebar() {
       <nav className="flex-1 mt-4">
         <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={location.pathname === '/'} />
         <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
-        <SidebarItem to="/scraper" icon={PackageSearch} label="Extractor" active={location.pathname.startsWith('/scraper')} />
+        <SidebarItem to="/scraper" icon={PackageSearch} label="Extractor" active={location.pathname === '/scraper' || location.pathname.startsWith('/scraper/jobs/')} />
+        <SidebarItem to="/scraper/source-scan" icon={ShieldCheck} label="Source Scan" active={location.pathname.startsWith('/scraper/source-scan')} />
         <SidebarItem to="/products/review" icon={ShieldCheck} label="Product Review" active={location.pathname.startsWith('/products/review')} />
         <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
         <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
@@ -132,6 +135,7 @@ export default function App() {
               <Route path="/" element={<><TopBar breadcrumb="Dashboard" /><main className="flex-1 p-8 overflow-y-auto"><Dashboard /></main></>} />
               <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
               <Route path="/scraper" element={<><TopBar breadcrumb="Scraper" /><main className="flex-1 p-8 overflow-y-auto"><ScraperPage /></main></>} />
+              <Route path="/scraper/source-scan" element={<><TopBar breadcrumb="Source Scan" /><main className="flex-1 p-8 overflow-y-auto"><SourceScanPage /></main></>} />
               <Route path="/scraper/jobs/:id" element={<><TopBar breadcrumb="Extraction Job" /><main className="flex-1 p-8 overflow-y-auto"><ScraperJobPage /></main></>} />
               <Route path="/products/review" element={<><TopBar breadcrumb="Product Review" /><main className="flex-1 p-8 overflow-y-auto"><ProductReviewPage /></main></>} />
               <Route path="/products/review/:id" element={<><TopBar breadcrumb="Extracted Product" /><main className="flex-1 p-8 overflow-y-auto"><ProductEditorPage /></main></>} />

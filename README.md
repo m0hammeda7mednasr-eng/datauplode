@@ -1,142 +1,92 @@
-# 🚀 Syncly - Shopify Product Synchronizer
+# Syncly Product Source Scanner + Extraction Engine
 
-## ✅ المشروع شغال بشكل احترافي! / Project Running Professionally!
+React + Node.js + Prisma app for **legal, brand-aware product source scanning** and public product extraction.
 
-**Shopify Product Synchronizer** - نظام احترافي لاستيراد ومزامنة المنتجات من مواقع الموردين إلى متجر Shopify الخاص بك.
+## What this module does
+- Scans a source URL before scraping.
+- Detects if extraction is allowed and technically possible.
+- Uses only public/legal signals:
+  - `robots.txt`
+  - sitemaps
+  - public product pages
+  - JSON-LD / OpenGraph / embedded public state
+  - static HTML
+  - browser rendering (Playwright) only for public pages
+- Returns a full `SourceCapabilityReport` with strategy, warnings, and conservative free limits.
 
----
+## Critical safety rules
+- No CAPTCHA bypass.
+- No anti-bot bypass.
+- No stealth/fingerprint spoofing.
+- No private/authenticated APIs.
+- Respect `robots.txt`, terms, rate limits, and permissions.
+- If blocked/restricted, stop and return restricted/manual status.
 
-## 🌐 الوصول السريع / Quick Access
+## UI
+- New page: `/scraper/source-scan`
+- Features:
+  - URL input + scan
+  - brand/access/discovery/signal/restriction cards
+  - recommended strategy + safe limits
+  - `Start Extraction Using Recommended Strategy`
+  - Restricted mode guard:
+    - `This source needs permission, feed, API, or manual import.`
 
-### التطبيق:
+## API
+- `POST /api/source-scan`
+- `GET /api/source-scan/:id`
+- `POST /api/source-scan/:id/start-extraction`
+- `GET /api/source-scans`
 
-```
-http://localhost:3000
-```
+## Core scanner services
+- `src/server/scraper/services/SourceCapabilityScanner.ts`
+- `BrandDetector.ts`
+- `RobotsParser.ts`
+- `SitemapDiscovery.ts`
+- `RestrictionDetector.ts`
+- `ExtractionSignalsDetector.ts`
+- `ArabicReportGenerator.ts`
 
-👆 **افتح الرابط ده في المتصفح!**
+## Prisma models
+- `SourceScan`
+- `SourceCapabilityReport`
+- `SourceWarning`
+- `SourceLimitProfile`
 
-### Supabase Dashboard:
+## Conservative brand limit profiles
+Configured in:
+- `src/server/scraper/types/brandLimits.ts`
 
-```
-https://gqjwyldmajaeraydlcip.supabase.co
-```
+Supported target brands:
+- Next
+- Max Fashion
+- SHEIN
+- H&M
+- Lefties
+- Centrepoint
+- Gap
+- Zara
+- Marks & Spencer
+- Primark
+- Mothercare
 
----
-
-## ✨ الميزات الرئيسية / Key Features
-
-### 🕷️ السكرابينج الذكي
-
-- استخراج تلقائي للمنتجات من URLs
-- دعم مواقع متعددة (Next.co.uk, Amazon, وغيرها)
-- استخراج الصور والـ Variants والأسعار
-- User-Agent rotation لتجنب الحظر
-
-### 💰 إدارة الأسعار
-
-- قواعد تسعير مخصصة
-- Multipliers و Markups
-- Rounding rules (.99, .00)
-- تحويل العملات
-
-### 🔄 المزامنة مع Shopify
-
-- ربط المنتجات تلقائياً
-- تحديث الأسعار والمخزون
-- إدارة الـ Variants
-- Sync jobs tracking
-
-### 🗄️ قاعدة بيانات قوية
-
-- Supabase PostgreSQL
-- 14 جدول مترابط
-- Real-time capabilities
-- Auto-generated APIs
-
----
-
-## 🚀 البدء السريع / Quick Start
-
-### 1. التطبيق شغال حالياً:
-
+## Run
 ```bash
-npm run dev  # ✅ شغال
+npm install
+npm run db:push
+npm run dev
 ```
 
-### 2. اختبار السكرابينج:
-
+## Tests
 ```bash
-npm run test:scraper:demo
+npm run test:source-scan
+npm run test:extraction-engine
+npm run test:brand-limits
 ```
 
-### 3. إدارة قاعدة البيانات:
-
-```bash
-npm run db:studio
-```
-
----
-
-## 📚 التوثيق الكامل / Full Documentation
-
-### ابدأ من هنا:
-
-1. **`FINAL-SUMMARY.md`** ⭐⭐⭐ - الملخص النهائي الشامل
-2. **`README-AR.md`** ⭐⭐ - ملخص سريع بالعربي
-3. **`SUPABASE-SETUP.md`** ⭐ - إعداد Supabase
-
-### للتفاصيل:
-
-- `QUICK-START.md` - دليل البدء السريع
-- `PROJECT-STATUS.md` - حالة المشروع
-- `SETUP-GUIDE.md` - دليل التثبيت
-- `START-HERE.md` - نقطة البداية
-
----
-
-## 🎯 ما تم إنجازه / What's Done
-
-- ✅ تثبيت 321 package
-- ✅ إعداد Supabase PostgreSQL
-- ✅ 14 جدول في قاعدة البيانات
-- ✅ نظام سكرابينج احترافي
-- ✅ واجهة مستخدم كاملة
-- ✅ Backend API جاهز
-- ✅ اختبارات ناجحة (100%)
-- ✅ توثيق شامل (7 ملفات)
-
----
-
-## 🔧 الأوامر المتاحة / Available Commands
-
-```bash
-npm run dev                  # تشغيل المشروع (شغال ✅)
-npm run test:scraper:demo    # اختبار السكرابينج التجريبي
-npm run test:scraper         # اختبار السكرابينج الحقيقي
-npm run db:push              # تطبيق Schema على قاعدة البيانات
-npm run db:studio            # فتح Prisma Studio
-npm run lint                 # Type checking
-npm run build                # Build للـ production
-```
-
----
-
-## 📊 التقنيات / Technologies
-
-**Frontend:** React 19, Tailwind CSS 4, TanStack Query, Framer Motion
-**Backend:** Node.js, Express, Prisma, PostgreSQL (Supabase)
-**Scraping:** Cheerio, Axios, P-Queue
-**Development:** TypeScript, Vite, TSX
-
----
-
-## 🎉 مبروك!
-
-المشروع **جاهز تماماً** للاستخدام والتطوير! 🚀
-
-**اقرأ `FINAL-SUMMARY.md` للتفاصيل الكاملة**
-
----
-
-**صنع بـ ❤️ في مصر**
+## Environment
+Copy `.env.example` and set:
+- `DATABASE_URL`
+- `APP_URL`
+- `FRONTEND_URL`
+- optional scraper/log settings
