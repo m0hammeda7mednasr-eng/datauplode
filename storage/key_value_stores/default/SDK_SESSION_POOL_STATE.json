@@ -1,9 +1,9 @@
 {
-  "usableSessionsCount": 20,
+  "usableSessionsCount": 2,
   "retiredSessionsCount": 0,
   "sessions": [
     {
-      "id": "session_a6tBZecKcW",
+      "id": "session_Iu7zbgnYOC",
       "cookieJar": {
         "version": "tough-cookie@6.0.1",
         "storeType": "MemoryCookieStore",
@@ -16,14 +16,14 @@
       "userData": {},
       "maxErrorScore": 3,
       "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:21.273Z",
-      "createdAt": "2026-05-16T09:19:21.273Z",
+      "expiresAt": "2026-05-16T17:20:57.593Z",
+      "createdAt": "2026-05-16T16:30:57.593Z",
       "usageCount": 0,
       "maxUsageCount": 50,
       "errorScore": 0
     },
     {
-      "id": "session_xexjqRhken",
+      "id": "session_JszFMCR0R1",
       "cookieJar": {
         "version": "tough-cookie@6.0.1",
         "storeType": "MemoryCookieStore",
@@ -31,374 +31,286 @@
         "enableLooseMode": false,
         "allowSpecialUseDomain": true,
         "prefixSecurity": "silent",
-        "cookies": []
+        "cookies": [
+          {
+            "key": "XSRF-TOKEN",
+            "value": "b0fe9195-5a0f-4be7-87fb-4bb1c1ead60f",
+            "expires": "2026-05-16T17:21:17.168Z",
+            "domain": "www.maxfashion.com",
+            "path": "/auth",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.177Z",
+            "lastAccessed": "2026-05-16T16:31:17.177Z"
+          },
+          {
+            "key": "concept",
+            "value": "max",
+            "expires": "2027-05-16T16:31:00.622Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.178Z",
+            "lastAccessed": "2026-05-16T16:31:17.178Z"
+          },
+          {
+            "key": "lang",
+            "value": "en",
+            "expires": "2027-05-16T16:31:00.622Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.179Z",
+            "lastAccessed": "2026-05-16T16:31:17.179Z"
+          },
+          {
+            "key": "country",
+            "value": "ae",
+            "expires": "2027-05-16T16:31:00.622Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.179Z",
+            "lastAccessed": "2026-05-16T16:31:17.179Z"
+          },
+          {
+            "key": "device",
+            "value": "desktop",
+            "expires": "2027-05-16T16:31:00.621Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.180Z",
+            "lastAccessed": "2026-05-16T16:31:17.180Z"
+          },
+          {
+            "key": "_traceId",
+            "expires": "2026-06-15T16:31:05.000Z",
+            "domain": "maxfashion.com",
+            "path": "/ae",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.180Z",
+            "lastAccessed": "2026-05-16T16:31:17.180Z"
+          },
+          {
+            "key": "isLoggedIn",
+            "value": "false",
+            "expires": "2026-05-17T16:31:06.000Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.207Z",
+            "lastAccessed": "2026-05-16T16:31:17.207Z"
+          },
+          {
+            "key": "isHybrisBloomreachRailsCookieEnabled",
+            "value": "false",
+            "expires": "2026-05-16T17:21:17.169Z",
+            "domain": "www.maxfashion.com",
+            "path": "/ae",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.208Z",
+            "lastAccessed": "2026-05-16T16:31:17.208Z"
+          },
+          {
+            "key": "_app_deviceId",
+            "value": "user_177894905988622510",
+            "expires": "2027-05-16T16:30:59.416Z",
+            "domain": "www.maxfashion.com",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.209Z",
+            "lastAccessed": "2026-05-16T16:31:17.209Z"
+          },
+          {
+            "key": "lang",
+            "value": "en",
+            "expires": "2027-05-16T16:31:00.622Z",
+            "domain": "www.maxfashion.com",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.210Z",
+            "lastAccessed": "2026-05-16T16:31:17.210Z"
+          },
+          {
+            "key": "mt.v",
+            "value": "2.546647385.1778949063257",
+            "expires": "2027-06-20T16:31:06.717Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.210Z",
+            "lastAccessed": "2026-05-16T16:31:17.210Z"
+          },
+          {
+            "key": "JSESSIONID",
+            "value": "98AE3F585DC773C862B7CAE339BA413C",
+            "expires": "2026-05-16T17:21:17.170Z",
+            "domain": "www.maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.213Z",
+            "lastAccessed": "2026-05-16T16:31:17.213Z"
+          },
+          {
+            "key": "BLSR",
+            "value": "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJicm9hZGxlYWYtYXV0aGVudGljYXRpb24iLCJzdWIiOiJCTFNSIiwiYXVkIjoiYnJvYWRsZWFmLWF1dGhlbnRpY2F0aW9uIiwicmVkaXJlY3RVcmwiOiJhSFIwY0hNNkx5OTNkM2N1YldGNFptRnphR2x2Ymk1amIyMHZZWFYwYUM5dllYVjBhQzloZFhSb2IzSnBlbVVcL1kyeHBaVzUwWDJsa1BXMWhlRjloWlNad2NtOXRjSFE5Ym05dVpTWnlaV1JwY21WamRGOTFjbWs5YUhSMGNITWxNMEVsTWtZbE1rWjNkM2N1YldGNFptRnphR2x2Ymk1amIyMGxNa1p6YVd4bGJuUXRZMkZzYkdKaFkyc3VhSFJ0YkNaeVpYTndiMjV6WlY5MGVYQmxQV052WkdVbWMyTnZjR1U5VlZORlVpVXlNRU5WVTFSUFRVVlNKVEl3UTFWVFZFOU5SVkpmVlZORlVpVXlNRWxPVmtWT1ZFOVNXVjlUVlUxTlFWSlpKVEl3U1U1V1JVNVVUMUpaWDB4UFEwRlVTVTlPSlRJd1QwWkdURWxPUlY5QlEwTkZVMU1tYzNSaGRHVTlWVlpTVmxacWF6Qk9SbG8xV1ROd1RtVnJjRTVqTVZveVYxUmtSVk5yTldwbGEyeFlWVmR3VTJSRVp6RmFSR3cyVDFaak1WcHJVVEpSZHlVelJDVXpSQT09IiwicmVxdWVzdFVybCI6ImFIUjBjSE02THk5M2QzY3ViV0Y0Wm1GemFHbHZiaTVqYjIwdllYVjBhQzl2WVhWMGFDOWhkWFJvYjNKcGVtVT0ifQ.ZeSj124kqgSIHd-pqku_6ccvxjkhZFh-6nH1uqc706tUf3jHb26oGT1MiYcu44R8Ogjdsr_nTVJhl_OzbLJCMv_qIQpRK1a4Q5ENqaU_Wqs1xEbQQTFCYQHldX2vH0eUYkL8kcmd1jewBe41rz7f32ePKdEZyvp0rea4ikU98-6nP-SFinbRu-esZNVfDQxC81MBsssIVfbdOENqSzlAm0KpBDlQ2utiP9ZgO3dn8h6ncPCvtFLERIFWq-vFgOOWlUvvOlEqVi0qKeIuKbtTLGgOP9QkidvfjJvWLku2ML_qQtT7sKTAM8u6-gI5w1AJVGDmGF03FAdTLKO2f7Avbg",
+            "expires": "2026-05-16T17:21:17.170Z",
+            "domain": "www.maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.213Z",
+            "lastAccessed": "2026-05-16T16:31:17.213Z"
+          },
+          {
+            "key": "_gid",
+            "value": "GA1.2.1431137847.1778949066",
+            "expires": "2026-05-17T16:31:06.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.213Z",
+            "lastAccessed": "2026-05-16T16:31:17.213Z"
+          },
+          {
+            "key": "_gcl_au",
+            "value": "1.1.1581319812.1778949066",
+            "expires": "2026-08-14T16:31:06.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.214Z",
+            "lastAccessed": "2026-05-16T16:31:17.214Z"
+          },
+          {
+            "key": "_gat_UA-83860634-4",
+            "value": "1",
+            "expires": "2026-05-16T16:32:06.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.214Z",
+            "lastAccessed": "2026-05-16T16:31:17.214Z"
+          },
+          {
+            "key": "cf_clearance",
+            "value": "_BK26xqAwPb_UXgEb.XphflQursz3JU_7qNcjWY2res-1778949071-1.2.1.1-YOeJ2iFV0hK2k2fHCCtzE.xbLss__s2fwzqeqkL3xUxIR_CfAZHOH2y.LjTZ5mVyqbdvWWhHAMwrplVPiVIXPgva9cSLk.IG7bktHZhju07gNB2TXLNLknYI8QXZWPAqhYEixZA0LKjQQh6Kz9BCA3igDXjBTlQpNLdjLxPRKDH99jCOXxgMOPrunvT1RUGbPbf6A842ztwEq32xOdGN2zRRQYa0xb09AkUhEv1uD7YkcW3Pob4bYAMEf6UqPvjHqrCQ0rvsauTcJNF5dyGKqwg3i9Wk6cYVP7GTG4ouqK3yN9Se86EyqqCRk5cGNyJooLq3skjKFeXF73p4cK8onA",
+            "expires": "2027-05-16T16:31:10.721Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.214Z",
+            "lastAccessed": "2026-05-16T16:31:17.214Z"
+          },
+          {
+            "key": "__cf_bm",
+            "value": "Ct2dUcaExBG0kyGDtF9_QgVg_SKQypjFMTCvbzupRdE-1778949071.1796925-1.0.1.1-f3u54zXeuWLCS3Ygo8PK_dlqtmUnlTaVKk3oy80U74iAGrzz7S9dXvag3MTx_6rCU_q88QGrccVfX6LHF2.XJKiQIwS1f609t0InEKgXjOstocxvXUvWJRJ1WZaxxbXY",
+            "expires": "2026-05-16T17:01:10.722Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.214Z",
+            "lastAccessed": "2026-05-16T16:31:17.214Z"
+          },
+          {
+            "key": "_ga",
+            "value": "GA1.1.1541867214.1778949066",
+            "expires": "2027-06-20T16:31:13.210Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.216Z",
+            "lastAccessed": "2026-05-16T16:31:17.216Z"
+          },
+          {
+            "key": "_ga_QJYNCVGGDD",
+            "value": "GS2.1.s1778949073$o1$g1$t1778949073$j60$l0$h0",
+            "expires": "2027-06-20T16:31:13.297Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.216Z",
+            "lastAccessed": "2026-05-16T16:31:17.216Z"
+          },
+          {
+            "key": "_scid",
+            "value": "2TD9bKmexfYQGSqzCmMFJNRFueLnfLE8",
+            "expires": "2027-06-16T16:31:13.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.216Z",
+            "lastAccessed": "2026-05-16T16:31:17.216Z"
+          },
+          {
+            "key": "_scid_r",
+            "value": "2TD9bKmexfYQGSqzCmMFJNRFueLnfLE8",
+            "expires": "2027-06-16T16:31:13.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.216Z",
+            "lastAccessed": "2026-05-16T16:31:17.216Z"
+          },
+          {
+            "key": "_v3_ae",
+            "value": "true",
+            "expires": "2026-05-16T17:21:17.170Z",
+            "domain": "www.maxfashion.com",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-05-16T16:31:17.217Z",
+            "lastAccessed": "2026-05-16T16:31:17.217Z"
+          },
+          {
+            "key": "_fbp",
+            "value": "fb.1.1778949075392.919387249510989502",
+            "expires": "2026-08-14T16:31:15.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.217Z",
+            "lastAccessed": "2026-05-16T16:31:17.217Z"
+          },
+          {
+            "key": "__exponea_etc__",
+            "value": "01f00ad0-da50-4555-85b4-55a0a11195f0",
+            "expires": "2027-06-20T16:31:16.402Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.217Z",
+            "lastAccessed": "2026-05-16T16:31:17.217Z"
+          },
+          {
+            "key": "__exponea_time2__",
+            "value": "0.48427605628967285",
+            "expires": "2026-05-16T17:31:16.000Z",
+            "domain": "maxfashion.com",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-05-16T16:31:17.217Z",
+            "lastAccessed": "2026-05-16T16:31:17.217Z"
+          }
+        ]
       },
       "userData": {},
       "maxErrorScore": 3,
       "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:21.288Z",
-      "createdAt": "2026-05-16T09:19:21.288Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_6l5KCmeOAY",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:34.046Z",
-      "createdAt": "2026-05-16T09:19:34.046Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_u6PzWnLIlu",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:34.050Z",
-      "createdAt": "2026-05-16T09:19:34.050Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_LzWvnoSSi5",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:55.094Z",
-      "createdAt": "2026-05-16T09:19:55.094Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_nVcJMbh0vM",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:09:55.100Z",
-      "createdAt": "2026-05-16T09:19:55.100Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_4NNBlyEgYE",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:08.658Z",
-      "createdAt": "2026-05-16T09:20:08.658Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_VpcjFQtVnS",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:08.662Z",
-      "createdAt": "2026-05-16T09:20:08.662Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_OFOo9X2PyB",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:20.056Z",
-      "createdAt": "2026-05-16T09:20:20.056Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_bESC97CQKA",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:20.064Z",
-      "createdAt": "2026-05-16T09:20:20.064Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_pR2egERt7D",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:34.924Z",
-      "createdAt": "2026-05-16T09:20:34.924Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_MGsisKd5JX",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:34.927Z",
-      "createdAt": "2026-05-16T09:20:34.927Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_xjFn67gfB9",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:48.046Z",
-      "createdAt": "2026-05-16T09:20:48.045Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_6ceEnqZ5oQ",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:10:48.048Z",
-      "createdAt": "2026-05-16T09:20:48.048Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_43kjMFt9cy",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:11:01.291Z",
-      "createdAt": "2026-05-16T09:21:01.291Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_aCLa0zdhla",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:11:01.294Z",
-      "createdAt": "2026-05-16T09:21:01.294Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_3iZeOd7Kej",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:11:36.615Z",
-      "createdAt": "2026-05-16T09:21:36.615Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_Qpc717dMkJ",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:11:36.618Z",
-      "createdAt": "2026-05-16T09:21:36.618Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_6OfpmqU8zU",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:12:05.450Z",
-      "createdAt": "2026-05-16T09:22:05.450Z",
-      "usageCount": 0,
-      "maxUsageCount": 50,
-      "errorScore": 0
-    },
-    {
-      "id": "session_bmR4c3DCBG",
-      "cookieJar": {
-        "version": "tough-cookie@6.0.1",
-        "storeType": "MemoryCookieStore",
-        "rejectPublicSuffixes": true,
-        "enableLooseMode": false,
-        "allowSpecialUseDomain": true,
-        "prefixSecurity": "silent",
-        "cookies": []
-      },
-      "userData": {},
-      "maxErrorScore": 3,
-      "errorScoreDecrement": 0.5,
-      "expiresAt": "2026-05-16T10:12:05.453Z",
-      "createdAt": "2026-05-16T09:22:05.452Z",
-      "usageCount": 0,
+      "expiresAt": "2026-05-16T17:20:57.608Z",
+      "createdAt": "2026-05-16T16:30:57.608Z",
+      "usageCount": 1,
       "maxUsageCount": 50,
       "errorScore": 0
     }

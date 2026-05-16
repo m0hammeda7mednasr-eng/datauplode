@@ -6948,12 +6948,12 @@ function extractNextProductFromHtml(
 function isNextBlockedFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
   const blockedOrUnusableFallback = errors.every((error) =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page|size picker.*did not include the size values|No usable product HTML returned|no usable markdown returned|Regional mismatch|Managed bypass returned non-product HTML|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|Reader fallback did not expose a product (?:price|title)|Reader fallback returned an access-denied or missing page|size picker.*did not include the size values|No usable product HTML returned|no usable markdown returned|Regional mismatch|Managed bypass returned non-product HTML|Playwright returned non-product HTML|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(
       error,
     ),
   );
   const blockedByNext = errors.some((error) =>
-    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|size picker.*did not include the size values|No usable product HTML returned|Regional mismatch|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(
+    /(?:HTTP 403|Access Denied|access-denied|permission to access|Forbidden|size picker.*did not include the size values|No usable product HTML returned|Regional mismatch|Playwright returned non-product HTML|ScraperAPI returned a blocked page|ZenRows returned a blocked page)/i.test(
       error,
     ),
   );
@@ -7615,7 +7615,17 @@ export class NextScraper implements SupplierScraper {
             url,
           );
         } catch (playwrightError: any) {
-          playwrightErrors.push(`${pageUrl}: ${playwrightError.message}`);
+          const message = String(playwrightError?.message || "");
+          if (
+            /Executable doesn't exist|playwright install|chrome-headless-shell/i.test(
+              message,
+            )
+          ) {
+            // Playwright runtime is optional in this deployment.
+            // Skip this fallback when browser binaries are unavailable.
+            continue;
+          }
+          playwrightErrors.push(`${pageUrl}: ${message}`);
         }
       }
 
