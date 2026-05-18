@@ -19,6 +19,7 @@
     "test:scraper:urls": "tsx test-user-urls.ts",
     "test:scraper:next": "tsx test-next-scraper-details.ts",
     "test:scraper:regression": "tsx test-scraper-regression.ts",
+    "test:scraper:all": "npm run test:scraper:urls && npm run test:scraper:regression",
     "test:scraper:demo": "tsx test-scraper-demo.ts",
     "test:extraction-engine": "tsx test-extraction-engine.ts",
     "test:brand-limits": "tsx test-brand-limits.ts",

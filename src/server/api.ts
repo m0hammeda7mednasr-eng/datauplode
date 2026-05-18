@@ -7,6 +7,8 @@ import {
 import { prisma } from "./db.js";
 import {
   ScraperService,
+  fetchHtmlViaManagedBypass,
+  fetchHtmlViaManagedBypassRace,
   type NormalizedProduct,
   normalizeProductImageList,
 } from "./services/scraper.js";
@@ -14,8 +16,10 @@ import { PricingEngine } from "./services/pricing.js";
 import { QueueService } from "./services/queue.js";
 import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
+import { PersistentJsonCache } from "./services/persistentCache.js";
 import scraperRoutes from "./routes/scraper.routes.js";
 import sourceCapabilityRoutes from "./routes/source-capability.routes.js";
+import { CategoryDiscoveryService } from "./scraper/services/CategoryDiscoveryService.js";
 import axios from "axios";
 import crypto from "crypto";
 
@@ -23,6 +27,7 @@ const router = Router();
 router.use(scraperRoutes);
 router.use(sourceCapabilityRoutes);
 const scraperService = new ScraperService();
+const categoryDiscoveryService = new CategoryDiscoveryService();
 const DEFAULT_SHOPIFY_SCOPES = [
   "read_products",
   "write_products",
@@ -38,10 +43,51 @@ const analyzeProductCache = new Map<
   string,
   { expiresAt: number; product: NormalizedProduct }
 >();
+const analyzeProductPersistentCache = new PersistentJsonCache<NormalizedProduct>(
+  process.env.SCRAPE_ANALYZE_CACHE_FILE ||
+    ".syncly-cache/analyze-products.json",
+  { maxEntries: 2500 },
+);
+const nextListingDiscoveryCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    result: {
+      pagesVisited: number;
+      candidates: Array<{
+        url: string;
+        title: string;
+        supplier: string;
+        productId?: string;
+      }>;
+    };
+  }
+>();
+type NextListingDiscoveryResult = {
+  pagesVisited: number;
+  candidates: Array<{
+    url: string;
+    title: string;
+    supplier: string;
+    productId?: string;
+  }>;
+};
+const nextListingPersistentCache = new PersistentJsonCache<NextListingDiscoveryResult>(
+  process.env.NEXT_LISTING_CACHE_FILE || ".syncly-cache/next-listings.json",
+  { maxEntries: 500 },
+);
 
 function envNumber(name: string, defaultValue: number): number {
-  const value = Number(String(process.env[name] || "").trim());
+  const raw = String(process.env[name] || "").trim();
+  if (!raw) return defaultValue;
+  const value = Number(raw);
   return Number.isFinite(value) ? value : defaultValue;
+}
+
+function envFlag(name: string, defaultValue = false): boolean {
+  const value = String(process.env[name] || "").trim();
+  if (!value) return defaultValue;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
 function normalizeAnalyzeCacheUrl(url: string): string {
@@ -79,21 +125,324 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
 
   const key = normalizeAnalyzeCacheUrl(url);
   const cached = analyzeProductCache.get(key);
-  if (!cached) return undefined;
-  if (cached.expiresAt <= Date.now()) {
-    analyzeProductCache.delete(key);
-    return undefined;
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      analyzeProductCache.delete(key);
+    } else {
+      return cloneProduct(cached.product);
+    }
   }
 
-  return cloneProduct(cached.product);
+  if (!envFlag("SCRAPE_ANALYZE_PERSISTENT_CACHE", true)) return undefined;
+
+  const persisted = analyzeProductPersistentCache.get(key);
+  if (!persisted) return undefined;
+
+  analyzeProductCache.set(key, {
+    expiresAt: Date.now() + cacheMs,
+    product: cloneProduct(persisted),
+  });
+
+  return cloneProduct(persisted);
 }
 
 function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
   const cacheMs = getAnalyzeCacheMs();
   if (cacheMs <= 0) return;
-  analyzeProductCache.set(normalizeAnalyzeCacheUrl(url), {
+  const key = normalizeAnalyzeCacheUrl(url);
+  analyzeProductCache.set(key, {
     expiresAt: Date.now() + cacheMs,
     product: cloneProduct(product),
+  });
+  if (envFlag("SCRAPE_ANALYZE_PERSISTENT_CACHE", true)) {
+    analyzeProductPersistentCache.set(key, product, cacheMs);
+  }
+}
+
+const analyzePrewarmJobs = new Map<string, Promise<void>>();
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldPrewarmAnalyzeUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      (host.includes("next.") && isNextProductUrl(url)) ||
+      host.includes("maxfashion")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isNextHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host === "next.ae" ||
+      host.endsWith(".next.ae") ||
+      host === "nextdirect.com" ||
+      host.endsWith(".nextdirect.com") ||
+      host === "next.co.uk" ||
+      host.endsWith(".next.co.uk") ||
+      host === "next.us" ||
+      host.endsWith(".next.us")
+    );
+  } catch {
+    return /next\.(?:ae|us)|nextdirect\.com|next\.co\.uk/i.test(url);
+  }
+}
+
+function isNextProductUrl(url: string): boolean {
+  return isNextHost(url) && /\/style\/[a-z0-9]+\/[a-z0-9]+/i.test(url);
+}
+
+function isNextListingUrl(url: string): boolean {
+  if (!isNextHost(url) || isNextProductUrl(url)) return false;
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return /\/shop(?:\/|$)|\/search(?:\/|$)|\/baby(?:\/|$)|\/girls(?:\/|$)|\/boys(?:\/|$)|\/women(?:\/|$)|\/men(?:\/|$)/i.test(
+      path,
+    );
+  } catch {
+    return /\/(?:shop|search|baby|girls|boys|women|men)(?:\/|$)/i.test(url);
+  }
+}
+
+function nextProductLabelFromUrl(url: string, index: number): string {
+  const match = url.match(/\/style\/([a-z0-9]+)\/([a-z0-9]+)/i);
+  if (!match) return `Next product ${index + 1}`;
+  return `Next ${match[1].toUpperCase()} / ${match[2].toUpperCase()}`;
+}
+
+function getNextListingDiscoveryCache(url: string): NextListingDiscoveryResult | undefined {
+  const minutes = Math.max(0, envNumber("NEXT_LISTING_CACHE_MINUTES", 60));
+  if (minutes <= 0) return undefined;
+
+  const key = normalizeAnalyzeCacheUrl(url);
+  const cached = nextListingDiscoveryCache.get(key);
+  if (cached) {
+    if (cached.expiresAt <= Date.now()) {
+      nextListingDiscoveryCache.delete(key);
+    } else {
+      return JSON.parse(JSON.stringify(cached.result));
+    }
+  }
+
+  if (!envFlag("NEXT_LISTING_PERSISTENT_CACHE", true)) return undefined;
+
+  const persisted = nextListingPersistentCache.get(key);
+  if (!persisted) return undefined;
+
+  nextListingDiscoveryCache.set(key, {
+    expiresAt: Date.now() + minutes * 60 * 1000,
+    result: JSON.parse(JSON.stringify(persisted)),
+  });
+
+  return JSON.parse(JSON.stringify(persisted));
+}
+
+function setNextListingDiscoveryCache(
+  url: string,
+  result: NextListingDiscoveryResult,
+) {
+  const minutes = Math.max(0, envNumber("NEXT_LISTING_CACHE_MINUTES", 60));
+  if (minutes <= 0) return;
+  const key = normalizeAnalyzeCacheUrl(url);
+  nextListingDiscoveryCache.set(key, {
+    expiresAt: Date.now() + minutes * 60 * 1000,
+    result: JSON.parse(JSON.stringify(result)),
+  });
+  if (envFlag("NEXT_LISTING_PERSISTENT_CACHE", true)) {
+    nextListingPersistentCache.set(key, result, minutes * 60 * 1000);
+  }
+}
+
+function normalizeNextCandidateUrl(rawUrl: string, pageUrl: string) {
+  const cleaned = String(rawUrl || "")
+    .replace(/\\u002[fF]/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+    .trim();
+  if (!cleaned) return undefined;
+
+  try {
+    const resolved = new URL(cleaned, pageUrl);
+    if (!isNextProductUrl(resolved.toString())) return undefined;
+    resolved.hash = "";
+    resolved.search = "";
+    return resolved.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractNextProductUrlsFromHtml(html: string, pageUrl: string) {
+  const decodedHtml = String(html || "")
+    .replace(/\\u002[fF]/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&");
+  const productUrls = new Set<string>();
+  const patterns = [
+    /href=["']([^"']*\/style\/[a-z0-9]+\/[a-z0-9]+[^"']*)["']/gi,
+    /"(?:url|href|targetUrl|productUrl)"\s*:\s*"([^"]*\/style\/[a-z0-9]+\/[a-z0-9]+[^"]*)"/gi,
+    /(https?:\/\/[^"'<>\\\s]+\/style\/[a-z0-9]+\/[a-z0-9]+[^"'<>\\\s]*)/gi,
+    /(\/(?:[a-z]{2}\/)?style\/[a-z0-9]+\/[a-z0-9]+[^"'<>\\\s]*)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of decodedHtml.matchAll(pattern)) {
+      const normalized = normalizeNextCandidateUrl(match[1], pageUrl);
+      if (normalized) productUrls.add(normalized);
+    }
+  }
+
+  return [...productUrls];
+}
+
+async function discoverNextListingProducts(url: string) {
+  const cached = getNextListingDiscoveryCache(url);
+  if (cached) return cached;
+
+  let pagesVisited = 1;
+  let productUrls: string[] = [];
+
+  if (envFlag("NEXT_LISTING_FAST_BYPASS", true)) {
+    try {
+      const listingBypassOptions = {
+        deviceType: "none",
+        jsRender: false,
+        premium: envFlag("NEXT_LISTING_PREMIUM", false),
+      } as const;
+      const html = envFlag("NEXT_LISTING_BYPASS_RACE", true)
+        ? await fetchHtmlViaManagedBypassRace(url, listingBypassOptions, {
+            maxProviders: envNumber("NEXT_LISTING_RACE_MAX_PROVIDERS", 2),
+            timeoutMs: envNumber("NEXT_LISTING_RACE_TIMEOUT_MS", 12000),
+          })
+        : await fetchHtmlViaManagedBypass(url, listingBypassOptions);
+      productUrls = extractNextProductUrlsFromHtml(html, url);
+    } catch (error) {
+      console.warn(
+        "Next listing managed discovery failed:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  if (productUrls.length === 0) {
+    const result = await categoryDiscoveryService.discover({
+      startUrl: url,
+      maxPages: 1,
+      maxProducts: 24,
+      includePatterns: ["\\/style\\/[a-z0-9]+\\/[a-z0-9]+"],
+      excludePatterns: [],
+      mode: "auto",
+    });
+    pagesVisited = result.pagesVisited;
+    productUrls = result.productUrls
+      .map((productUrl) => normalizeNextCandidateUrl(productUrl, url))
+      .filter((productUrl): productUrl is string => Boolean(productUrl));
+  }
+
+  const candidates = [...new Set(productUrls)].slice(0, 24).map((productUrl, index) => ({
+    url: productUrl,
+    title: nextProductLabelFromUrl(productUrl, index),
+    supplier: "Next",
+    productId:
+      productUrl
+        .match(/\/style\/([a-z0-9]+)\/([a-z0-9]+)/i)
+        ?.slice(1)
+        .join("-") || undefined,
+  }));
+
+  const discoveryResult = {
+    pagesVisited,
+    candidates,
+  };
+
+  setNextListingDiscoveryCache(url, discoveryResult);
+  return discoveryResult;
+}
+
+function prewarmAnalyzeUrl(url: string) {
+  const key = normalizeAnalyzeCacheUrl(url);
+  if (getCachedAnalyzeProduct(url) || analyzePrewarmJobs.has(key)) return;
+  if (!shouldPrewarmAnalyzeUrl(url)) return;
+
+  let finishJob: () => void = () => {};
+  const job = new Promise<void>((resolve) => {
+    finishJob = resolve;
+  });
+
+  analyzePrewarmJobs.set(key, job);
+
+  setTimeout(() => {
+    scraperService
+      .scrape(url)
+      .then((product) => setCachedAnalyzeProduct(url, product))
+      .catch((error) => {
+        console.warn("Analyze prewarm failed:", error?.message || error);
+      })
+      .finally(() => {
+        analyzePrewarmJobs.delete(key);
+        finishJob();
+      });
+  }, 0);
+}
+
+async function waitForAnalyzePrewarm(url: string): Promise<NormalizedProduct | undefined> {
+  const waitMs = Math.max(0, envNumber("ANALYZE_PREWARM_WAIT_MS", 2500));
+  if (waitMs <= 0) return undefined;
+
+  const key = normalizeAnalyzeCacheUrl(url);
+  const job = analyzePrewarmJobs.get(key);
+  if (!job) return undefined;
+
+  await Promise.race([job, sleep(waitMs)]);
+  return getCachedAnalyzeProduct(url);
+}
+
+function isSnapshotRequiredError(error: unknown): boolean {
+  const typedError = error as {
+    code?: string;
+    retryWithSnapshot?: boolean;
+    message?: string;
+  };
+  const message = String(typedError?.message || "");
+  return (
+    typedError?.code === "SOURCE_BLOCKED" ||
+    typedError?.retryWithSnapshot === true ||
+    /blocked automated server access|http 403|access denied|forbidden/i.test(
+      message,
+    )
+  );
+}
+
+async function findStoredSourceProductByUrl(
+  url: string,
+  options: { maxAgeMs?: number } = {},
+) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(url);
+  const where: any = {
+    OR: [{ url }, ...(normalizedUrl !== url ? [{ url: normalizedUrl }] : [])],
+  };
+
+  if (options.maxAgeMs && options.maxAgeMs > 0) {
+    where.lastScrapedAt = {
+      gte: new Date(Date.now() - options.maxAgeMs),
+    };
+  }
+
+  return prisma.sourceProduct.findFirst({
+    where,
+    include: {
+      supplier: true,
+      images: { orderBy: { position: "asc" } },
+      variants: true,
+    },
+    orderBy: [{ lastScrapedAt: "desc" }, { updatedAt: "desc" }],
   });
 }
 
@@ -524,19 +873,27 @@ function normalizePricingRuleInput(body: any) {
 }
 
 async function findBestPricingRuleForProduct(product: any) {
-  const [rules, supplier] = await Promise.all([
-    prisma.pricingRule.findMany(),
-    product?.source?.supplier
-      ? prisma.supplier
-          .findUnique({ where: { name: product.source.supplier } })
-          .catch(() => null)
-      : Promise.resolve(null),
-  ]);
+  try {
+    const [rules, supplier] = await Promise.all([
+      prisma.pricingRule.findMany(),
+      product?.source?.supplier
+        ? prisma.supplier
+            .findUnique({ where: { name: product.source.supplier } })
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
 
-  return PricingEngine.selectBestRule(rules, {
-    supplierId: supplier?.id,
-    currency: product?.currency,
-  });
+    return PricingEngine.selectBestRule(rules, {
+      supplierId: supplier?.id,
+      currency: product?.currency,
+    });
+  } catch (error) {
+    console.warn(
+      "Pricing rules unavailable during import analysis:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
 }
 
 function verifyShopifyHmac(query: any, clientSecret: string) {
@@ -569,35 +926,84 @@ function verifyShopifyHmac(query: any, clientSecret: string) {
 }
 
 // Analysis
+router.post("/imports/prewarm", async (req, res) => {
+  const url = String(req.body?.url || "").trim();
+  if (!url) return res.status(400).json({ error: "URL is required" });
+
+  const key = normalizeAnalyzeCacheUrl(url);
+  const cached = getCachedAnalyzeProduct(url);
+  if (cached) {
+    return res.json({ status: "cached", ready: true, url: key });
+  }
+
+  if (!shouldPrewarmAnalyzeUrl(url)) {
+    return res.json({ status: "skipped", ready: false, url: key });
+  }
+
+  prewarmAnalyzeUrl(url);
+  res.json({
+    status: analyzePrewarmJobs.has(key) ? "warming" : "skipped",
+    ready: false,
+    url: key,
+  });
+});
+
 router.post("/imports/analyze", async (req, res) => {
   const { url, pageText } = req.body;
   if (!url) return res.status(400).json({ error: "URL is required" });
 
   try {
     const snapshotText = typeof pageText === "string" ? pageText.trim() : "";
+    if (!snapshotText && isNextListingUrl(url)) {
+      const discovery = await discoverNextListingProducts(url);
+      discovery.candidates.slice(0, 6).forEach((candidate) => {
+        prewarmAnalyzeUrl(candidate.url);
+      });
+
+      return res.json({
+        source: {
+          supplier: "Next",
+          url,
+          productId: "category",
+        },
+        title: "Next category page detected",
+        description:
+          "This is a listing page, not a single product page. Choose one product below and Syncly will analyze that product directly.",
+        brand: "Next",
+        currency: "AED",
+        price: 0,
+        images: [],
+        options: [],
+        variants: [],
+        raw: {
+          categoryDiscovery: true,
+          categoryUrl: url,
+          pagesVisited: discovery.pagesVisited,
+          productCandidates: discovery.candidates,
+        },
+        categoryCandidates: discovery.candidates,
+      });
+    }
+
     let data = !snapshotText ? getCachedAnalyzeProduct(url) : undefined;
 
     if (!data && !snapshotText) {
-      const normalizedUrl = normalizeAnalyzeCacheUrl(url);
+      data = await waitForAnalyzePrewarm(url);
+    }
+
+    if (!data && !snapshotText) {
       const cacheMs = getAnalyzeCacheMs();
       const cachedSourceProduct =
         cacheMs > 0
-          ? await prisma.sourceProduct.findFirst({
-              where: {
-                OR: [
-                  { url },
-                  ...(normalizedUrl !== url ? [{ url: normalizedUrl }] : []),
-                ],
-                lastScrapedAt: {
-                  gte: new Date(Date.now() - cacheMs),
-                },
+          ? await findStoredSourceProductByUrl(url, { maxAgeMs: cacheMs }).catch(
+              (error) => {
+                console.warn(
+                  "Analyze DB cache lookup failed:",
+                  error instanceof Error ? error.message : error,
+                );
+                return null;
               },
-              include: {
-                supplier: true,
-                images: { orderBy: { position: "asc" } },
-                variants: true,
-              },
-            })
+            )
           : null;
 
       if (cachedSourceProduct) {
@@ -607,9 +1013,37 @@ router.post("/imports/analyze", async (req, res) => {
     }
 
     if (!data) {
-      data = snapshotText
-        ? await scraperService.scrapeSnapshot(url, snapshotText)
-        : await scraperService.scrape(url);
+      if (snapshotText) {
+        data = await scraperService.scrapeSnapshot(url, snapshotText);
+      } else {
+        try {
+          data = await scraperService.scrape(url);
+        } catch (error) {
+          if (!isSnapshotRequiredError(error)) throw error;
+
+          const staleSourceProduct = await findStoredSourceProductByUrl(
+            url,
+          ).catch((dbError) => {
+            console.warn(
+              "Analyze stale DB fallback failed:",
+              dbError instanceof Error ? dbError.message : dbError,
+            );
+            return null;
+          });
+          if (!staleSourceProduct) throw error;
+
+          data = sourceProductToNormalizedProduct(staleSourceProduct);
+          data.raw = {
+            ...(data.raw || {}),
+            staleCacheFallback: true,
+            staleCacheSourceProductId: staleSourceProduct.id,
+            staleCacheLastScrapedAt:
+              staleSourceProduct.lastScrapedAt?.toISOString() || null,
+            staleCacheReason:
+              "Live source blocked. Used last known cached product snapshot for fast pricing continuity.",
+          };
+        }
+      }
       if (!snapshotText) setCachedAnalyzeProduct(url, data);
     }
 

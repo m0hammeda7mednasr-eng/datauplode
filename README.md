@@ -82,6 +82,7 @@ npm run dev
 npm run test:source-scan
 npm run test:extraction-engine
 npm run test:brand-limits
+npm run test:scraper:all
 ```
 
 ## Environment
@@ -90,3 +91,34 @@ Copy `.env.example` and set:
 - `APP_URL`
 - `FRONTEND_URL`
 - optional scraper/log settings
+
+### Pro Bypass Routing (Optional)
+- Configure global bypass mode via `SCRAPER_BYPASS_MODE` (`never` / `auto` / `always`).
+- Split routing into two lanes:
+  - `Brand Lane` (direct scraping): set brand mode to `never`.
+  - `Default Lane` (hard domains): keep `default:auto` (or `default:always`) so API pool is used only when needed.
+- Override per brand with `SCRAPER_BRAND_BYPASS_MODE_MAP`.
+- Configure provider pool order via `SCRAPER_BYPASS_PROVIDERS`.
+- Set monthly provider token budgets via `SCRAPER_BYPASS_PROVIDER_MONTHLY_LIMITS`.
+- Enable provider racing for hard Next pages with `NEXT_FAST_BYPASS_RACE=true`.
+  This races only the first `SCRAPER_BYPASS_RACE_MAX_PROVIDERS` available providers, so cold requests can return from the fastest provider while quotas still cap usage.
+- Keep import responses warm across local/server restarts with `SCRAPE_ANALYZE_PERSISTENT_CACHE=true`.
+- Use `ANALYZE_PREWARM_WAIT_MS` so an Analyze click waits briefly for an in-flight prewarm instead of starting a duplicate scrape.
+- Add provider keys for hard domains (`SCRAPERAPI_KEY`, `ZENROWS_API_KEY`, `SCRAPINGBEE_API_KEY`, `SCRAPINGANT_API_KEY`, `SCRAPEDO_TOKEN`).
+
+Example:
+```env
+SCRAPER_BYPASS_MODE=auto
+SCRAPER_BRAND_BYPASS_MODE_MAP=mothercare:never,marks_spencer:never,centrepoint:never,lefties:never,adidas:never,next:auto,max_fashion:auto,shein:always,default:auto
+SCRAPER_BYPASS_PROVIDERS=scraperapi,zenrows,scrapingbee,scrapingant,scrapedo
+SCRAPER_BYPASS_PROVIDER_MONTHLY_LIMITS=scraperapi:50000,zenrows:30000,scrapingbee:20000,scrapingant:20000,scrapedo:20000
+SCRAPE_ANALYZE_PERSISTENT_CACHE=true
+ANALYZE_PREWARM_WAIT_MS=2500
+NEXT_LISTING_FAST_BYPASS=true
+NEXT_LISTING_CACHE_MINUTES=60
+NEXT_LISTING_BYPASS_RACE=true
+NEXT_FAST_BYPASS_DEVICE=mobile
+NEXT_FAST_BYPASS_PREMIUM=false
+NEXT_FAST_BYPASS_RACE=true
+SCRAPER_BYPASS_RACE_MAX_PROVIDERS=2
+```

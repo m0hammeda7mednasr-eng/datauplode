@@ -158,16 +158,38 @@ function isUsableNextProductHtml(html: string): boolean {
   );
 }
 
-type ManagedBypassProvider = "scraperapi" | "zenrows";
+type ManagedBypassProvider =
+  | "scraperapi"
+  | "zenrows"
+  | "scrapingbee"
+  | "scrapingant"
+  | "scrapedo";
+type ManagedBypassMode = "never" | "auto" | "always";
 
 type ManagedBypassOptions = {
   providerOrder?: ManagedBypassProvider[];
   countryCode?: string;
-  deviceType?: "desktop" | "mobile";
+  deviceType?: "desktop" | "mobile" | "none";
   jsRender?: boolean;
   premium?: boolean;
   ultraPremium?: boolean;
 };
+
+const implementedManagedBypassProviders = new Set<ManagedBypassProvider>([
+  "scraperapi",
+  "zenrows",
+  "scrapingbee",
+  "scrapingant",
+  "scrapedo",
+]);
+
+function asManagedBypassProvider(
+  value: string,
+): ManagedBypassProvider | undefined {
+  const normalized = cleanText(value).toLowerCase() as ManagedBypassProvider;
+  if (!implementedManagedBypassProviders.has(normalized)) return undefined;
+  return normalized;
+}
 
 function envFlag(name: string, defaultValue = false): boolean {
   const value = cleanText(process.env[name]);
@@ -175,24 +197,93 @@ function envFlag(name: string, defaultValue = false): boolean {
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
-function managedBypassMode(): string {
-  return cleanText(process.env.SCRAPER_BYPASS_MODE || "never").toLowerCase();
+function normalizeManagedBypassMode(value: string): ManagedBypassMode {
+  const normalized = cleanText(value).toLowerCase();
+  if (["always", "force", "on"].includes(normalized)) return "always";
+  if (["auto", "smart"].includes(normalized)) return "auto";
+  return "never";
 }
 
-function managedBypassEnabled(): boolean {
-  return false;
+function managedBypassMode(): ManagedBypassMode {
+  return normalizeManagedBypassMode(process.env.SCRAPER_BYPASS_MODE || "never");
+}
+
+function inferBrandBypassKey(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes("next.")) return "next";
+    if (host.includes("maxfashion")) return "max_fashion";
+    if (host.includes("shein")) return "shein";
+    if (host.includes("marksandspencer")) return "marks_spencer";
+    if (host.includes("mothercare")) return "mothercare";
+    if (host.includes("primark")) return "primark";
+    if (host.includes("carters")) return "carters";
+    if (host.includes("lefties")) return "lefties";
+    if (host.includes("centrepoint")) return "centrepoint";
+    if (host.includes("adidas")) return "adidas";
+    if (host.includes("hm.com")) return "hm";
+    if (host.includes("zara.")) return "zara";
+    if (host.includes("gap.")) return "gap";
+  } catch {}
+  return "default";
+}
+
+function bypassModeByBrand(): Map<string, ManagedBypassMode> {
+  const raw = cleanText(process.env.SCRAPER_BRAND_BYPASS_MODE_MAP);
+  const parsed = new Map<string, ManagedBypassMode>();
+  if (!raw) return parsed;
+
+  for (const chunk of raw.split(",")) {
+    const [brand, mode] = chunk.split(":");
+    const brandKey = cleanText(brand).toLowerCase();
+    if (!brandKey) continue;
+    parsed.set(brandKey, normalizeManagedBypassMode(mode || "auto"));
+  }
+
+  return parsed;
+}
+
+function resolveManagedBypassModeForUrl(url: string): ManagedBypassMode {
+  const brandModes = bypassModeByBrand();
+  const brandKey = inferBrandBypassKey(url);
+  return brandModes.get(brandKey) || brandModes.get("default") || managedBypassMode();
+}
+
+function managedBypassEnabled(url?: string): boolean {
+  const mode = url
+    ? resolveManagedBypassModeForUrl(url)
+    : managedBypassMode();
+  return mode !== "never";
 }
 
 function envNumber(name: string, defaultValue: number): number {
-  const value = Number(cleanText(process.env[name]));
+  const raw = cleanText(process.env[name]);
+  if (!raw) return defaultValue;
+  const value = Number(raw);
   return Number.isFinite(value) ? value : defaultValue;
+}
+
+function envBypassDevice(
+  name: string,
+  defaultValue: ManagedBypassOptions["deviceType"],
+): ManagedBypassOptions["deviceType"] {
+  const value = cleanText(process.env[name]).toLowerCase();
+  if (value === "desktop" || value === "mobile" || value === "none")
+    return value;
+  return defaultValue;
 }
 
 const managedBypassUsageByDay = new Map<string, number>();
 const managedBypassCooldownUntil = new Map<string, number>();
+const managedBypassProviderCooldownUntil = new Map<string, number>();
+const managedBypassUsageByProviderMonth = new Map<string, number>();
 
 function getManagedBypassDayKey(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getManagedBypassMonthKey(): string {
+  return new Date().toISOString().slice(0, 7);
 }
 
 function getManagedBypassUrlKey(url: string): string {
@@ -205,10 +296,62 @@ function getManagedBypassUrlKey(url: string): string {
   }
 }
 
-function reserveManagedBypassAttempt(url: string): string | undefined {
-  const mode = managedBypassMode();
-  if (mode === "never" || mode === "off" || mode === "disabled") {
-    return "disabled by SCRAPER_BYPASS_MODE";
+function providerMonthlyLimit(provider: ManagedBypassProvider): number {
+  const raw = cleanText(
+    process.env.SCRAPER_BYPASS_PROVIDER_MONTHLY_LIMITS ||
+      process.env.SCRAPER_BYPASS_PROVIDER_MONTHLY_TOKENS,
+  );
+  if (!raw) return 0;
+
+  const providerKey = provider.toLowerCase();
+  for (const chunk of raw.split(",")) {
+    const [name, limitValue] = chunk.split(/[:=]/);
+    if (cleanText(name).toLowerCase() !== providerKey) continue;
+    const parsed = Number(cleanText(limitValue));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+  return 0;
+}
+
+function providerMonthlyUsage(provider: ManagedBypassProvider): number {
+  const key = `${provider.toLowerCase()}:${getManagedBypassMonthKey()}`;
+  return managedBypassUsageByProviderMonth.get(key) || 0;
+}
+
+function noteProviderUsage(provider: ManagedBypassProvider, units = 1) {
+  const key = `${provider.toLowerCase()}:${getManagedBypassMonthKey()}`;
+  managedBypassUsageByProviderMonth.set(
+    key,
+    providerMonthlyUsage(provider) + Math.max(0, units),
+  );
+}
+
+function providerHasQuota(provider: ManagedBypassProvider): boolean {
+  const limit = providerMonthlyLimit(provider);
+  if (limit <= 0) return true;
+  return providerMonthlyUsage(provider) < limit;
+}
+
+function isProviderCoolingDown(provider: ManagedBypassProvider): boolean {
+  return (managedBypassProviderCooldownUntil.get(provider.toLowerCase()) || 0) > Date.now();
+}
+
+function noteProviderFailure(provider: ManagedBypassProvider) {
+  const cooldownMinutes = Math.max(
+    0,
+    envNumber("SCRAPER_BYPASS_PROVIDER_COOLDOWN_MINUTES", 30),
+  );
+  if (cooldownMinutes <= 0) return;
+  managedBypassProviderCooldownUntil.set(
+    provider.toLowerCase(),
+    Date.now() + cooldownMinutes * 60000,
+  );
+}
+
+function reserveManagedBypassAttempt(url: string, units = 1): string | undefined {
+  const mode = resolveManagedBypassModeForUrl(url);
+  if (mode === "never") {
+    return "disabled for this brand by bypass mode";
   }
 
   const key = getManagedBypassUrlKey(url);
@@ -225,10 +368,11 @@ function reserveManagedBypassAttempt(url: string): string | undefined {
   if (dailyLimit > 0) {
     const dayKey = getManagedBypassDayKey();
     const used = managedBypassUsageByDay.get(dayKey) || 0;
-    if (used >= dailyLimit) {
+    const requestedUnits = Math.max(1, units);
+    if (used + requestedUnits > dailyLimit) {
       return `daily managed bypass limit reached (${used}/${dailyLimit})`;
     }
-    managedBypassUsageByDay.set(dayKey, used + 1);
+    managedBypassUsageByDay.set(dayKey, used + requestedUnits);
   }
 
   return undefined;
@@ -263,25 +407,55 @@ function inferCountryCodeFromUrl(url: string): string | undefined {
 }
 
 function activeManagedBypassProviders(
+  url?: string,
   orderOverride?: ManagedBypassProvider[],
 ): ManagedBypassProvider[] {
-  if (!managedBypassEnabled()) return [];
-  if (orderOverride?.length) return [...orderOverride];
+  if (!managedBypassEnabled(url)) return [];
+  if (orderOverride?.length) {
+    return orderOverride
+      .map((provider) =>
+        asManagedBypassProvider(cleanText(provider).toLowerCase()),
+      )
+      .filter((provider): provider is ManagedBypassProvider => Boolean(provider))
+      .filter((provider) => !isProviderCoolingDown(provider))
+      .filter((provider) => providerHasQuota(provider));
+  }
 
   const configured = cleanText(process.env.SCRAPER_BYPASS_PROVIDERS)
     .split(",")
-    .map((value) => cleanText(value).toLowerCase())
-    .filter(Boolean) as ManagedBypassProvider[];
+    .map((value) => asManagedBypassProvider(cleanText(value).toLowerCase()))
+    .filter((provider): provider is ManagedBypassProvider => Boolean(provider));
 
-  const validConfigured = configured.filter(
-    (provider) => provider === "scraperapi" || provider === "zenrows",
-  );
-  if (validConfigured.length) return [...new Set(validConfigured)];
+  const validConfigured = configured.length
+    ? [...new Set(configured)]
+    : [];
+  if (validConfigured.length) {
+    return validConfigured
+      .filter((provider) => !isProviderCoolingDown(provider))
+      .filter((provider) => providerHasQuota(provider))
+      .sort(
+        (a, b) =>
+          providerMonthlyUsage(a) / (providerMonthlyLimit(a) || Number.MAX_SAFE_INTEGER) -
+          providerMonthlyUsage(b) / (providerMonthlyLimit(b) || Number.MAX_SAFE_INTEGER),
+      );
+  }
 
   const providers: ManagedBypassProvider[] = [];
   if (cleanText(process.env.SCRAPERAPI_KEY)) providers.push("scraperapi");
   if (cleanText(process.env.ZENROWS_API_KEY)) providers.push("zenrows");
-  return providers;
+  if (cleanText(process.env.SCRAPINGBEE_API_KEY))
+    providers.push("scrapingbee");
+  if (cleanText(process.env.SCRAPINGANT_API_KEY))
+    providers.push("scrapingant");
+  if (cleanText(process.env.SCRAPEDO_TOKEN)) providers.push("scrapedo");
+  return providers
+    .filter((provider) => !isProviderCoolingDown(provider))
+    .filter((provider) => providerHasQuota(provider))
+    .sort(
+      (a, b) =>
+        providerMonthlyUsage(a) / (providerMonthlyLimit(a) || Number.MAX_SAFE_INTEGER) -
+        providerMonthlyUsage(b) / (providerMonthlyLimit(b) || Number.MAX_SAFE_INTEGER),
+    );
 }
 
 function looksLikeAccessDeniedHtml(html: string): boolean {
@@ -308,11 +482,13 @@ async function fetchHtmlViaScraperApi(
     cleanText(process.env.SCRAPERAPI_COUNTRY_CODE) ||
     inferCountryCodeFromUrl(url);
   const deviceType =
-    options.deviceType ||
-    (cleanText(process.env.SCRAPERAPI_DEVICE_TYPE).toLowerCase() as
-      | "desktop"
-      | "mobile"
-      | "");
+    options.deviceType === "none"
+      ? ""
+      : options.deviceType ||
+        (cleanText(process.env.SCRAPERAPI_DEVICE_TYPE).toLowerCase() as
+          | "desktop"
+          | "mobile"
+          | "");
   const jsRender = options.jsRender ?? envFlag("SCRAPERAPI_RENDER", false);
   const premium = options.premium ?? envFlag("SCRAPERAPI_PREMIUM", false);
   const ultraPremium =
@@ -401,11 +577,35 @@ async function fetchHtmlViaZenRows(
   return html;
 }
 
-async function fetchHtmlViaManagedBypass(
+async function fetchHtmlViaManagedBypassProvider(
+  provider: ManagedBypassProvider,
+  url: string,
+  options: ManagedBypassOptions,
+): Promise<string> {
+  noteProviderUsage(provider);
+  if (provider === "scraperapi") {
+    return fetchHtmlViaScraperApi(url, options);
+  }
+  if (provider === "zenrows") {
+    return fetchHtmlViaZenRows(url, options);
+  }
+  if (provider === "scrapingbee") {
+    return fetchHtmlViaScrapingBee(url, options);
+  }
+  if (provider === "scrapingant") {
+    return fetchHtmlViaScrapingAnt(url, options);
+  }
+  if (provider === "scrapedo") {
+    return fetchHtmlViaScrapeDo(url, options);
+  }
+  throw new Error(`Provider ${provider} is not implemented`);
+}
+
+export async function fetchHtmlViaManagedBypass(
   url: string,
   options: ManagedBypassOptions = {},
 ): Promise<string> {
-  const providers = activeManagedBypassProviders(options.providerOrder);
+  const providers = activeManagedBypassProviders(url, options.providerOrder);
   if (!providers.length) {
     throw new Error("No managed bypass provider is configured");
   }
@@ -418,19 +618,78 @@ async function fetchHtmlViaManagedBypass(
   const errors: string[] = [];
   for (const provider of providers) {
     try {
-      if (provider === "scraperapi") {
-        return await fetchHtmlViaScraperApi(url, options);
-      }
-      if (provider === "zenrows") {
-        return await fetchHtmlViaZenRows(url, options);
-      }
+      return await fetchHtmlViaManagedBypassProvider(provider, url, options);
     } catch (error: any) {
+      noteProviderFailure(provider);
       errors.push(`${provider}: ${error.message}`);
     }
   }
 
   noteManagedBypassFailure(url);
   throw new Error(`Managed bypass failed (${errors.join("; ")})`);
+}
+
+export async function fetchHtmlViaManagedBypassRace(
+  url: string,
+  options: ManagedBypassOptions = {},
+  raceOptions: { maxProviders?: number; timeoutMs?: number } = {},
+): Promise<string> {
+  const configuredProviders = activeManagedBypassProviders(
+    url,
+    options.providerOrder,
+  );
+  const maxProviders = Math.max(
+    1,
+    raceOptions.maxProviders ||
+      envNumber("SCRAPER_BYPASS_RACE_MAX_PROVIDERS", 2),
+  );
+  const providers = configuredProviders.slice(0, maxProviders);
+
+  if (providers.length <= 1) {
+    return fetchHtmlViaManagedBypass(url, options);
+  }
+
+  const skippedReason = reserveManagedBypassAttempt(url, providers.length);
+  if (skippedReason) {
+    throw new Error(`Managed bypass race skipped (${skippedReason})`);
+  }
+
+  const timeoutMs = Math.max(
+    1000,
+    raceOptions.timeoutMs ||
+      envNumber("SCRAPER_BYPASS_RACE_TIMEOUT_MS", 12000),
+  );
+  const errors: string[] = [];
+  const attempts = providers.map((provider) =>
+    fetchHtmlViaManagedBypassProvider(provider, url, options)
+      .then((html) => ({ provider, html }))
+      .catch((error: any) => {
+        noteProviderFailure(provider);
+        const message = `${provider}: ${error?.message || error}`;
+        errors.push(message);
+        throw new Error(message);
+      }),
+  );
+
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(
+        new Error(
+          `Managed bypass race timed out after ${timeoutMs}ms (${providers.join(", ")})`,
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    const winner = await Promise.race([Promise.any(attempts), timeout]);
+    console.log(`Managed bypass race won by ${winner.provider}`);
+    return winner.html;
+  } catch (error: any) {
+    noteManagedBypassFailure(url);
+    const details = errors.length ? ` (${errors.join("; ")})` : "";
+    throw new Error(`${error?.message || "Managed bypass race failed"}${details}`);
+  }
 }
 
 const execFileAsync = promisify(execFile);
@@ -729,6 +988,8 @@ function parseJsonMaybeEncoded(value: unknown): any {
 function decodeImageUrl(value: unknown): string {
   return cleanText(value)
     .replace(/\\u002F/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/\\u0026/g, "&")
     .replace(/&#x26;/g, "&")
     .replace(/&amp;/g, "&")
     .trim();
@@ -964,6 +1225,31 @@ function buildNextBrowserHeaders(url: string): Record<string, string> {
   };
 }
 
+async function fetchNextHtmlAttempt(
+  pageUrl: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<string> {
+  const response = await axios.get(pageUrl, {
+    headers,
+    signal,
+    timeout: envNumber("NEXT_HTML_TIMEOUT_MS", 7000),
+    validateStatus: (status: number) => status < 500,
+    ...buildScraperAxiosConfig(),
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Next HTML HTTP ${response.status}`);
+  }
+
+  const html = String(response.data);
+  if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
+    throw new Error("Next returned non-product HTML");
+  }
+
+  return html;
+}
+
 async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
   const attempts: Array<{ headers: Record<string, string>; label: string }> = [
     ...NEXT_MOBILE_USER_AGENTS.map((userAgent, index) => ({
@@ -973,25 +1259,19 @@ async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
     { headers: buildNextBrowserHeaders(pageUrl), label: "desktop" },
   ];
 
-  for (let retry = 0; retry < 3; retry += 1) {
-    for (const attempt of attempts) {
-      try {
-        const response = await axios.get(pageUrl, {
-          headers: attempt.headers,
-          timeout: 25000,
-          validateStatus: (status: number) => status < 500,
-          ...buildScraperAxiosConfig(),
-        });
-
-        if (response.status !== 200) continue;
-
-        const html = String(response.data);
-        if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) continue;
-
-        return html;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 350));
-      }
+  const retryCount = Math.max(1, envNumber("NEXT_HTML_RETRIES", 1));
+  for (let retry = 0; retry < retryCount; retry += 1) {
+    const controllers = attempts.map(() => new AbortController());
+    try {
+      const html = await Promise.any(
+        attempts.map((attempt, index) =>
+          fetchNextHtmlAttempt(pageUrl, attempt.headers, controllers[index].signal),
+        ),
+      );
+      controllers.forEach((controller) => controller.abort());
+      return html;
+    } catch {
+      controllers.forEach((controller) => controller.abort());
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1200 * (retry + 1)));
@@ -1984,9 +2264,148 @@ async function fetchHtmlWithCurl(
   return html;
 }
 
+async function fetchHtmlViaScrapingBee(
+  url: string,
+  options: ManagedBypassOptions,
+): Promise<string> {
+  const apiKey = cleanText(process.env.SCRAPINGBEE_API_KEY);
+  if (!apiKey) throw new Error("SCRAPINGBEE_API_KEY is not configured");
+
+  const countryCode =
+    options.countryCode ||
+    cleanText(process.env.SCRAPINGBEE_COUNTRY_CODE) ||
+    inferCountryCodeFromUrl(url);
+  const renderJs = options.jsRender ?? envFlag("SCRAPINGBEE_RENDER_JS", true);
+  const premiumProxy =
+    options.premium ?? envFlag("SCRAPINGBEE_PREMIUM_PROXY", true);
+
+  const params = new URLSearchParams();
+  params.set("api_key", apiKey);
+  params.set("url", url);
+  if (renderJs) params.set("render_js", "true");
+  if (premiumProxy) params.set("premium_proxy", "true");
+  if (countryCode && premiumProxy) params.set("country_code", countryCode);
+
+  const response = await axios.get(
+    `https://app.scrapingbee.com/api/v1?${params.toString()}`,
+    {
+      timeout: 90000,
+      responseType: "text",
+      validateStatus: (status) => status < 500,
+    },
+  );
+
+  if (response.status !== 200) {
+    throw new Error(`ScrapingBee HTTP ${response.status}`);
+  }
+
+  const html =
+    typeof response.data === "string" ? response.data : String(response.data);
+  if (!html.trim()) throw new Error("ScrapingBee returned an empty response");
+  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+    throw new Error("ScrapingBee returned a blocked page");
+  }
+
+  return html;
+}
+
+async function fetchHtmlViaScrapingAnt(
+  url: string,
+  _options: ManagedBypassOptions,
+): Promise<string> {
+  const apiKey = cleanText(process.env.SCRAPINGANT_API_KEY);
+  if (!apiKey) throw new Error("SCRAPINGANT_API_KEY is not configured");
+
+  const params = new URLSearchParams();
+  params.set("url", url);
+
+  const response = await axios.get(
+    `https://api.scrapingant.com/v1/general?${params.toString()}`,
+    {
+      timeout: 90000,
+      responseType: "text",
+      headers: {
+        "x-api-key": apiKey,
+      },
+      validateStatus: (status) => status < 500,
+    },
+  );
+
+  if (response.status !== 200) {
+    throw new Error(`ScrapingAnt HTTP ${response.status}`);
+  }
+
+  let html = "";
+  const payload =
+    typeof response.data === "string" ? response.data : String(response.data);
+  if (payload.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(payload);
+      html = cleanText(parsed?.content) ? String(parsed.content) : "";
+    } catch {
+      html = payload;
+    }
+  } else {
+    html = payload;
+  }
+
+  if (!html.trim()) throw new Error("ScrapingAnt returned an empty response");
+  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+    throw new Error("ScrapingAnt returned a blocked page");
+  }
+
+  return html;
+}
+
+async function fetchHtmlViaScrapeDo(
+  url: string,
+  options: ManagedBypassOptions,
+): Promise<string> {
+  const token = cleanText(process.env.SCRAPEDO_TOKEN);
+  if (!token) throw new Error("SCRAPEDO_TOKEN is not configured");
+
+  const countryCode =
+    options.countryCode ||
+    cleanText(process.env.SCRAPEDO_GEO_CODE) ||
+    inferCountryCodeFromUrl(url);
+  const renderJs = options.jsRender ?? envFlag("SCRAPEDO_RENDER", true);
+  const useSuperProxy =
+    options.premium ?? envFlag("SCRAPEDO_SUPER_PROXY", true);
+
+  const params = new URLSearchParams();
+  params.set("token", token);
+  params.set("url", url);
+  if (renderJs) params.set("render", "true");
+  if (useSuperProxy) params.set("super", "true");
+  if (countryCode) params.set("geoCode", countryCode);
+
+  const response = await axios.get(`https://api.scrape.do/?${params.toString()}`, {
+    timeout: 90000,
+    responseType: "text",
+    validateStatus: (status) => status < 500,
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Scrape.do HTTP ${response.status}`);
+  }
+
+  const html =
+    typeof response.data === "string" ? response.data : String(response.data);
+  if (!html.trim()) throw new Error("Scrape.do returned an empty response");
+  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+    throw new Error("Scrape.do returned a blocked page");
+  }
+
+  return html;
+}
+
 async function fetchHtmlWithPlaywright(
   url: string,
   requestHeaders: Record<string, string> = {},
+  options: {
+    waitMs?: number;
+    allowBlockedHtml?: (html: string) => boolean;
+  } = {},
 ): Promise<string> {
   const { chromium } = await import("playwright");
   const userAgent =
@@ -2014,19 +2433,24 @@ async function fetchHtmlWithPlaywright(
       waitUntil: "domcontentloaded",
       timeout: 45000,
     });
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(options.waitMs ?? 1500);
     const html = await page.content();
     await context.close();
 
     if (!html.trim()) throw new Error("playwright returned an empty response");
+    const blockedButUsable = options.allowBlockedHtml?.(html) === true;
     if (
       response &&
       response.status() >= 400 &&
-      /access denied|forbidden|blocked|captcha|just a moment/i.test(html)
+      /access denied|forbidden|blocked|captcha|just a moment/i.test(html) &&
+      !blockedButUsable
     ) {
       throw new Error(`playwright returned HTTP ${response.status()}`);
     }
-    if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(html)) {
+    if (
+      /Just a moment|security verification|cf-chl|Cloudflare/i.test(html) &&
+      !blockedButUsable
+    ) {
       throw new Error("playwright returned Cloudflare challenge");
     }
 
@@ -2113,6 +2537,13 @@ function parseJsonAfterMarker(
   } catch {
     return null;
   }
+}
+
+function parseJsonScriptById(source: string, id: string): any {
+  const $ = cheerio.load(source);
+  const script = $(`script#${id}`).first();
+  if (!script.length) return null;
+  return parseJsonMaybeEncoded(script.html() || script.text());
 }
 
 function parseWindowAssignedJson(source: string, variableName: string): any {
@@ -2300,6 +2731,15 @@ function looksLikeSizeOptionValue(value: string): boolean {
   const cleaned = cleanText(value);
   if (!cleaned) return false;
 
+  if (/^\d$/.test(cleaned)) return false;
+  if (
+    /\b(?:toddler\s+(?:girl|boy)|baby\s+(?:girl|boy)|newborn\s+baby)\b/i.test(
+      cleaned,
+    )
+  ) {
+    return false;
+  }
+
   if (
     /^(?:xxxs|xxs|xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl|5xl|small|medium|large|x-?small|x-?large|xx-?large|one size|free size|os|o\/s|nb|n\/b|newborn|preemie)$/i.test(
       cleaned,
@@ -2459,6 +2899,44 @@ function buildVariantOptionValues(
   return Object.keys(values).length ? values : undefined;
 }
 
+function variantColorKey(variant: NormalizedProduct["variants"][number]) {
+  return cleanColorOptionValue(variant.color || variant.optionValues?.Color);
+}
+
+function colorImageForVariant(
+  variant: NormalizedProduct["variants"][number],
+  images: NormalizedProduct["images"],
+  allVariants: NormalizedProduct["variants"],
+): string | undefined {
+  const directImageUrl = decodeImageUrl(variant.imageUrl || "");
+  if (
+    directImageUrl &&
+    images.some(
+      (image) =>
+        canonicalProductImageUrl(image.url) ===
+        canonicalProductImageUrl(directImageUrl),
+    )
+  ) {
+    return directImageUrl;
+  }
+
+  const color = variantColorKey(variant).toLowerCase();
+  if (color) {
+    const matchedImage = images.find(
+      (image) =>
+        cleanColorOptionValue(image.color).toLowerCase() === color ||
+        cleanText(image.alt).toLowerCase().includes(color),
+    );
+    if (matchedImage?.url) return matchedImage.url;
+  }
+
+  const colorCount = new Set(
+    allVariants.map(variantColorKey).filter(Boolean),
+  ).size;
+  if (colorCount <= 1) return images[0]?.url;
+  return undefined;
+}
+
 function normalizeProductOptionsAndVariants(
   product: NormalizedProduct,
 ): NormalizedProduct {
@@ -2574,6 +3052,13 @@ function normalizeProductOptionsAndVariants(
     })
     .filter((option) => option.values.length);
   const images = normalizeProductImageList(product.images || []);
+  const variantColors = uniqueCleanValues(variants.map((variant) => variant.color));
+  const onlyColor = variantColors.length === 1 ? variantColors[0] : undefined;
+  if (onlyColor) {
+    images.forEach((image) => {
+      image.color ||= onlyColor;
+    });
+  }
 
   return {
     ...product,
@@ -2600,9 +3085,7 @@ function normalizeProductOptionsAndVariants(
         ]
     ).map((variant) => ({
       ...variant,
-      imageUrl: isLikelyProductImageSource(variant.imageUrl, product.title)
-        ? decodeImageUrl(variant.imageUrl || "")
-        : undefined,
+      imageUrl: colorImageForVariant(variant, images, variants),
     })),
   };
 }
@@ -4163,10 +4646,83 @@ export class GapScraper implements SupplierScraper {
   }
 }
 
+function marksAndSpencerDigitalAssetBase(productCode: string | undefined) {
+  const code = cleanText(productCode)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const match = code.match(/^T(\d{2})([A-Z0-9]+)$/);
+  if (!match) return undefined;
+
+  return `SD_04_T${match[1]}_${match[2]}`;
+}
+
+function marksAndSpencerColorFromImageGroup(
+  imageGroup: any,
+  optionValueMaps: Map<string, Map<string, string>>,
+) {
+  const colorTag = (imageGroup?.productImageGroupTags || []).find((tag: any) =>
+    /colou?r/i.test(String(tag?.attributeFqn || tag?.attributeFQN || "")),
+  );
+  const attributeFqn = String(
+    colorTag?.attributeFqn || colorTag?.attributeFQN || "",
+  );
+  const rawValue = cleanText(colorTag?.value || "");
+  const mapped = optionValueMaps.get(attributeFqn)?.get(rawValue);
+  return cleanColorOptionValue(
+    mapped || rawValue.replace(/^[A-Z0-9]+_/, "").replace(/_+/g, " "),
+  );
+}
+
+function marksAndSpencerImageGroupCode(imageGroup: any) {
+  const groupId = cleanText(imageGroup?.productImageGroupId)
+    .toUpperCase()
+    .replace(/_+$/g, "");
+  const tagValue = cleanText(imageGroup?.productImageGroupTags?.[0]?.value)
+    .toUpperCase()
+    .split("_")[0];
+  const code = groupId || tagValue;
+  return /^[A-Z0-9]{1,6}$/.test(code) ? code : undefined;
+}
+
+function addMarksAndSpencerDigitalFallbackImages(
+  images: NormalizedProduct["images"],
+  productCode: string | undefined,
+  productImageGroups: any[],
+  optionValueMaps: Map<string, Map<string, string>>,
+  pageUrl: string,
+  title?: string,
+) {
+  if (images.length) return;
+
+  const assetBase = marksAndSpencerDigitalAssetBase(productCode);
+  if (!assetBase || !Array.isArray(productImageGroups)) return;
+
+  for (const imageGroup of productImageGroups) {
+    const groupCode = marksAndSpencerImageGroupCode(imageGroup);
+    if (!groupCode) continue;
+
+    const color = marksAndSpencerColorFromImageGroup(
+      imageGroup,
+      optionValueMaps,
+    );
+    const alt = [cleanText(title), color].filter(Boolean).join(" - ");
+
+    for (const view of ["90", "1"]) {
+      const imageUrl = `https://assets.digitalcontent.marksandspencer.app/image/upload/q_auto,f_auto/${assetBase}_${groupCode}_X_EC_${view}`;
+      pushImage(images, imageUrl, pageUrl, alt);
+      applyImageColorByUrl(images, imageUrl, pageUrl, color);
+    }
+  }
+}
+
 function parseMarksAndSpencerHtml(
   html: string,
   url: string,
 ): NormalizedProduct {
+  const preloadProduct = parseJsonScriptById(
+    html,
+    "data-mz-preload-product",
+  );
   const productData = extractProductJsonLdFromHtml(html);
   const offer = firstOffer(productData);
   const productCode = cleanText(
@@ -4178,11 +4734,21 @@ function parseMarksAndSpencerHtml(
   const searchFrom = productAnchor >= 0 ? productAnchor : 0;
 
   const productImages =
-    parseJsonAfterMarker(html, '"productImages":', searchFrom) || [];
+    preloadProduct?.content?.productImages ||
+    parseJsonAfterMarker(html, '"productImages":', searchFrom) ||
+    [];
   const kiboOptions =
-    parseJsonAfterMarker(html, '"options":', searchFrom) || [];
+    preloadProduct?.options ||
+    parseJsonAfterMarker(html, '"options":', searchFrom) ||
+    [];
   const variations =
-    parseJsonAfterMarker(html, '"variations":', searchFrom) || [];
+    preloadProduct?.variations ||
+    parseJsonAfterMarker(html, '"variations":', searchFrom) ||
+    [];
+  const productImageGroups =
+    preloadProduct?.productImageGroups ||
+    parseJsonAfterMarker(html, '"productImageGroups":', searchFrom) ||
+    [];
 
   const images: NormalizedProduct["images"] = [];
   for (const image of productImages) {
@@ -4216,6 +4782,14 @@ function parseMarksAndSpencerHtml(
     }
     optionValueMaps.set(String(option?.attributeFQN), values);
   }
+  addMarksAndSpencerDigitalFallbackImages(
+    images,
+    productCode,
+    productImageGroups,
+    optionValueMaps,
+    url,
+    productData?.name,
+  );
 
   const findOptionValue = (variation: any, matcher: RegExp) => {
     const option = (variation?.options || []).find((entry: any) =>
@@ -4229,7 +4803,14 @@ function parseMarksAndSpencerHtml(
     );
   };
 
-  const price = parsePrice(offer?.price);
+  const kiboPrice = preloadProduct?.price || {};
+  const price =
+    parsePrice(
+      kiboPrice.salePrice ||
+        kiboPrice.price ||
+        kiboPrice.catalogListPrice ||
+        offer?.price,
+    ) || parsePrice(offer?.price);
   const currency = detectCurrency(
     offer?.priceCurrency || "AED",
     offer?.priceCurrency || "AED",
@@ -4295,8 +4876,14 @@ function parseMarksAndSpencerHtml(
       url,
       productId: productCode,
     },
-    title: cleanText(productData?.name || "Marks & Spencer Product"),
-    description: cleanText(productData?.description),
+    title: cleanText(
+      productData?.name ||
+        preloadProduct?.content?.productName ||
+        "Marks & Spencer Product",
+    ),
+    description: cleanText(
+      productData?.description || preloadProduct?.content?.productFullDescription,
+    ),
     brand: decodeHtmlEntities(
       cleanText(
         productData?.brand?.name || productData?.brand || "Marks & Spencer",
@@ -4323,7 +4910,9 @@ function parseMarksAndSpencerHtml(
           ],
     raw: {
       productData,
+      preloadProduct,
       productImages,
+      productImageGroups,
       kiboOptions,
       variations,
     },
@@ -4378,7 +4967,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
       errors.push(`curl: ${error.message}`);
     }
 
-    if (activeManagedBypassProviders().length > 0) {
+    if (activeManagedBypassProviders(url).length > 0) {
       try {
         const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
           deviceType: "desktop",
@@ -5248,7 +5837,7 @@ export class SheinScraper implements SupplierScraper {
         isSheinRiskChallenge(html) &&
         !ssrData &&
         !rawData &&
-        activeManagedBypassProviders().length > 0
+        activeManagedBypassProviders(url).length > 0
       ) {
         try {
           const bypassHtml = await fetchHtmlViaManagedBypass(url, {
@@ -5315,6 +5904,10 @@ export class SheinScraper implements SupplierScraper {
         priceSource || rawData?.modules?.mallInfo?.currency || "AED",
         rawData?.modules?.mallInfo?.currency || "AED",
       );
+      if (!price || price <= 0) {
+        throw new Error("SHEIN page did not expose a live product price");
+      }
+
       const images: NormalizedProduct["images"] = [];
       const goodsImages = intro?.goods_imgs || {};
       const imageCandidates = [
@@ -5428,7 +6021,7 @@ export class SheinScraper implements SupplierScraper {
       if (fallback) return fallback;
 
       if (
-        /risk challenge|did not expose SSR product JSON|HTTP 403|captcha|SecurityCompromiseError/i.test(
+        /risk challenge|did not expose SSR product JSON|did not expose a live product price|HTTP 403|captcha|SecurityCompromiseError/i.test(
           error.message,
         )
       ) {
@@ -5822,21 +6415,26 @@ async function fetchMaxFashionProductHtml(url: string): Promise<string | null> {
   for (const pageUrl of buildMaxFashionCandidateUrls(url)) {
     for (const userAgent of MAX_FASHION_USER_AGENTS) {
       try {
-        const response = await axios.get(pageUrl, {
-          headers: buildMaxFashionHeaders(pageUrl, userAgent),
-          timeout: 20000,
-          validateStatus: (status: number) => status < 500,
-          ...buildScraperAxiosConfig(),
-        });
+          const response = await axios.get(pageUrl, {
+            headers: buildMaxFashionHeaders(pageUrl, userAgent),
+            timeout: envNumber("MAX_FASHION_TIMEOUT_MS", 12000),
+            validateStatus: (status: number) => status < 500,
+            ...buildScraperAxiosConfig(),
+          });
 
-        if (response.status !== 200) continue;
-        const html =
-          typeof response.data === "string"
-            ? response.data
-            : String(response.data);
-        if (!isUsableMaxFashionHtml(html)) continue;
+          if (response.status !== 200) {
+            continue;
+          }
 
-        return html;
+          const html =
+            typeof response.data === "string"
+              ? response.data
+              : String(response.data);
+          if (!isUsableMaxFashionHtml(html)) {
+            continue;
+          }
+
+          return html;
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -5887,6 +6485,37 @@ export class MaxFashionScraper implements SupplierScraper {
 
   async scrape(url: string): Promise<NormalizedProduct> {
     const errors: string[] = [];
+    let playwrightTried = false;
+
+    const tryPlaywright = async () => {
+      playwrightTried = true;
+      const html = await fetchHtmlWithPlaywright(
+        stripUrlHash(url),
+        buildMaxFashionHeaders(url, MAX_FASHION_USER_AGENTS[1]),
+        {
+          waitMs: 2500,
+          allowBlockedHtml: isUsableMaxFashionHtml,
+        },
+      );
+      return parseMaxFashionHtml(html, url);
+    };
+
+    if (envFlag("MAX_FASHION_FAST_PLAYWRIGHT", true)) {
+      try {
+        return await tryPlaywright();
+      } catch (error: any) {
+        const message = String(error?.message || "");
+        if (
+          /Executable doesn't exist|playwright install|chrome-headless-shell/i.test(
+            message,
+          )
+        ) {
+          errors.push("playwright: browser runtime is not installed");
+        } else {
+          errors.push(`playwright: ${message}`);
+        }
+      }
+    }
 
     try {
       const html = await fetchMaxFashionProductHtml(url);
@@ -5896,6 +6525,23 @@ export class MaxFashionScraper implements SupplierScraper {
       errors.push(`direct: ${error.message}`);
     }
 
+    if (!playwrightTried) {
+      try {
+        return await tryPlaywright();
+      } catch (error: any) {
+        const message = String(error?.message || "");
+        if (
+          /Executable doesn't exist|playwright install|chrome-headless-shell/i.test(
+            message,
+          )
+        ) {
+          errors.push("playwright: browser runtime is not installed");
+        } else {
+          errors.push(`playwright: ${message}`);
+        }
+      }
+    }
+
     try {
       const html = await fetchMaxFashionProductHtmlWithCurl(url);
       return parseMaxFashionHtml(html, url);
@@ -5903,7 +6549,7 @@ export class MaxFashionScraper implements SupplierScraper {
       errors.push(`curl: ${error.message}`);
     }
 
-    if (activeManagedBypassProviders().length > 0) {
+    if (activeManagedBypassProviders(url).length > 0) {
       const bypassErrors: string[] = [];
       for (const pageUrl of buildMaxFashionCandidateUrls(url)) {
         try {
@@ -6686,12 +7332,29 @@ function parseNextReaderMarkdown(
   });
 }
 
+function nextNeedsReaderColorwayEnrichment(product: NormalizedProduct): boolean {
+  if (product.raw?.readerFallback || product.raw?.pastedSnapshotFallback)
+    return false;
+  if (!product.images.length) return true;
+
+  const hasColorOption = product.options.some((option) =>
+    /^colou?r$/i.test(option.name),
+  );
+  const hasVariantColor = product.variants.some((variant) =>
+    Boolean(variant.color || variant.optionValues?.Color),
+  );
+  const hasVariantImages = product.variants.every(
+    (variant) => Boolean(variant.imageUrl) || product.images.length === 1,
+  );
+
+  return (hasColorOption || hasVariantColor) && !hasVariantImages;
+}
+
 async function enrichNextProductWithReaderColorways(
   product: NormalizedProduct,
   url: string,
 ): Promise<NormalizedProduct> {
-  if (product.raw?.readerFallback || product.raw?.pastedSnapshotFallback)
-    return product;
+  if (!nextNeedsReaderColorwayEnrichment(product)) return product;
 
   try {
     const reader = await fetchNextReaderMarkdown(url);
@@ -7259,7 +7922,7 @@ export class CentrepointScraper implements SupplierScraper {
       errors.push(`curl: ${error.message}`);
     }
 
-    if (activeManagedBypassProviders().length > 0) {
+    if (activeManagedBypassProviders(url).length > 0) {
       try {
         const html = await fetchHtmlViaManagedBypass(stripUrlHash(url), {
           deviceType: "mobile",
@@ -7490,56 +8153,64 @@ export class NextScraper implements SupplierScraper {
           `https://www.next.co.uk/api/product/v1/product/${styleId}/${productId}`,
         ];
 
-        for (const apiUrl of apiUrls) {
-          try {
-            console.log(`Trying Next API: ${apiUrl}`);
-            const apiResponse = await axios.get(apiUrl, {
-              headers: {
-                accept: "application/json, text/plain, */*",
-                ...buildNextMobileHeaders(url),
-                referer: url,
-              },
-              timeout: 15000,
-              validateStatus: (status: number) => status < 500,
-              ...buildScraperAxiosConfig(),
-            });
-
-            if (apiResponse.status === 200 && apiResponse.data) {
-              const data = apiResponse.data;
-              // Normalize API response to NormalizedProduct
-              const item = data.product || data;
-              return await enrichNextProductWithReaderColorways(
-                {
-                  source: {
-                    supplier: "Next",
-                    url,
-                    productId: `${styleId}-${productId}`,
-                  },
-                  title: item.name || item.title || "Next Product",
-                  description: item.description,
-                  brand: item.brand || "Next",
-                  currency: item.currency || defaultNextCurrencyForUrl(url),
-                  price: parseFloat(item.price || item.currentPrice || "0"),
-                  images: (item.images || []).map((img: any, idx: number) => ({
-                    url: img.url || img,
-                    position: idx,
-                  })),
-                  options: item.options || [],
-                  variants: (item.variants || []).map((v: any) => ({
-                    sourceVariantId: v.id || v.sku,
-                    sku: v.sku,
-                    price: parseFloat(v.price),
-                    available: v.inStock !== false,
-                    stockStatus: v.inStock ? "in_stock" : "out_of_stock",
-                  })),
-                  raw: data,
+        const controllers = apiUrls.map(() => new AbortController());
+        try {
+          const data = await Promise.any(
+            apiUrls.map(async (apiUrl, index) => {
+              console.log(`Trying Next API: ${apiUrl}`);
+              const apiResponse = await axios.get(apiUrl, {
+                headers: {
+                  accept: "application/json, text/plain, */*",
+                  ...buildNextMobileHeaders(url),
+                  referer: url,
                 },
+                signal: controllers[index].signal,
+                timeout: envNumber("NEXT_API_TIMEOUT_MS", 3000),
+                validateStatus: (status: number) => status < 500,
+                ...buildScraperAxiosConfig(),
+              });
+
+              if (apiResponse.status !== 200 || !apiResponse.data) {
+                throw new Error(`Next API HTTP ${apiResponse.status}`);
+              }
+
+              return apiResponse.data;
+            }),
+          );
+          controllers.forEach((controller) => controller.abort());
+
+          const item = data.product || data;
+          return await enrichNextProductWithReaderColorways(
+            normalizeProductOptionsAndVariants({
+              source: {
+                supplier: "Next",
                 url,
-              );
-            }
-          } catch (e: any) {
-            // Expected on some regional Next URLs; HTML/reader fallback handles this.
-          }
+                productId: `${styleId}-${productId}`,
+              },
+              title: item.name || item.title || "Next Product",
+              description: item.description,
+              brand: item.brand || "Next",
+              currency: item.currency || defaultNextCurrencyForUrl(url),
+              price: parseFloat(item.price || item.currentPrice || "0"),
+              images: (item.images || []).map((img: any, idx: number) => ({
+                url: img.url || img,
+                position: idx,
+              })),
+              options: item.options || [],
+              variants: (item.variants || []).map((v: any) => ({
+                sourceVariantId: v.id || v.sku,
+                sku: v.sku,
+                price: parseFloat(v.price),
+                available: v.inStock !== false,
+                stockStatus: v.inStock ? "in_stock" : "out_of_stock",
+              })),
+              raw: data,
+            }),
+            url,
+          );
+        } catch {
+          controllers.forEach((controller) => controller.abort());
+          // Expected on some regional Next URLs; HTML/reader fallback handles this.
         }
       }
 
@@ -7549,6 +8220,64 @@ export class NextScraper implements SupplierScraper {
       const pageUrls = [
         ...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)]),
       ];
+      const bypassErrors: string[] = [];
+      const fastBypassTriedUrls = new Set<string>();
+
+      if (
+        envFlag("NEXT_FAST_BYPASS", true) &&
+        activeManagedBypassProviders(url).length > 0
+      ) {
+        const fastBypassUrls = pageUrls.slice(
+          0,
+          Math.max(1, envNumber("NEXT_FAST_BYPASS_URLS", 1)),
+        );
+
+        for (const pageUrl of fastBypassUrls) {
+          fastBypassTriedUrls.add(pageUrl);
+          try {
+            const fastBypassOptions: ManagedBypassOptions = {
+              deviceType: envBypassDevice("NEXT_FAST_BYPASS_DEVICE", "mobile"),
+              jsRender: false,
+              premium: envFlag("NEXT_FAST_BYPASS_PREMIUM", false),
+            };
+            const html = envFlag("NEXT_FAST_BYPASS_RACE", true)
+              ? await fetchHtmlViaManagedBypassRace(pageUrl, fastBypassOptions, {
+                  maxProviders: envNumber("NEXT_FAST_BYPASS_RACE_MAX_PROVIDERS", 2),
+                  timeoutMs: envNumber("NEXT_FAST_BYPASS_RACE_TIMEOUT_MS", 12000),
+                })
+              : await fetchHtmlViaManagedBypass(pageUrl, fastBypassOptions);
+            if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
+              throw new Error("Managed bypass returned non-product HTML");
+            }
+
+            const product = extractNextProductFromHtml(html, url, pageUrl);
+            if (
+              !nextScrapeMatchesRequestedRegion(url, pageUrl, product.currency)
+            ) {
+              throw new Error(
+                `Regional mismatch (${product.currency} from ${pageUrl})`,
+              );
+            }
+
+            console.log(
+              `Successfully scraped Next via fast managed bypass from ${pageUrl}`,
+            );
+            return await enrichNextProductWithReaderColorways(
+              {
+                ...product,
+                raw: {
+                  ...product.raw,
+                  managedBypassFallback: true,
+                  fastManagedBypass: true,
+                },
+              },
+              url,
+            );
+          } catch (bypassError: any) {
+            bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
+          }
+        }
+      }
 
       for (const pageUrl of pageUrls) {
         try {
@@ -7629,15 +8358,21 @@ export class NextScraper implements SupplierScraper {
         }
       }
 
-      const bypassErrors: string[] = [];
-      if (activeManagedBypassProviders().length > 0) {
+      if (activeManagedBypassProviders(url).length > 0) {
         for (const pageUrl of pageUrls) {
+          if (fastBypassTriedUrls.has(pageUrl)) continue;
           try {
-            const html = await fetchHtmlViaManagedBypass(pageUrl, {
-              deviceType: "mobile",
+            const bypassOptions: ManagedBypassOptions = {
+              deviceType: envBypassDevice("NEXT_BYPASS_DEVICE", "mobile"),
               jsRender: false,
-              premium: true,
-            });
+              premium: envFlag("NEXT_BYPASS_PREMIUM", false),
+            };
+            const html = envFlag("NEXT_BYPASS_RACE", true)
+              ? await fetchHtmlViaManagedBypassRace(pageUrl, bypassOptions, {
+                  maxProviders: envNumber("NEXT_BYPASS_RACE_MAX_PROVIDERS", 2),
+                  timeoutMs: envNumber("NEXT_BYPASS_RACE_TIMEOUT_MS", 12000),
+                })
+              : await fetchHtmlViaManagedBypass(pageUrl, bypassOptions);
             if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
               throw new Error("Managed bypass returned non-product HTML");
             }
@@ -7942,7 +8677,7 @@ export class AdidasScraper implements SupplierScraper {
     }
 
     // Try managed bypass first for Adidas (they block automated access)
-    if (activeManagedBypassProviders().length > 0) {
+    if (activeManagedBypassProviders(url).length > 0) {
       try {
         const html = await fetchHtmlViaManagedBypass(url, {
           deviceType: "mobile",
@@ -8055,6 +8790,60 @@ export class AdidasScraper implements SupplierScraper {
   }
 }
 
+const scraperResultCache = new Map<
+  string,
+  { expiresAt: number; product: NormalizedProduct }
+>();
+const scraperResultInflight = new Map<string, Promise<NormalizedProduct>>();
+
+function normalizeScraperResultCacheUrl(url: string): string {
+  try {
+    const parsed = new URL(cleanText(url));
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return cleanText(url).split("#")[0];
+  }
+}
+
+function scraperResultCacheTtlMs(): number {
+  const minutes = Math.max(0, envNumber("SCRAPER_RESULT_CACHE_MINUTES", 60));
+  return minutes * 60 * 1000;
+}
+
+function cloneNormalizedProduct(product: NormalizedProduct): NormalizedProduct {
+  return JSON.parse(JSON.stringify(product));
+}
+
+function getCachedScraperResult(
+  cacheKey: string,
+): NormalizedProduct | undefined {
+  const ttlMs = scraperResultCacheTtlMs();
+  if (ttlMs <= 0) return undefined;
+
+  const cached = scraperResultCache.get(cacheKey);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    scraperResultCache.delete(cacheKey);
+    return undefined;
+  }
+
+  return cloneNormalizedProduct(cached.product);
+}
+
+function setCachedScraperResult(
+  cacheKey: string,
+  product: NormalizedProduct,
+) {
+  const ttlMs = scraperResultCacheTtlMs();
+  if (ttlMs <= 0) return;
+
+  scraperResultCache.set(cacheKey, {
+    expiresAt: Date.now() + ttlMs,
+    product: cloneNormalizedProduct(product),
+  });
+}
+
 export class ScraperService {
   private scrapers: SupplierScraper[] = [
     new NextScraper(),
@@ -8072,9 +8861,27 @@ export class ScraperService {
   ];
 
   async scrape(url: string): Promise<NormalizedProduct> {
+    const cacheKey = normalizeScraperResultCacheUrl(url);
+    const cached = getCachedScraperResult(cacheKey);
+    if (cached) return cached;
+
+    const inflight = scraperResultInflight.get(cacheKey);
+    if (inflight) return cloneNormalizedProduct(await inflight);
+
     const scraper =
       this.scrapers.find((s) => s.canHandle(url)) || this.scrapers[0];
-    return normalizeProductOptionsAndVariants(await scraper.scrape(url));
+    const promise = scraper
+      .scrape(url)
+      .then((product) => normalizeProductOptionsAndVariants(product));
+    scraperResultInflight.set(cacheKey, promise);
+
+    try {
+      const product = await promise;
+      setCachedScraperResult(cacheKey, product);
+      return cloneNormalizedProduct(product);
+    } finally {
+      scraperResultInflight.delete(cacheKey);
+    }
   }
 
   async scrapeSnapshot(

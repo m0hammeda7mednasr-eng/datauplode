@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle, Image as ImageIcon, Check, FolderOpen, RefreshCw, ChevronDown, ExternalLink } from 'lucide-react';
 import axios from 'axios';
@@ -97,6 +97,14 @@ function variantStockDisplay(variant: any) {
   return { label: 'No Stock Set', textClass: 'text-slate-400', dotClass: 'bg-slate-400' };
 }
 
+function getCategoryCandidates(result: any) {
+  return result?.categoryCandidates || result?.raw?.productCandidates || [];
+}
+
+function isCategoryDiscoveryResult(result: any) {
+  return Boolean(result?.raw?.categoryDiscovery || getCategoryCandidates(result).length);
+}
+
 export default function ImportProduct() {
   const [url, setUrl] = useState('');
   const [analysisResult, setAnalysisResult] = useState<any>(null);
@@ -109,6 +117,8 @@ export default function ImportProduct() {
   const [publishLoading, setPublishLoading] = useState(false);
   const [nextSnapshotText, setNextSnapshotText] = useState('');
   const [blockedImport, setBlockedImport] = useState<any>(null);
+  const [prewarmStatus, setPrewarmStatus] = useState<'idle' | 'warming' | 'ready'>('idle');
+  const lastPrewarmedUrlRef = useRef('');
 
   const {
     data: collections = [],
@@ -179,6 +189,33 @@ export default function ImportProduct() {
     analyzeMutation.mutate({ productUrl: url, pageText: nextSnapshotText });
   };
 
+  const handleAnalyzeCandidate = (productUrl: string) => {
+    setUrl(productUrl);
+    setBlockedImport(null);
+    setAnalysisResult(null);
+    analyzeMutation.mutate({ productUrl });
+  };
+
+  const handlePasteAndAnalyzeSnapshot = async () => {
+    if (!url) {
+      toast.error('Paste product URL first.');
+      return;
+    }
+
+    try {
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText.trim()) {
+        toast.error('Clipboard is empty.');
+        return;
+      }
+
+      setNextSnapshotText(clipboardText);
+      analyzeMutation.mutate({ productUrl: url, pageText: clipboardText });
+    } catch {
+      toast.error('Could not read clipboard. Paste manually then click Analyze Snapshot.');
+    }
+  };
+
   useEffect(() => {
     setSelectedImageIndex(0);
     setSelectedImageUrls((analysisResult?.images || []).map((image: any) => image.url).filter(Boolean));
@@ -186,7 +223,66 @@ export default function ImportProduct() {
   }, [analysisResult?.source?.url]);
 
   useEffect(() => {
-    if (!analysisResult || pricingRules.length === 0) return;
+    const productUrl = url.trim();
+    let pollTimer: number | undefined;
+    let startTimer: number | undefined;
+    let cancelled = false;
+    const canPrewarm =
+      /^https?:\/\/\S+\.\S+/i.test(productUrl) &&
+      (/(?:next\.[a-z.]+|nextdirect\.com)\/.+\/style\/[a-z0-9]+\/[a-z0-9]+/i.test(productUrl) ||
+        /maxfashion\.com/i.test(productUrl));
+
+    if (!canPrewarm) {
+      setPrewarmStatus('idle');
+      lastPrewarmedUrlRef.current = '';
+      return;
+    }
+
+    const prewarm = async (attempt = 0) => {
+      try {
+        if (lastPrewarmedUrlRef.current !== productUrl) {
+          lastPrewarmedUrlRef.current = productUrl;
+        }
+
+        const { data } = await axios.post('/api/imports/prewarm', { url: productUrl });
+        if (cancelled) return;
+
+        if (data?.status === 'cached') {
+          setPrewarmStatus('ready');
+          return;
+        }
+
+        if (data?.status === 'warming') {
+          setPrewarmStatus('warming');
+          if (attempt < 20) {
+            pollTimer = window.setTimeout(() => prewarm(attempt + 1), 1500);
+          }
+          return;
+        }
+
+        setPrewarmStatus('idle');
+      } catch {
+        if (!cancelled) {
+          setPrewarmStatus('idle');
+          lastPrewarmedUrlRef.current = '';
+        }
+      }
+    };
+
+    setPrewarmStatus('warming');
+    startTimer = window.setTimeout(() => {
+      prewarm();
+    }, 650);
+
+    return () => {
+      cancelled = true;
+      if (startTimer) window.clearTimeout(startTimer);
+      if (pollTimer) window.clearTimeout(pollTimer);
+    };
+  }, [url]);
+
+  useEffect(() => {
+    if (!analysisResult || isCategoryDiscoveryResult(analysisResult) || pricingRules.length === 0) return;
     const selectedRuleStillExists = selectedPricingRuleId && pricingRules.some((rule: any) => rule.id === selectedPricingRuleId);
     if (selectedRuleStillExists) return;
 
@@ -197,6 +293,8 @@ export default function ImportProduct() {
   }, [analysisResult, pricingRules, selectedPricingRuleId]);
 
   const allImages = analysisResult?.images || [];
+  const categoryCandidates = getCategoryCandidates(analysisResult);
+  const isCategoryResult = isCategoryDiscoveryResult(analysisResult);
   const selectedImageSet = new Set(selectedImageUrls);
   const selectedImages = allImages.filter((image: any) => selectedImageSet.has(image.url));
   const activeImage = allImages[selectedImageIndex] || allImages[0];
@@ -350,12 +448,23 @@ export default function ImportProduct() {
               {analysisResult.source.supplier} DETECTED
             </div>
           )}
+          {prewarmStatus !== 'idle' && (
+            <div className={cn(
+              'hidden sm:flex items-center gap-1.5 px-3 py-1 rounded text-[10px] font-black uppercase border',
+              prewarmStatus === 'ready'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-amber-50 text-amber-700 border-amber-200',
+            )}>
+              {prewarmStatus === 'warming' && <Loader2 className="h-3 w-3 animate-spin" />}
+              {prewarmStatus === 'ready' ? 'FAST READY' : 'PREPARING FAST'}
+            </div>
+          )}
           <button
             type="submit"
             disabled={analyzeMutation.isPending || !url}
             className="bg-primary text-white px-6 py-2 rounded-md font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all text-sm shadow-sm"
           >
-            {analyzeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'ANALYZE URL'}
+            {analyzeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : prewarmStatus === 'ready' ? 'ANALYZE FAST' : 'ANALYZE URL'}
           </button>
         </form>
         {blockedImport?.retryWithSnapshot && (
@@ -388,6 +497,14 @@ export default function ImportProduct() {
                   </a>
                   <button
                     type="button"
+                    onClick={handlePasteAndAnalyzeSnapshot}
+                    disabled={analyzeMutation.isPending}
+                    className="flex items-center gap-2 rounded-md border border-amber-300 bg-white px-4 py-2 text-xs font-black uppercase tracking-widest text-amber-900 shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Paste + Analyze
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleAnalyzeSnapshot}
                     disabled={analyzeMutation.isPending || !nextSnapshotText.trim()}
                     className="flex items-center gap-2 rounded-md bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-widest text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
@@ -402,7 +519,64 @@ export default function ImportProduct() {
       </div>
 
       <AnimatePresence>
-        {analysisResult && (
+        {analysisResult && isCategoryResult && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-5 shadow-sm"
+          >
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-xs font-black uppercase tracking-widest text-emerald-700">Next category detected</div>
+                <h2 className="mt-1 text-xl font-black text-slate-950">Choose a product from this listing</h2>
+                <p className="mt-2 max-w-3xl text-sm font-semibold leading-relaxed text-emerald-900">
+                  This URL is a listing page, not a single product. Syncly found product links automatically and started warming the first results, so pick one below and it will analyze directly.
+                </p>
+              </div>
+              <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-black uppercase tracking-widest text-emerald-700">
+                {categoryCandidates.length} products found
+              </div>
+            </div>
+
+            {categoryCandidates.length > 0 ? (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {categoryCandidates.slice(0, 12).map((candidate: any, index: number) => (
+                  <div key={candidate.url || index} className="rounded-lg border border-emerald-100 bg-white p-4 shadow-sm">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Product {index + 1}</div>
+                    <div className="mt-1 text-sm font-black text-slate-900">{candidate.title || 'Next product'}</div>
+                    <div className="mt-2 truncate text-[11px] font-mono text-slate-500" title={candidate.url}>
+                      {candidate.url}
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleAnalyzeCandidate(candidate.url)}
+                        disabled={analyzeMutation.isPending}
+                        className="rounded-md bg-primary px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {analyzeMutation.isPending ? 'Analyzing...' : 'Analyze This'}
+                      </button>
+                      <a
+                        href={candidate.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-md border border-slate-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-500"
+                      >
+                        Open
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+                No product links were found on this listing. Try a narrower Next category page or paste a direct `/style/...` product link.
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {analysisResult && !isCategoryResult && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}

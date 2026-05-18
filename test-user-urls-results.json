@@ -3,21 +3,74 @@
     "name": "MaxFashion 1",
     "url": "https://www.maxfashion.com/ae/en/buy-stitch-embroidered-denim-dungaree-with-tshirt/p/B26KIBFEDTRDUNG147MULTICOLORMEDIUM",
     "success": true,
-    "status": "manual_snapshot_required",
-    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
-    "error": "Max Fashion blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+    "durationMs": 11407,
+    "supplier": "Max Fashion",
+    "title": "Stitch Embroidered Denim Dungaree with T-shirt",
+    "price": 65,
+    "currency": "AED",
+    "brand": "MAX",
+    "imageCount": 8,
+    "variantCount": 5,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "Multicolour"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "3-6 mths",
+          "6-9 mths",
+          "9-12 mths",
+          "12-18 mths",
+          "18-24 mths"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "Next UAE 1",
     "url": "https://www.next.ae/en/style/su759706/w59264#w59264",
-    "success": false,
-    "error": "Failed to scrape Next: Failed to scrape direct page (No usable product HTML returned), HTML fallbacks failed (https://www.next.ae/en/style/su759706/w59264: No usable product HTML returned; https://www.next.co.uk/style/su759706/w59264: No usable product HTML returned; https://www.next.us/en/style/su759706/w59264: No usable product HTML returned; https://www.nextdirect.com/eg/en/style/su759706/w59264: No usable product HTML returned), Playwright fallbacks failed (https://www.next.ae/en/style/su759706/w59264: Playwright returned non-product HTML; https://www.next.co.uk/style/su759706/w59264: Playwright returned non-product HTML; https://www.next.us/en/style/su759706/w59264: Playwright returned non-product HTML; https://www.nextdirect.com/eg/en/style/su759706/w59264: Playwright returned non-product HTML), managed bypass fallbacks failed (), and Reader fallbacks failed (reader: no usable markdown returned)"
+    "success": true,
+    "durationMs": 23329,
+    "supplier": "Next",
+    "title": "White Strawberry Baby Short Sleeve Dresse 2 Pack (0mths-3yrs)",
+    "price": 91,
+    "currency": "AED",
+    "brand": "Next",
+    "imageCount": 9,
+    "variantCount": 9,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "White Strawberry"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "Up to 1 Month (56cm)",
+          "Up to 3 Months (62cm)",
+          "3-6 Months (62-68cm)",
+          "6-9 Months (68-74cm)",
+          "9-12 Months (74-80cm)",
+          "12-18 Months (80-86cm)",
+          "1.5-2 Years (86-92cm)",
+          "2-3 Years (92-98cm)"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "Mothercare",
     "url": "https://www.mothercare.ae/en/buy-3-pack-mothercare-newborn-bibs-4",
     "success": true,
-    "durationMs": 566,
+    "durationMs": 553,
     "supplier": "Mothercare",
     "title": "3 Pack Mothercare Newborn Bibs",
     "price": 40,
@@ -39,13 +92,13 @@
     "name": "M&S UAE 1",
     "url": "https://www.marksandspencerme.com/en-ae/l/denim-striped-bibshort-with-t-shirt-0-3-yrs-/p/T784681D",
     "success": true,
-    "durationMs": 1015,
+    "durationMs": 849,
     "supplier": "Marks & Spencer",
     "title": "Denim Striped Bibshort with T-Shirt (0-3 Yrs)",
-    "price": 7.5,
+    "price": 99,
     "currency": "AED",
     "brand": "M&S",
-    "imageCount": 4,
+    "imageCount": 3,
     "variantCount": 7,
     "options": [
       {
@@ -72,35 +125,106 @@
   {
     "name": "Next UAE 2",
     "url": "https://www.next.ae/en/style/sv124809/g44412#g44412",
-    "success": false,
-    "error": "Failed to scrape Next: Failed to scrape direct page (No usable product HTML returned), HTML fallbacks failed (https://www.next.ae/en/style/sv124809/g44412: No usable product HTML returned; https://www.next.co.uk/style/sv124809/g44412: No usable product HTML returned; https://www.next.us/en/style/sv124809/g44412: No usable product HTML returned; https://www.nextdirect.com/eg/en/style/sv124809/g44412: No usable product HTML returned), Playwright fallbacks failed (https://www.next.ae/en/style/sv124809/g44412: Playwright returned non-product HTML; https://www.next.co.uk/style/sv124809/g44412: Playwright returned non-product HTML; https://www.next.us/en/style/sv124809/g44412: Playwright returned non-product HTML; https://www.nextdirect.com/eg/en/style/sv124809/g44412: Playwright returned non-product HTML), managed bypass fallbacks failed (), and Reader fallbacks failed (reader: no usable markdown returned)"
+    "success": true,
+    "durationMs": 26370,
+    "supplier": "Next",
+    "title": "River Island Pink Stripe Puff Sleeve Top & Bow Wide Leg Set",
+    "price": 186,
+    "currency": "AED",
+    "brand": "River Island",
+    "imageCount": 5,
+    "variantCount": 5,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "River Island Pink Stripe Puff Sleeve"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "12-18 Months (80-86cm)",
+          "1.5-2 Years (86-92cm)",
+          "2-3 Years (92-98cm)",
+          "3-4 Years (98-104cm)",
+          "4-5 Years (104-110cm)"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "Next UAE 3",
     "url": "https://www.next.ae/en/style/su741308/h44364#h44364",
-    "success": false,
-    "error": "Failed to scrape Next: Failed to scrape direct page (No usable product HTML returned), HTML fallbacks failed (https://www.next.ae/en/style/su741308/h44364: No usable product HTML returned; https://www.next.co.uk/style/su741308/h44364: No usable product HTML returned; https://www.next.us/en/style/su741308/h44364: No usable product HTML returned; https://www.nextdirect.com/eg/en/style/su741308/h44364: No usable product HTML returned), Playwright fallbacks failed (https://www.next.ae/en/style/su741308/h44364: Playwright returned non-product HTML; https://www.next.co.uk/style/su741308/h44364: Playwright returned non-product HTML; https://www.next.us/en/style/su741308/h44364: Playwright returned non-product HTML; https://www.nextdirect.com/eg/en/style/su741308/h44364: Playwright returned non-product HTML), managed bypass fallbacks failed (), and Reader fallbacks failed (reader: no usable markdown returned)"
+    "success": true,
+    "durationMs": 11159,
+    "supplier": "Next",
+    "title": "Pink and White Broderie 2pk Baby Bucket Hat",
+    "price": 71,
+    "currency": "AED",
+    "brand": "Next",
+    "imageCount": 5,
+    "variantCount": 6,
+    "options": [
+      {
+        "name": "Size",
+        "values": [
+          "Up To 3 Months (50 - 62cm)",
+          "3-6 Months (62-68cm)",
+          "6-12 Months (68-80cm)",
+          "12-18 Months (80-86cm)",
+          "1.5-2 Years (86-92cm)"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "MaxFashion 2",
     "url": "https://www.maxfashion.com/ae/en/buy-minnie-mouse-print-tshirt-and-short-leggings-set/p/B26KIGFECHAR324AEEXWHITELIGHT",
     "success": true,
-    "status": "manual_snapshot_required",
-    "note": "Supplier blocked automated access. Provide pasted page text snapshot to complete extraction.",
-    "error": "Max Fashion blocked automated server access to this product page. Open the product in your browser and paste the visible product text to analyze it from a page snapshot."
+    "durationMs": 9576,
+    "supplier": "Max Fashion",
+    "title": "Minnie Mouse Print T-shirt and Short Leggings Set",
+    "price": 45,
+    "currency": "AED",
+    "brand": "MAX",
+    "imageCount": 7,
+    "variantCount": 6,
+    "options": [
+      {
+        "name": "Color",
+        "values": [
+          "White"
+        ]
+      },
+      {
+        "name": "Size",
+        "values": [
+          "0-3 mths",
+          "3-6 mths",
+          "6-9 mths",
+          "9-12 mths",
+          "12-18 mths",
+          "18-24 mths"
+        ]
+      }
+    ],
+    "issues": []
   },
   {
     "name": "M&S UAE 2",
     "url": "https://www.marksandspencerme.com/en-ae/l/pure-cotton-romper-with-bib-0-3-yrs-/p/T784671D",
     "success": true,
-    "durationMs": 1049,
+    "durationMs": 876,
     "supplier": "Marks & Spencer",
     "title": "Pure Cotton Romper with Bib (0-3 Yrs)",
     "price": 85,
     "currency": "AED",
     "brand": "M&S",
-    "imageCount": 1,
-    "variantCount": 13,
+    "imageCount": 4,
+    "variantCount": 12,
     "options": [
       {
         "name": "Color",
@@ -128,7 +252,7 @@
     "name": "Primark US",
     "url": "https://www.primark.com/en-us/p/0-36mths-shirred-top-and-shorts-set-blue-991167715505",
     "success": true,
-    "durationMs": 1960,
+    "durationMs": 1955,
     "supplier": "Generic",
     "title": "0-36mths | Shirred Top and Shorts Set",
     "price": 18,
@@ -150,23 +274,20 @@
     "name": "Carters AE",
     "url": "https://ae.carters.com/purelysoft-baby-girls-flamingo-print-dress-ivory-1u662210/",
     "success": true,
-    "durationMs": 1791,
+    "durationMs": 2955,
     "supplier": "Generic",
     "title": "PurelySoft Baby Girls Flamingo Print Dress, Ivory",
     "price": 65,
     "currency": "AED",
     "brand": "Carters",
     "imageCount": 2,
-    "variantCount": 5,
+    "variantCount": 2,
     "options": [
       {
         "name": "Size",
         "values": [
           "Baby PREEMIE - 24M",
-          "Toddler 2T - 5T",
-          "Toddler Girl 2T to 5T",
-          "Toddler Boy 2T to 5T",
-          "1"
+          "Toddler 2T - 5T"
         ]
       }
     ],
@@ -176,7 +297,7 @@
     "name": "Adidas AE",
     "url": "https://www.adidas.ae/en/adidas-disney-sl-72-rs-elastic-lace-shoes/IH1707.html",
     "success": true,
-    "durationMs": 400,
+    "durationMs": 605,
     "supplier": "Adidas",
     "title": "ADIDAS DISNEY SL 72 RS ELASTIC LACE SHOES",
     "price": 329,
@@ -223,7 +344,7 @@
     "name": "Lefties XE",
     "url": "https://www.lefties.com/xe/kids/girl/new-in/embroidered-textured-dress-c1030267676p732631353.html?colorId=653&parentId=732634941",
     "success": true,
-    "durationMs": 1054,
+    "durationMs": 1050,
     "supplier": "Lefties",
     "title": "Embroidered textured dress",
     "price": 89,
@@ -256,14 +377,14 @@
     "name": "H&M EG",
     "url": "https://eg.hm.com/en/buy-2-piece-cotton-set-light-blue-cream",
     "success": true,
-    "durationMs": 632,
+    "durationMs": 702,
     "supplier": "H&M",
     "title": "2-piece cotton set",
     "price": 1399,
     "currency": "EGP",
     "brand": "H&M",
     "imageCount": 7,
-    "variantCount": 5,
+    "variantCount": 6,
     "options": [
       {
         "name": "Color",
@@ -274,6 +395,7 @@
       {
         "name": "Size",
         "values": [
+          "1.5-2 Years",
           "6-9 Months",
           "9-12 Months",
           "12-18 Months",
@@ -288,7 +410,7 @@
     "name": "Centrepoint",
     "url": "https://www.centrepointstores.com/ae/en/buy-juniors-round-neck-short-sleeve-tshirt-and-dungaree-set-with-alligator-applique/p/K31-A15-13-427MULTICOLORMULTISHADE",
     "success": true,
-    "durationMs": 3654,
+    "durationMs": 2176,
     "supplier": "Centrepoint",
     "title": "Juniors Round Neck Short Sleeve T-shirt and Dungaree Set with Alligator Applique",
     "price": 45,

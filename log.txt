@@ -33,3 +33,7 @@
 2026-05-16 08:18:38.408 +03:00 [VRB] Converting params for Notification $/setTrace to OmniSharp.Extensions.LanguageServer.Protocol.Models.SetTraceParams
 2026-05-16 08:18:38.415 +03:00 [DBG] Finished: Routing Notification $/setTrace in 6ms
 2026-05-16 08:18:38.415 +03:00 [DBG] Finished: Processing notification $/setTrace in 7ms
+2026-05-16 19:42:00.743 +03:00 [VRB] Could not write to output handler, perhaps serialization failed?
+System.Threading.Channels.ChannelClosedException: The channel has been closed.
+   at System.Threading.Channels.AsyncOperation`1.GetResult(Int16 token)
+   at OmniSharp.Extensions.JsonRpc.OutputHandler.ProcessOutputStream(CancellationToken cancellationToken)
