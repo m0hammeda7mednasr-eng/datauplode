@@ -475,7 +475,7 @@ export default function ImportProduct() {
                 <div>
                   <div className="text-xs font-black uppercase tracking-widest">{blockedSupplierName} blocked server analysis</div>
                   <p className="mt-1 text-xs font-semibold leading-relaxed text-amber-900">
-                    Use a browser page snapshot for this product so Syncly does not spend managed bypass credits.
+                    Use a browser page snapshot for this product so Syncly can continue extraction safely.
                   </p>
                 </div>
                 <textarea

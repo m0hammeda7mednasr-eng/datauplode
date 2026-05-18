@@ -122,3 +122,15 @@ NEXT_FAST_BYPASS_PREMIUM=false
 NEXT_FAST_BYPASS_RACE=true
 SCRAPER_BYPASS_RACE_MAX_PROVIDERS=2
 ```
+
+### Local Scraping Only (No external bypass or site APIs)
+If you want to run only your in-house scrapers and avoid external bypass/API calls:
+
+```env
+SCRAPER_LOCAL_ONLY_MODE=true
+SCRAPER_BYPASS_MODE=never
+SCRAPER_READER_FALLBACK=false
+NEXT_SITE_API_ENABLED=false
+```
+
+This keeps extraction on direct HTML/browser-rendered scraping and falls back to pasted page snapshots when blocked.

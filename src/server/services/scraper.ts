@@ -197,6 +197,20 @@ function envFlag(name: string, defaultValue = false): boolean {
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
+function scraperLocalOnlyMode(): boolean {
+  return envFlag("SCRAPER_LOCAL_ONLY_MODE", false);
+}
+
+function externalReaderEnabled(): boolean {
+  if (scraperLocalOnlyMode()) return false;
+  return envFlag("SCRAPER_READER_FALLBACK", true);
+}
+
+function nextSiteApiEnabled(): boolean {
+  if (scraperLocalOnlyMode()) return false;
+  return envFlag("NEXT_SITE_API_ENABLED", true);
+}
+
 function normalizeManagedBypassMode(value: string): ManagedBypassMode {
   const normalized = cleanText(value).toLowerCase();
   if (["always", "force", "on"].includes(normalized)) return "always";
@@ -205,6 +219,7 @@ function normalizeManagedBypassMode(value: string): ManagedBypassMode {
 }
 
 function managedBypassMode(): ManagedBypassMode {
+  if (scraperLocalOnlyMode()) return "never";
   return normalizeManagedBypassMode(process.env.SCRAPER_BYPASS_MODE || "never");
 }
 
@@ -6609,6 +6624,12 @@ async function fetchReaderMarkdown(
   url: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<string> {
+  if (!externalReaderEnabled()) {
+    throw new Error(
+      "Reader fallback is disabled by SCRAPER_LOCAL_ONLY_MODE or SCRAPER_READER_FALLBACK",
+    );
+  }
+
   const { data, status } = await axios.get(`https://r.jina.ai/${url}`, {
     headers: {
       Accept: "text/plain",
@@ -8145,7 +8166,7 @@ export class NextScraper implements SupplierScraper {
       // Try to extract product ID and style ID from URL
       // https://www.nextdirect.com/eg/ar/style/su864117/y13998#y13998
       const urlMatch = url.match(/style\/([a-z0-9]+)\/([a-z0-9]+)/i);
-      if (urlMatch) {
+      if (urlMatch && nextSiteApiEnabled()) {
         const [, styleId, productId] = urlMatch;
         const apiUrls = [
           `https://www.next.ae/api/product/v1/product/${styleId}/${productId}`,
