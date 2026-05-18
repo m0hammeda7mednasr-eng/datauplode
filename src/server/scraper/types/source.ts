@@ -22,6 +22,7 @@ export type ProductSelectors = {
 
 export type SourceInput = {
   url?: string;
+  brandKey?: string;
   sourceType: SourceType;
   allowedDomains?: string[];
   mode?: SourceMode;

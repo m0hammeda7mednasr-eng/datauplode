@@ -7,11 +7,144 @@ import type { SourceInput } from "../scraper/types/source.js";
 const router = Router();
 const discovery = new CategoryDiscoveryService();
 
+type BrandStrategy = {
+  key: string;
+  name: string;
+  sourceType: SourceInput["sourceType"];
+  mode: NonNullable<SourceInput["mode"]>;
+  notes: string;
+};
+
+const BRAND_STRATEGIES: BrandStrategy[] = [
+  {
+    key: "next",
+    name: "Next",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Auto strategy with retailer-specific extraction chain.",
+  },
+  {
+    key: "max",
+    name: "Max Fashion",
+    sourceType: "product_url",
+    mode: "browser_rendered",
+    notes: "Prefer browser-rendered product extraction for reliability.",
+  },
+  {
+    key: "shein",
+    name: "SHEIN",
+    sourceType: "product_url",
+    mode: "feed",
+    notes: "Use feed/manual-safe path to reduce block loops.",
+  },
+  {
+    key: "hm",
+    name: "H&M",
+    sourceType: "product_url",
+    mode: "browser_rendered",
+    notes: "Browser-rendered strategy for dynamic product pages.",
+  },
+  {
+    key: "lefties",
+    name: "Lefties",
+    sourceType: "product_url",
+    mode: "browser_rendered",
+    notes: "Browser-rendered extraction with conservative pacing.",
+  },
+  {
+    key: "centrepoint",
+    name: "Centrepoint",
+    sourceType: "product_url",
+    mode: "browser_rendered",
+    notes: "Browser-rendered extraction for stable variant capture.",
+  },
+  {
+    key: "gap",
+    name: "Gap",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Auto strategy with direct HTML first.",
+  },
+  {
+    key: "zara",
+    name: "Zara",
+    sourceType: "product_url",
+    mode: "browser_rendered",
+    notes: "Browser-rendered strategy for modern storefront scripts.",
+  },
+  {
+    key: "marks_and_spencer",
+    name: "Marks & Spencer",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Auto strategy with supplier-specific parser.",
+  },
+  {
+    key: "primark",
+    name: "Primark",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Auto strategy for product page extraction.",
+  },
+  {
+    key: "mothercare",
+    name: "Mothercare",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Auto strategy for direct product URLs.",
+  },
+  {
+    key: "other",
+    name: "Other",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Fallback strategy for unsupported/unknown brands.",
+  },
+];
+
+const BRAND_KEY_BY_DOMAIN_FRAGMENT: Array<{ match: RegExp; key: string }> = [
+  { match: /next\./i, key: "next" },
+  { match: /maxfashion/i, key: "max" },
+  { match: /shein/i, key: "shein" },
+  { match: /(?:^|\.)hm\.com$/i, key: "hm" },
+  { match: /lefties/i, key: "lefties" },
+  { match: /centrepointstores/i, key: "centrepoint" },
+  { match: /gap\./i, key: "gap" },
+  { match: /zara\./i, key: "zara" },
+  { match: /marksandspencer/i, key: "marks_and_spencer" },
+  { match: /primark/i, key: "primark" },
+  { match: /mothercare/i, key: "mothercare" },
+];
+
+function inferBrandKeyFromUrl(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    for (const rule of BRAND_KEY_BY_DOMAIN_FRAGMENT) {
+      if (rule.match.test(host)) return rule.key;
+    }
+  } catch {}
+  return "other";
+}
+
+function strategyForBrand(brandKey?: string): BrandStrategy {
+  if (!brandKey) return BRAND_STRATEGIES[BRAND_STRATEGIES.length - 1];
+  return (
+    BRAND_STRATEGIES.find((entry) => entry.key === brandKey) ||
+    BRAND_STRATEGIES[BRAND_STRATEGIES.length - 1]
+  );
+}
+
 function inputFromBody(body: any): SourceInput {
+  const url = String(body.url || "").trim();
+  const selectedBrandKey = String(body.brandKey || "").trim().toLowerCase();
+  const inferredBrandKey = selectedBrandKey || inferBrandKeyFromUrl(url);
+  const strategy = strategyForBrand(inferredBrandKey);
+
   return {
-    url: String(body.url || "").trim(),
-    sourceType: body.sourceType || "product_url",
-    mode: body.mode || "auto",
+    url,
+    brandKey: strategy.key,
+    sourceType: strategy.sourceType,
+    mode: strategy.mode,
     allowedDomains: Array.isArray(body.allowedDomains) ? body.allowedDomains : undefined,
     customSelectors: body.customSelectors || undefined,
     rateLimit: body.rateLimit || undefined,
@@ -80,6 +213,10 @@ async function persistProducts(products: any[], sourceInput: SourceInput) {
   }
   return saved;
 }
+
+router.get("/scraper/brands", async (_req, res) => {
+  res.json({ brands: BRAND_STRATEGIES });
+});
 
 router.post("/scraper/test", async (req, res) => {
   const input = inputFromBody(req.body);
