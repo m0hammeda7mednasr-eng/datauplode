@@ -6,18 +6,10 @@ import { scraperApi } from "../api/scraperApi";
 import type { ScraperBrandStrategy, SourceInput } from "../types/source";
 
 const FALLBACK_BRANDS: ScraperBrandStrategy[] = [
+  { key: "other", name: "Other (Recommended)", sourceType: "product_url", mode: "auto", notes: "Use this for all normal brands that do not need special handling." },
   { key: "next", name: "Next", sourceType: "product_url", mode: "auto", notes: "Auto strategy with retailer-specific extraction chain." },
   { key: "max", name: "Max Fashion", sourceType: "product_url", mode: "browser_rendered", notes: "Prefer browser-rendered product extraction for reliability." },
   { key: "shein", name: "SHEIN", sourceType: "product_url", mode: "feed", notes: "Use feed/manual-safe path to reduce block loops." },
-  { key: "hm", name: "H&M", sourceType: "product_url", mode: "browser_rendered", notes: "Browser-rendered strategy for dynamic product pages." },
-  { key: "lefties", name: "Lefties", sourceType: "product_url", mode: "browser_rendered", notes: "Browser-rendered extraction with conservative pacing." },
-  { key: "centrepoint", name: "Centrepoint", sourceType: "product_url", mode: "browser_rendered", notes: "Browser-rendered extraction for stable variant capture." },
-  { key: "gap", name: "Gap", sourceType: "product_url", mode: "auto", notes: "Auto strategy with direct HTML first." },
-  { key: "zara", name: "Zara", sourceType: "product_url", mode: "browser_rendered", notes: "Browser-rendered strategy for modern storefront scripts." },
-  { key: "marks_and_spencer", name: "Marks & Spencer", sourceType: "product_url", mode: "auto", notes: "Auto strategy with supplier-specific parser." },
-  { key: "primark", name: "Primark", sourceType: "product_url", mode: "auto", notes: "Auto strategy for product page extraction." },
-  { key: "mothercare", name: "Mothercare", sourceType: "product_url", mode: "auto", notes: "Auto strategy for direct product URLs." },
-  { key: "other", name: "Other", sourceType: "product_url", mode: "auto", notes: "Fallback strategy for unsupported/unknown brands." },
 ];
 
 export default function ScraperPage() {
@@ -31,18 +23,18 @@ export default function ScraperPage() {
   });
 
   const selectedBrand = useMemo(() => {
+    const fallback = brandOptions.find((brand) => brand.key === "other") || FALLBACK_BRANDS[0];
     return (
       brandOptions.find((brand) => brand.key === (input.brandKey || "other")) ||
-      brandOptions.find((brand) => brand.key === "other") ||
-      FALLBACK_BRANDS[FALLBACK_BRANDS.length - 1]
+      fallback
     );
   }, [brandOptions, input.brandKey]);
 
   const applyBrandStrategy = (brandKey: string) => {
+    const fallback = brandOptions.find((brand) => brand.key === "other") || FALLBACK_BRANDS[0];
     const strategy =
       brandOptions.find((brand) => brand.key === brandKey) ||
-      brandOptions.find((brand) => brand.key === "other") ||
-      FALLBACK_BRANDS[FALLBACK_BRANDS.length - 1];
+      fallback;
 
     setInput((current) => ({
       ...current,

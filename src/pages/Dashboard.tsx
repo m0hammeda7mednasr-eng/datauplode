@@ -15,19 +15,10 @@ import axios from "axios";
 import { cn } from "../lib/utils";
 
 const IMPORTANT_BRANDS = [
+  "Other (default)",
   "Next",
   "Max Fashion",
-  "Marks & Spencer",
-  "H&M",
-  "Lefties",
-  "Centrepoint",
-  "Gap",
-  "Zara",
-  "Adidas",
-  "Primark",
-  "Mothercare",
   "SHEIN",
-  "Other",
 ];
 
 function formatRelative(value?: string) {
@@ -110,7 +101,7 @@ export default function Dashboard() {
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-slate-900">{item.title}</p>
                     <p className="text-[11px] font-medium text-slate-500">
-                      {item.supplier?.name || "Supplier"} • {item.currency || "-"} {item.price ?? "-"}
+                      {item.supplier?.name || "Supplier"} | {item.currency || "-"} {item.price ?? "-"}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -174,7 +165,7 @@ export default function Dashboard() {
           <div className="rounded-xl border border-card-border bg-white p-5">
             <h2 className="text-sm font-black uppercase tracking-widest text-slate-500">Brand Tester</h2>
             <p className="mt-2 text-xs font-medium leading-relaxed text-slate-600">
-              Dropdown location: <span className="font-bold text-slate-900">Extractor → Brand</span>. Use it to test the important brands only.
+              Dropdown location: <span className="font-bold text-slate-900">Extractor -&gt; Brand</span>. Use it to test special brands only; keep normal sites on Other.
             </p>
             <Link
               to="/scraper"
@@ -254,4 +245,3 @@ function StatCard({
     </div>
   );
 }
-

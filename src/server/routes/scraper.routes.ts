@@ -17,88 +17,32 @@ type BrandStrategy = {
 
 const BRAND_STRATEGIES: BrandStrategy[] = [
   {
+    key: "other",
+    name: "Other (Recommended)",
+    sourceType: "product_url",
+    mode: "auto",
+    notes: "Use this for all normal brands that do not need special handling.",
+  },
+  {
     key: "next",
     name: "Next",
     sourceType: "product_url",
     mode: "auto",
-    notes: "Auto strategy with retailer-specific extraction chain.",
+    notes: "Special handling for Next when direct scraping gets blocked intermittently.",
   },
   {
     key: "max",
     name: "Max Fashion",
     sourceType: "product_url",
     mode: "browser_rendered",
-    notes: "Prefer browser-rendered product extraction for reliability.",
+    notes: "Special handling for Max Fashion with browser-rendered fallback path.",
   },
   {
     key: "shein",
     name: "SHEIN",
     sourceType: "product_url",
     mode: "feed",
-    notes: "Use feed/manual-safe path to reduce block loops.",
-  },
-  {
-    key: "hm",
-    name: "H&M",
-    sourceType: "product_url",
-    mode: "browser_rendered",
-    notes: "Browser-rendered strategy for dynamic product pages.",
-  },
-  {
-    key: "lefties",
-    name: "Lefties",
-    sourceType: "product_url",
-    mode: "browser_rendered",
-    notes: "Browser-rendered extraction with conservative pacing.",
-  },
-  {
-    key: "centrepoint",
-    name: "Centrepoint",
-    sourceType: "product_url",
-    mode: "browser_rendered",
-    notes: "Browser-rendered extraction for stable variant capture.",
-  },
-  {
-    key: "gap",
-    name: "Gap",
-    sourceType: "product_url",
-    mode: "auto",
-    notes: "Auto strategy with direct HTML first.",
-  },
-  {
-    key: "zara",
-    name: "Zara",
-    sourceType: "product_url",
-    mode: "browser_rendered",
-    notes: "Browser-rendered strategy for modern storefront scripts.",
-  },
-  {
-    key: "marks_and_spencer",
-    name: "Marks & Spencer",
-    sourceType: "product_url",
-    mode: "auto",
-    notes: "Auto strategy with supplier-specific parser.",
-  },
-  {
-    key: "primark",
-    name: "Primark",
-    sourceType: "product_url",
-    mode: "auto",
-    notes: "Auto strategy for product page extraction.",
-  },
-  {
-    key: "mothercare",
-    name: "Mothercare",
-    sourceType: "product_url",
-    mode: "auto",
-    notes: "Auto strategy for direct product URLs.",
-  },
-  {
-    key: "other",
-    name: "Other",
-    sourceType: "product_url",
-    mode: "auto",
-    notes: "Fallback strategy for unsupported/unknown brands.",
+    notes: "Special handling for SHEIN where manual snapshot/feed path is usually required.",
   },
 ];
 
@@ -106,14 +50,6 @@ const BRAND_KEY_BY_DOMAIN_FRAGMENT: Array<{ match: RegExp; key: string }> = [
   { match: /next\./i, key: "next" },
   { match: /maxfashion/i, key: "max" },
   { match: /shein/i, key: "shein" },
-  { match: /(?:^|\.)hm\.com$/i, key: "hm" },
-  { match: /lefties/i, key: "lefties" },
-  { match: /centrepointstores/i, key: "centrepoint" },
-  { match: /gap\./i, key: "gap" },
-  { match: /zara\./i, key: "zara" },
-  { match: /marksandspencer/i, key: "marks_and_spencer" },
-  { match: /primark/i, key: "primark" },
-  { match: /mothercare/i, key: "mothercare" },
 ];
 
 function inferBrandKeyFromUrl(url: string): string {
@@ -127,10 +63,11 @@ function inferBrandKeyFromUrl(url: string): string {
 }
 
 function strategyForBrand(brandKey?: string): BrandStrategy {
-  if (!brandKey) return BRAND_STRATEGIES[BRAND_STRATEGIES.length - 1];
+  const fallback = BRAND_STRATEGIES.find((entry) => entry.key === "other") || BRAND_STRATEGIES[0];
+  if (!brandKey) return fallback;
   return (
     BRAND_STRATEGIES.find((entry) => entry.key === brandKey) ||
-    BRAND_STRATEGIES[BRAND_STRATEGIES.length - 1]
+    fallback
   );
 }
 
