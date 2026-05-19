@@ -1990,7 +1990,8 @@ router.get("/shopify/collections", async (req, res) => {
       });
     }
 
-    res.status(500).json({ error: error.message });
+    console.error("Failed to load Shopify collections:", error.message);
+    res.json([]);
   }
 });
 
