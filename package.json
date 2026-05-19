@@ -21,6 +21,7 @@
     "test:scraper:regression": "tsx test-scraper-regression.ts",
     "test:scraper:all": "npm run test:scraper:urls && npm run test:scraper:regression",
     "test:scraper:demo": "tsx test-scraper-demo.ts",
+    "test:brand-matrix": "tsx test-brand-matrix-professional.ts",
     "test:extraction-engine": "tsx test-extraction-engine.ts",
     "test:brand-limits": "tsx test-brand-limits.ts",
     "test:source-scan": "tsx test-source-capability-scanner.ts",
