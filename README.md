@@ -156,6 +156,15 @@ Run the worker locally:
 npm run bridge:worker
 ```
 
+For challenge-heavy domains, run the worker with a visible browser and allow interactive solve:
+
+```env
+LOCAL_BRIDGE_HEADLESS=false
+LOCAL_BRIDGE_ALLOW_INTERACTIVE_SOLVE=true
+LOCAL_BRIDGE_INTERACTIVE_WAIT_MS=90000
+LOCAL_BRIDGE_PROMPT_ON_BLOCKED=true
+```
+
 How it works:
 - Production returns a blocked response and creates a local bridge task.
 - Your local worker claims the task, opens the URL with Playwright from your local IP, captures visible page text, and submits it back.

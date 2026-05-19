@@ -1,6 +1,8 @@
 import "dotenv/config";
 import axios from "axios";
 import { chromium } from "playwright";
+import { createInterface } from "node:readline";
+import { stdin as input, stdout as output } from "node:process";
 
 type BridgeTask = {
   id: string;
@@ -47,52 +49,178 @@ function compactVisibleText(input: string): string {
     .trim();
 }
 
+function isBlockedSnapshotText(text: string): boolean {
+  return /Title:\s*(Access Denied|404|Page Not Found)|Target URL returned error\s+(403|404)|You don't have permission to access|404\s*\|\s*Page Not Found|Oops'\s+Something's gone wrong|security verification|captcha|access-denied|forbidden/i.test(
+    text,
+  );
+}
+
+function nextCookieSeed(url: string) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+
+    if (host.includes("next.ae")) {
+      return { country: "ae", language: path.includes("/ar/") ? "ar" : "en" };
+    }
+    if (host.includes("nextdirect.com")) {
+      if (path.includes("/eg/ar/")) return { country: "eg", language: "ar" };
+      if (path.includes("/eg/")) return { country: "eg", language: "en" };
+    }
+    if (host.includes("next.co.uk")) return { country: "gb", language: "en" };
+    if (host.includes("next.us")) return { country: "us", language: "en" };
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function collectVisibleText(page: import("playwright").Page) {
+  const text = await page.evaluate(() => {
+    const chunks: string[] = [];
+    const title = document.title?.trim();
+    if (title) chunks.push(`Title: ${title}`);
+
+    const metaSelectors = [
+      'meta[property="og:title"]',
+      'meta[property="og:description"]',
+      'meta[name="description"]',
+    ];
+
+    for (const selector of metaSelectors) {
+      const content = document
+        .querySelector(selector)
+        ?.getAttribute("content")
+        ?.trim();
+      if (content) chunks.push(content);
+    }
+
+    const bodyText = document.body?.innerText || "";
+    if (bodyText.trim()) chunks.push(bodyText);
+    return chunks.join("\n\n");
+  });
+
+  return compactVisibleText(text);
+}
+
 async function capturePageText(url: string, timeoutMs: number, settleMs: number) {
-  const browser = await chromium.launch({ headless: envFlag("LOCAL_BRIDGE_HEADLESS", true) });
+  const headless = envFlag("LOCAL_BRIDGE_HEADLESS", true);
+  const browser = await chromium.launch({
+    headless,
+    args: ["--disable-blink-features=AutomationControlled"],
+  });
   try {
     const context = await browser.newContext({
       userAgent:
         envString(
           "LOCAL_BRIDGE_USER_AGENT",
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
         ),
-      viewport: { width: 1366, height: 920 },
-      locale: envString("LOCAL_BRIDGE_LOCALE", "en-US"),
+      viewport: { width: 390, height: 844 },
+      locale: envString("LOCAL_BRIDGE_LOCALE", "en-AE"),
+    });
+    const nextSeed = nextCookieSeed(url);
+    if (nextSeed) {
+      const parsed = new URL(url);
+      const domain = `.${parsed.hostname.replace(/^www\./i, "")}`;
+      await context.addCookies([
+        {
+          name: "Country",
+          value: nextSeed.country,
+          domain,
+          path: "/",
+        },
+        {
+          name: "Language",
+          value: nextSeed.language,
+          domain,
+          path: "/",
+        },
+        {
+          name: "OptanonAlertBoxClosed",
+          value: "2024-01-01T00:00:00.000Z",
+          domain,
+          path: "/",
+        },
+      ]);
+    }
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
     const page = await context.newPage();
+    await page.setExtraHTTPHeaders({
+      "accept-language": envString("LOCAL_BRIDGE_ACCEPT_LANGUAGE", "en-AE,en;q=0.9,ar;q=0.8"),
+    });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     if (settleMs > 0) await page.waitForTimeout(settleMs);
 
-    const text = await page.evaluate(() => {
-      const chunks: string[] = [];
-      const title = document.title?.trim();
-      if (title) chunks.push(`Title: ${title}`);
+    let text = await collectVisibleText(page);
+    const allowInteractiveSolve = envFlag("LOCAL_BRIDGE_ALLOW_INTERACTIVE_SOLVE", true);
+    const interactiveWaitMs = Math.max(
+      10000,
+      envNumber("LOCAL_BRIDGE_INTERACTIVE_WAIT_MS", 90000),
+    );
+    const interactivePollMs = Math.max(
+      2000,
+      envNumber("LOCAL_BRIDGE_INTERACTIVE_POLL_MS", 5000),
+    );
 
-      const metaSelectors = [
-        'meta[property="og:title"]',
-        'meta[property="og:description"]',
-        'meta[name="description"]',
-      ];
+    if (!headless && allowInteractiveSolve && isBlockedSnapshotText(text)) {
+      console.warn(
+        `[bridge] blocked page detected for ${url}. Solve challenge in the opened browser window (if shown). Waiting up to ${Math.round(
+          interactiveWaitMs / 1000,
+        )}s...`,
+      );
 
-      for (const selector of metaSelectors) {
-        const content = document
-          .querySelector(selector)
-          ?.getAttribute("content")
-          ?.trim();
-        if (content) chunks.push(content);
+      const start = Date.now();
+      while (Date.now() - start < interactiveWaitMs) {
+        await page.waitForTimeout(interactivePollMs);
+        text = await collectVisibleText(page);
+        if (!isBlockedSnapshotText(text)) break;
       }
+    }
 
-      const bodyText = document.body?.innerText || "";
-      if (bodyText.trim()) chunks.push(bodyText);
-      return chunks.join("\n\n");
-    });
+    if (isBlockedSnapshotText(text)) {
+      const finalUrl = page.url();
+      throw Object.assign(
+        new Error(
+          `Blocked snapshot page after interactive wait (url: ${finalUrl}).`,
+        ),
+        { code: "BRIDGE_BLOCKED_SNAPSHOT", status: 422 },
+      );
+    }
 
     await page.close();
     await context.close();
-    return compactVisibleText(text);
+    return text;
   } finally {
     await browser.close();
   }
+}
+
+async function promptForManualSnapshot(taskUrl: string): Promise<string> {
+  console.log(
+    `[bridge] manual fallback: open this URL in your normal browser and copy all visible product text:\n${taskUrl}`,
+  );
+  console.log(
+    `[bridge] paste the copied text below. Type ::end on a new line when done.`,
+  );
+
+  const rl = createInterface({ input, output });
+  const lines: string[] = [];
+
+  return await new Promise<string>((resolve) => {
+    rl.on("line", (line) => {
+      if (line.trim() === "::end") {
+        rl.close();
+        resolve(compactVisibleText(lines.join("\n")));
+        return;
+      }
+      lines.push(line);
+    });
+  });
 }
 
 async function run() {
@@ -102,6 +230,7 @@ async function run() {
   const timeoutMs = Math.max(5000, envNumber("LOCAL_BRIDGE_NAV_TIMEOUT_MS", 30000));
   const settleMs = Math.max(0, envNumber("LOCAL_BRIDGE_CAPTURE_WAIT_MS", 1200));
   const maxChars = Math.max(20000, envNumber("LOCAL_BRIDGE_MAX_TEXT_CHARS", 180000));
+  const promptOnBlocked = envFlag("LOCAL_BRIDGE_PROMPT_ON_BLOCKED", true);
 
   const client = axios.create({
     baseURL: apiBaseUrl,
@@ -158,15 +287,22 @@ async function run() {
       }
 
       console.log(`[bridge] claimed ${task.id} -> ${task.url}`);
-      const captured = await capturePageText(task.url, timeoutMs, settleMs);
-      const pageText = captured.slice(0, maxChars).trim();
+      let pageText = "";
+      try {
+        const captured = await capturePageText(task.url, timeoutMs, settleMs);
+        pageText = captured.slice(0, maxChars).trim();
+      } catch (captureError: any) {
+        if (captureError?.code === "BRIDGE_BLOCKED_SNAPSHOT" && promptOnBlocked) {
+          const manualText = await promptForManualSnapshot(task.url);
+          pageText = manualText.slice(0, maxChars).trim();
+        } else {
+          throw captureError;
+        }
+      }
 
       if (!pageText) {
-        console.error(`[bridge] empty page text for task ${task.id}`);
-        await client.post(`/bridge/tasks/${task.id}/submit`, {
-          pageText: "Page opened but no visible text was captured.",
-        });
-        await sleep(1000);
+        console.error(`[bridge] empty page text for task ${task.id}; waiting for task reclaim`);
+        await sleep(pollMs);
         continue;
       }
 
