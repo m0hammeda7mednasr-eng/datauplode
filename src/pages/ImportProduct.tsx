@@ -165,7 +165,11 @@ export default function ImportProduct() {
       const responsePayload = error?.response?.data;
       if (
         responsePayload?.retryWithSnapshot &&
-        (responsePayload?.code === 'SOURCE_BLOCKED' || responsePayload?.code === 'NEXT_SIZE_VALUES_MISSING')
+        (
+          responsePayload?.code === 'SOURCE_BLOCKED' ||
+          responsePayload?.code === 'NEXT_SIZE_VALUES_MISSING' ||
+          responsePayload?.code === 'SNAPSHOT_MISMATCH'
+        )
       ) {
         setBlockedImport(responsePayload);
       }

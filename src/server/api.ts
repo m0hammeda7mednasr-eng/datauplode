@@ -195,6 +195,34 @@ function isNextHost(url: string): boolean {
   }
 }
 
+function expectedSupplierForUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (/(^|\.)next\./i.test(host) || /nextdirect\.com/i.test(host))
+      return "Next";
+    if (/maxfashion/i.test(host)) return "Max Fashion";
+    if (/centrepointstores/i.test(host)) return "Centrepoint";
+    if (/shein/i.test(host)) return "SHEIN";
+    if (/marksandspencer/i.test(host)) return "Marks & Spencer";
+    if (/(^|\.)hm\.com$/i.test(host)) return "H&M";
+    if (/lefties/i.test(host)) return "Lefties";
+    if (/gap\./i.test(host)) return "Gap";
+    if (/zara\./i.test(host)) return "Zara";
+    if (/mothercare/i.test(host)) return "Mothercare";
+    if (/adidas\./i.test(host)) return "Adidas";
+    if (/primark/i.test(host)) return "Primark";
+  } catch {}
+
+  return null;
+}
+
+function productSupplierMatchesUrl(url: string, product: NormalizedProduct | null | undefined): boolean {
+  if (!product?.source?.supplier) return true;
+  const expected = expectedSupplierForUrl(url);
+  if (!expected) return true;
+  return normalizeLabel(product.source.supplier) === normalizeLabel(expected);
+}
+
 function isNextProductUrl(url: string): boolean {
   return isNextHost(url) && /\/style\/[a-z0-9]+\/[a-z0-9]+/i.test(url);
 }
@@ -986,9 +1014,15 @@ router.post("/imports/analyze", async (req, res) => {
     }
 
     let data = !snapshotText ? getCachedAnalyzeProduct(url) : undefined;
+    if (data && !productSupplierMatchesUrl(url, data)) {
+      data = undefined;
+    }
 
     if (!data && !snapshotText) {
       data = await waitForAnalyzePrewarm(url);
+      if (data && !productSupplierMatchesUrl(url, data)) {
+        data = undefined;
+      }
     }
 
     if (!data && !snapshotText) {
@@ -1007,17 +1041,34 @@ router.post("/imports/analyze", async (req, res) => {
           : null;
 
       if (cachedSourceProduct) {
-        data = sourceProductToNormalizedProduct(cachedSourceProduct);
-        setCachedAnalyzeProduct(url, data);
+        const cachedProduct = sourceProductToNormalizedProduct(cachedSourceProduct);
+        if (productSupplierMatchesUrl(url, cachedProduct)) {
+          data = cachedProduct;
+          setCachedAnalyzeProduct(url, data);
+        }
       }
     }
 
-    if (!data) {
-      if (snapshotText) {
-        data = await scraperService.scrapeSnapshot(url, snapshotText);
-      } else {
-        try {
-          data = await scraperService.scrape(url);
+      if (!data) {
+        if (snapshotText) {
+          data = await scraperService.scrapeSnapshot(url, snapshotText);
+          if (!productSupplierMatchesUrl(url, data)) {
+            const expected = expectedSupplierForUrl(url) || "the target supplier";
+            throw Object.assign(
+              new Error(
+                `Snapshot text does not match this URL. Open the same product page (${expected}), copy its visible text, then analyze again.`,
+              ),
+              {
+                status: 422,
+                code: "SNAPSHOT_MISMATCH",
+                retryWithSnapshot: true,
+                supplier: expected,
+              },
+            );
+          }
+        } else {
+          try {
+            data = await scraperService.scrape(url);
         } catch (error) {
           if (!isSnapshotRequiredError(error)) throw error;
 
@@ -1032,7 +1083,9 @@ router.post("/imports/analyze", async (req, res) => {
           });
           if (!staleSourceProduct) throw error;
 
-          data = sourceProductToNormalizedProduct(staleSourceProduct);
+          const staleProduct = sourceProductToNormalizedProduct(staleSourceProduct);
+          if (!productSupplierMatchesUrl(url, staleProduct)) throw error;
+          data = staleProduct;
           data.raw = {
             ...(data.raw || {}),
             staleCacheFallback: true,
