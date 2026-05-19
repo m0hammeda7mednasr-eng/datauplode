@@ -32,7 +32,7 @@ export default function Settings() {
   const [oauthLink, setOauthLink] = useState('');
   const queryClient = useQueryClient();
 
-  const { data: config, isLoading: isLoadingConfig } = useQuery({
+  const { data: config, isLoading: isLoadingConfig, isError: isConfigError, error: configError } = useQuery({
     queryKey: ['shopify-config'],
     queryFn: async () => {
       const { data } = await axios.get('/api/settings/shopify');
@@ -320,54 +320,64 @@ export default function Settings() {
                     Test Reachability
                   </button>
 
-                  {config && (
-                    <>
+                  <>
+                    <button 
+                      type="button"
+                      onClick={() => connectMutation.mutate()}
+                      disabled={connectMutation.isPending || Boolean(config?.isConnected) || !canConnect}
+                      className={cn(
+                        "px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
+                        Boolean(config?.isConnected) || !canConnect
+                          ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed" 
+                          : "bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-50"
+                      )}
+                    >
+                      {connectMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link size={14} />}
+                      {config?.isConnected ? 'Connected to Shopify' : 'Connect Store'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => generateLinkMutation.mutate()}
+                      disabled={generateLinkMutation.isPending || !canConnect}
+                      className={cn(
+                        "px-6 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
+                        !canConnect
+                          ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed"
+                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      )}
+                    >
+                      {generateLinkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe size={14} />}
+                      Generate OAuth Link
+                    </button>
+
+                    {config?.isConnected && (
                       <button 
                         type="button"
-                        onClick={() => connectMutation.mutate()}
-                        disabled={connectMutation.isPending || config.isConnected || !canConnect}
-                        className={cn(
-                          "px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
-                          config.isConnected || !canConnect
-                            ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed" 
-                            : "bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-50"
-                        )}
+                        onClick={() => {
+                          if (confirm('Disconnect from Shopify? This will stop all synchronization.')) {
+                            disconnectMutation.mutate();
+                          }
+                        }}
+                        className="px-6 py-3 text-xs font-black text-rose-500 uppercase tracking-widest border border-rose-100 rounded-xl hover:bg-rose-50 transition-all"
                       >
-                        {connectMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link size={14} />}
-                        {config.isConnected ? 'Connected to Shopify' : 'Connect Store'}
+                        Disconnect
                       </button>
-
-                      <button
-                        type="button"
-                        onClick={() => generateLinkMutation.mutate()}
-                        disabled={generateLinkMutation.isPending || !canConnect}
-                        className={cn(
-                          "px-6 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
-                          !canConnect
-                            ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed"
-                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                        )}
-                      >
-                        {generateLinkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe size={14} />}
-                        Generate OAuth Link
-                      </button>
-
-                      {config.isConnected && (
-                        <button 
-                          type="button"
-                          onClick={() => {
-                            if (confirm('Disconnect from Shopify? This will stop all synchronization.')) {
-                              disconnectMutation.mutate();
-                            }
-                          }}
-                          className="px-6 py-3 text-xs font-black text-rose-500 uppercase tracking-widest border border-rose-100 rounded-xl hover:bg-rose-50 transition-all"
-                        >
-                          Disconnect
-                        </button>
-                      )}
-                    </>
-                  )}
+                    )}
+                  </>
                 </div>
+
+                {!canConnect && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs font-semibold leading-relaxed text-amber-900">
+                    Save Shopify credentials first (shop domain, client id, client secret), then Generate OAuth Link.
+                  </div>
+                )}
+
+                {isConfigError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs font-semibold leading-relaxed text-rose-900">
+                    Could not load Shopify settings from backend: {apiErrorMessage(configError, 'Backend unavailable')}
+                  </div>
+                )}
 
                 {oauthLink && (
                   <div className="space-y-2">
