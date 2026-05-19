@@ -267,8 +267,8 @@ export default function ImportProduct() {
 
         if (data?.status === 'warming') {
           setPrewarmStatus('warming');
-          if (attempt < 20) {
-            pollTimer = window.setTimeout(() => prewarm(attempt + 1), 1500);
+          if (attempt < 4) {
+            pollTimer = window.setTimeout(() => prewarm(attempt + 1), 2500);
           }
           return;
         }

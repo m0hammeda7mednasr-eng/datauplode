@@ -166,6 +166,12 @@ function sleep(ms: number) {
 }
 
 function shouldPrewarmAnalyzeUrl(url: string): boolean {
+  // In strict local-only mode prewarm tends to loop on blocked sources (403),
+  // so we disable it to avoid repeated background requests.
+  if (envFlag("SCRAPER_LOCAL_ONLY_MODE", false)) return false;
+
+  if (!envFlag("ANALYZE_PREWARM_ENABLED", true)) return false;
+
   try {
     const host = new URL(url).hostname.toLowerCase();
     return (
