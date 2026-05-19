@@ -153,6 +153,15 @@ export function validateRuntimeEnv(): RuntimeValidationResult {
     );
   }
 
+  const localBridgeEnabled = envBoolean("LOCAL_BRIDGE_ENABLED", true);
+  const localBridgeRequireToken = envBoolean("LOCAL_BRIDGE_REQUIRE_TOKEN", true);
+  const localBridgeToken = envString("LOCAL_BRIDGE_TOKEN");
+  if (localBridgeEnabled && localBridgeRequireToken && !localBridgeToken) {
+    warnings.push(
+      "LOCAL_BRIDGE_TOKEN is missing while LOCAL_BRIDGE_REQUIRE_TOKEN is enabled; Local Worker Bridge will stay disabled.",
+    );
+  }
+
   return { ok: errors.length === 0, errors, warnings };
 }
 
@@ -164,4 +173,3 @@ export function printRuntimeValidation(result = validateRuntimeEnv()) {
     console.error(`[env:error] ${error}`);
   }
 }
-

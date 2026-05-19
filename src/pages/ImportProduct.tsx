@@ -234,6 +234,68 @@ export default function ImportProduct() {
   };
 
   useEffect(() => {
+    const bridgeTaskId = blockedImport?.bridge?.taskId;
+    const productUrl = url.trim();
+    if (!bridgeTaskId || !productUrl) return;
+    if (nextSnapshotText.trim()) return;
+
+    let pollTimer: number | undefined;
+    let cancelled = false;
+
+    const pollBridgeStatus = async () => {
+      try {
+        const { data } = await axios.get('/api/bridge/status', { params: { url: productUrl } });
+        if (cancelled) return;
+
+        const task = data?.task;
+        if (!task) {
+          pollTimer = window.setTimeout(pollBridgeStatus, 3000);
+          return;
+        }
+
+        setBlockedImport((prev: any) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            bridge: {
+              ...(prev.bridge || {}),
+              enabled: data?.enabled ?? prev?.bridge?.enabled,
+              reason: data?.reason ?? prev?.bridge?.reason,
+              taskId: task.id,
+              status: task.status,
+              lastError: task.lastError || null,
+            },
+          };
+        });
+
+        if (task.status === 'completed') {
+          toast.success('Local bridge captured the product snapshot. Re-analyzing now.');
+          analyzeMutation.mutate({ productUrl });
+          return;
+        }
+
+        if (task.status === 'failed') {
+          toast.error(task.lastError || 'Local bridge failed to capture a valid snapshot.');
+          return;
+        }
+
+        pollTimer = window.setTimeout(pollBridgeStatus, 2500);
+      } catch {
+        if (!cancelled) {
+          pollTimer = window.setTimeout(pollBridgeStatus, 3500);
+        }
+      }
+    };
+
+    pollTimer = window.setTimeout(pollBridgeStatus, 1400);
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+    };
+  }, [blockedImport?.bridge?.taskId, url, nextSnapshotText, analyzeMutation]);
+
+  useEffect(() => {
     setSelectedImageIndex(0);
     setSelectedImageUrls((analysisResult?.images || []).map((image: any) => image.url).filter(Boolean));
     setVariantImageOverrides({});
@@ -442,6 +504,10 @@ export default function ImportProduct() {
         : null)
     );
   const blockedSupplierName = blockedImport?.supplier || analysisResult?.source?.supplier || 'Supplier';
+  const bridgeTaskId = blockedImport?.bridge?.taskId || null;
+  const bridgeStatus = blockedImport?.bridge?.status || null;
+  const bridgeEnabled = blockedImport?.bridge?.enabled === true;
+  const bridgeReason = blockedImport?.bridge?.reason || null;
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-12">
@@ -495,6 +561,26 @@ export default function ImportProduct() {
                     Use a browser page snapshot for this product so Syncly can continue extraction safely.
                   </p>
                 </div>
+                {(blockedImport?.bridge || bridgeReason) && (
+                  <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-[11px] font-semibold text-sky-900">
+                    {bridgeEnabled ? (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-black uppercase tracking-widest text-sky-700">Local Worker Bridge Ready</div>
+                        <div>Run <span className="font-mono">npm run bridge:worker</span> on your local machine to auto-capture this page from your own IP.</div>
+                        <div className="flex items-center gap-2 font-mono text-[10px]">
+                          <span>Task: {bridgeTaskId || 'N/A'}</span>
+                          <span>•</span>
+                          <span className="uppercase">Status: {bridgeStatus || 'pending'}</span>
+                          {(bridgeStatus === 'pending' || bridgeStatus === 'claimed') && (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div>Local bridge is disabled: {bridgeReason || 'Set LOCAL_BRIDGE_ENABLED and LOCAL_BRIDGE_TOKEN.'}</div>
+                    )}
+                  </div>
+                )}
                 <textarea
                   value={nextSnapshotText}
                   onChange={(event) => setNextSnapshotText(event.target.value)}

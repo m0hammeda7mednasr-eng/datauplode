@@ -140,3 +140,23 @@ NEXT_SITE_API_ENABLED=false
 ```
 
 This keeps extraction on direct HTML/browser-rendered scraping and falls back to pasted page snapshots when blocked.
+
+### Local Worker Bridge (Free alternative to paid bypass)
+If a source blocks cloud/server IPs (for example `next.ae` returning `403`), keep production API running on Railway and run a small local worker on your machine:
+
+```env
+LOCAL_BRIDGE_ENABLED=true
+LOCAL_BRIDGE_REQUIRE_TOKEN=true
+LOCAL_BRIDGE_TOKEN=your-strong-random-token
+```
+
+Run the worker locally:
+
+```bash
+npm run bridge:worker
+```
+
+How it works:
+- Production returns a blocked response and creates a local bridge task.
+- Your local worker claims the task, opens the URL with Playwright from your local IP, captures visible page text, and submits it back.
+- Import Product page can then re-analyze automatically using that snapshot result.

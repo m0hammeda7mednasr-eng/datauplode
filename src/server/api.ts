@@ -161,6 +161,23 @@ function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
 
 const analyzePrewarmJobs = new Map<string, Promise<void>>();
 
+type LocalBridgeTaskStatus = "pending" | "claimed" | "completed" | "failed";
+
+type LocalBridgeTask = {
+  id: string;
+  url: string;
+  key: string;
+  status: LocalBridgeTaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  claimedAt?: number;
+  completedAt?: number;
+  lastError?: string;
+};
+
+const localBridgeTasks = new Map<string, LocalBridgeTask>();
+const localBridgeTaskByKey = new Map<string, string>();
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -197,6 +214,136 @@ function hasManagedBypassProviderConfigured(): boolean {
     "SCRAPINGANT_API_KEY",
     "SCRAPEDO_TOKEN",
   ].some((name) => String(process.env[name] || "").trim().length > 0);
+}
+
+function localBridgeEnabled(): boolean {
+  return envFlag("LOCAL_BRIDGE_ENABLED", true);
+}
+
+function localBridgeRequireToken(): boolean {
+  return envFlag("LOCAL_BRIDGE_REQUIRE_TOKEN", true);
+}
+
+function localBridgeToken(): string {
+  return String(process.env.LOCAL_BRIDGE_TOKEN || "").trim();
+}
+
+function localBridgeIsOperational() {
+  if (!localBridgeEnabled()) {
+    return { enabled: false, reason: "LOCAL_BRIDGE_ENABLED is false" };
+  }
+
+  if (localBridgeRequireToken() && !localBridgeToken()) {
+    return {
+      enabled: false,
+      reason: "LOCAL_BRIDGE_TOKEN is missing while LOCAL_BRIDGE_REQUIRE_TOKEN is true",
+    };
+  }
+
+  return { enabled: true as const, reason: null };
+}
+
+function authorizeLocalBridgeRequest(req: Request, res: Response): boolean {
+  if (!localBridgeRequireToken()) return true;
+
+  const token = localBridgeToken();
+  if (!token) {
+    res.status(503).json({
+      error:
+        "Local bridge is not configured. Set LOCAL_BRIDGE_TOKEN or disable LOCAL_BRIDGE_REQUIRE_TOKEN.",
+      code: "LOCAL_BRIDGE_NOT_CONFIGURED",
+    });
+    return false;
+  }
+
+  const provided = String(
+    req.get("x-bridge-token") ||
+      req.query.token ||
+      (typeof req.body === "object" ? (req.body as any)?.token : "") ||
+      "",
+  ).trim();
+  if (!provided || provided !== token) {
+    res
+      .status(401)
+      .json({ error: "Invalid bridge token", code: "LOCAL_BRIDGE_UNAUTHORIZED" });
+    return false;
+  }
+
+  return true;
+}
+
+function clearBridgeTask(task: LocalBridgeTask) {
+  localBridgeTasks.delete(task.id);
+  const existingId = localBridgeTaskByKey.get(task.key);
+  if (existingId === task.id) {
+    localBridgeTaskByKey.delete(task.key);
+  }
+}
+
+function pruneLocalBridgeTasks() {
+  const now = Date.now();
+  const taskTtlMs = Math.max(1, envNumber("LOCAL_BRIDGE_TASK_TTL_MINUTES", 60)) * 60 * 1000;
+
+  for (const task of localBridgeTasks.values()) {
+    const ageMs = now - task.updatedAt;
+    if (ageMs > taskTtlMs) {
+      clearBridgeTask(task);
+    }
+  }
+}
+
+function getOrCreateLocalBridgeTask(url: string): LocalBridgeTask | null {
+  const bridge = localBridgeIsOperational();
+  if (!bridge.enabled) return null;
+
+  pruneLocalBridgeTasks();
+  const key = normalizeAnalyzeCacheUrl(url);
+  const existingTaskId = localBridgeTaskByKey.get(key);
+  if (existingTaskId) {
+    const existingTask = localBridgeTasks.get(existingTaskId);
+    if (existingTask) {
+      if (existingTask.status === "pending" || existingTask.status === "claimed") {
+        return existingTask;
+      }
+      clearBridgeTask(existingTask);
+    }
+  }
+
+  const task: LocalBridgeTask = {
+    id: crypto.randomUUID(),
+    url: key,
+    key,
+    status: "pending",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  localBridgeTasks.set(task.id, task);
+  localBridgeTaskByKey.set(key, task.id);
+  return task;
+}
+
+function claimLocalBridgeTask(): LocalBridgeTask | null {
+  pruneLocalBridgeTasks();
+  const now = Date.now();
+  const reclaimMs = Math.max(1, envNumber("LOCAL_BRIDGE_RECLAIM_MINUTES", 5)) * 60 * 1000;
+
+  const candidates = [...localBridgeTasks.values()]
+    .filter((task) => {
+      if (task.status === "pending") return true;
+      if (task.status !== "claimed") return false;
+      if (!task.claimedAt) return true;
+      return now - task.claimedAt > reclaimMs;
+    })
+    .sort((a, b) => a.createdAt - b.createdAt);
+
+  const task = candidates[0];
+  if (!task) return null;
+
+  task.status = "claimed";
+  task.claimedAt = now;
+  task.updatedAt = now;
+  localBridgeTasks.set(task.id, task);
+  return task;
 }
 
 function isNextHost(url: string): boolean {
@@ -980,6 +1127,131 @@ function verifyShopifyHmac(query: any, clientSecret: string) {
 }
 
 // Analysis
+router.get("/bridge/status", async (req, res) => {
+  const url = String(req.query.url || "").trim();
+  const bridge = localBridgeIsOperational();
+  if (!url) {
+    return res.json({
+      enabled: bridge.enabled,
+      reason: bridge.reason,
+      task: null,
+    });
+  }
+
+  const key = normalizeAnalyzeCacheUrl(url);
+  const taskId = localBridgeTaskByKey.get(key);
+  const task = taskId ? localBridgeTasks.get(taskId) : null;
+
+  if (!task) {
+    return res.json({
+      enabled: bridge.enabled,
+      reason: bridge.reason,
+      task: null,
+    });
+  }
+
+  res.json({
+    enabled: bridge.enabled,
+    reason: bridge.reason,
+    task: {
+      id: task.id,
+      status: task.status,
+      url: task.url,
+      createdAt: new Date(task.createdAt).toISOString(),
+      updatedAt: new Date(task.updatedAt).toISOString(),
+      completedAt: task.completedAt
+        ? new Date(task.completedAt).toISOString()
+        : null,
+      lastError: task.lastError || null,
+    },
+  });
+});
+
+router.post("/bridge/tasks/claim", async (req, res) => {
+  const bridge = localBridgeIsOperational();
+  if (!bridge.enabled) {
+    return res.status(404).json({
+      error: "Local bridge is disabled",
+      reason: bridge.reason,
+      code: "LOCAL_BRIDGE_DISABLED",
+    });
+  }
+  if (!authorizeLocalBridgeRequest(req, res)) return;
+
+  const task = claimLocalBridgeTask();
+  if (!task) return res.status(204).end();
+
+  res.json({
+    id: task.id,
+    url: task.url,
+    status: task.status,
+    createdAt: new Date(task.createdAt).toISOString(),
+  });
+});
+
+router.post("/bridge/tasks/:id/submit", async (req, res) => {
+  const bridge = localBridgeIsOperational();
+  if (!bridge.enabled) {
+    return res.status(404).json({
+      error: "Local bridge is disabled",
+      reason: bridge.reason,
+      code: "LOCAL_BRIDGE_DISABLED",
+    });
+  }
+  if (!authorizeLocalBridgeRequest(req, res)) return;
+
+  const task = localBridgeTasks.get(req.params.id);
+  if (!task) {
+    return res
+      .status(404)
+      .json({ error: "Bridge task not found", code: "LOCAL_BRIDGE_TASK_NOT_FOUND" });
+  }
+
+  const pageText = String(req.body?.pageText || "").trim();
+  if (!pageText) {
+    return res.status(400).json({
+      error: "pageText is required",
+      code: "LOCAL_BRIDGE_PAGE_TEXT_REQUIRED",
+    });
+  }
+
+  try {
+    const data = await scraperService.scrapeSnapshot(task.url, pageText);
+    if (!productSupplierMatchesUrl(task.url, data)) {
+      const expected = expectedSupplierForUrl(task.url) || "target supplier";
+      throw Object.assign(
+        new Error(
+          `Bridge snapshot does not match URL supplier. Expected ${expected}.`,
+        ),
+        { status: 422, code: "LOCAL_BRIDGE_SNAPSHOT_MISMATCH" },
+      );
+    }
+
+    setCachedAnalyzeProduct(task.url, data);
+    task.status = "completed";
+    task.completedAt = Date.now();
+    task.updatedAt = Date.now();
+    task.lastError = undefined;
+    localBridgeTasks.set(task.id, task);
+
+    res.json({
+      success: true,
+      taskId: task.id,
+      url: task.url,
+      status: task.status,
+    });
+  } catch (error: any) {
+    task.status = "failed";
+    task.updatedAt = Date.now();
+    task.lastError = error?.message || "Bridge snapshot parse failed";
+    localBridgeTasks.set(task.id, task);
+    res.status(error?.status || 422).json({
+      error: task.lastError,
+      code: error?.code || "LOCAL_BRIDGE_SUBMIT_FAILED",
+    });
+  }
+});
+
 router.post("/imports/prewarm", async (req, res) => {
   const url = String(req.body?.url || "").trim();
   if (!url) return res.status(400).json({ error: "URL is required" });
@@ -1005,9 +1277,11 @@ router.post("/imports/prewarm", async (req, res) => {
 router.post("/imports/analyze", async (req, res) => {
   const { url, pageText } = req.body;
   if (!url) return res.status(400).json({ error: "URL is required" });
+  const hasSnapshotText =
+    typeof pageText === "string" && pageText.trim().length > 0;
 
   try {
-    const snapshotText = typeof pageText === "string" ? pageText.trim() : "";
+    const snapshotText = hasSnapshotText ? pageText.trim() : "";
     if (!snapshotText && isNextListingUrl(url)) {
       const discovery = await discoverNextListingProducts(url);
       discovery.candidates.slice(0, 6).forEach((candidate) => {
@@ -1151,6 +1425,8 @@ router.post("/imports/analyze", async (req, res) => {
     });
   } catch (error: any) {
     if (error?.retryWithSnapshot) {
+      const bridge = localBridgeIsOperational();
+      const bridgeTask = !hasSnapshotText ? getOrCreateLocalBridgeTask(url) : null;
       return res.json({
         blocked: true,
         error: error.message || "Source requires browser page snapshot.",
@@ -1158,6 +1434,12 @@ router.post("/imports/analyze", async (req, res) => {
         supplier: error.supplier,
         retryWithSnapshot: true,
         details: error.details,
+        bridge: {
+          enabled: bridge.enabled,
+          reason: bridge.reason,
+          taskId: bridgeTask?.id || null,
+          status: bridgeTask?.status || null,
+        },
       });
     }
 

@@ -26,6 +26,7 @@
     "test:extraction-engine": "tsx test-extraction-engine.ts",
     "test:brand-limits": "tsx test-brand-limits.ts",
     "test:source-scan": "tsx test-source-capability-scanner.ts",
+    "bridge:worker": "tsx scripts/local-bridge-worker.ts",
     "db:push": "prisma db push",
     "db:deploy": "prisma db push",
     "db:studio": "prisma studio",
