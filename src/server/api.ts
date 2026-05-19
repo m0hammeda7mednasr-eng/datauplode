@@ -171,6 +171,7 @@ function shouldPrewarmAnalyzeUrl(url: string): boolean {
   if (envFlag("SCRAPER_LOCAL_ONLY_MODE", false)) return false;
 
   if (!envFlag("ANALYZE_PREWARM_ENABLED", true)) return false;
+  if (!hasManagedBypassProviderConfigured()) return false;
 
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -181,6 +182,21 @@ function shouldPrewarmAnalyzeUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+function hasManagedBypassProviderConfigured(): boolean {
+  const mode = String(process.env.SCRAPER_BYPASS_MODE || "never")
+    .trim()
+    .toLowerCase();
+  if (mode === "never") return false;
+
+  return [
+    "SCRAPERAPI_KEY",
+    "ZENROWS_API_KEY",
+    "SCRAPINGBEE_API_KEY",
+    "SCRAPINGANT_API_KEY",
+    "SCRAPEDO_TOKEN",
+  ].some((name) => String(process.env[name] || "").trim().length > 0);
 }
 
 function isNextHost(url: string): boolean {
