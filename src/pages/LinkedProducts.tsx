@@ -40,7 +40,9 @@ export default function LinkedProducts() {
     queryFn: async () => {
       const { data } = await axios.get('/api/shopify/collections');
       return data;
-    }
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const { data: shopifyConfig } = useQuery({

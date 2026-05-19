@@ -27,7 +27,9 @@ export default function PricingRules() {
     queryFn: async () => {
       const { data } = await axios.get('/api/pricing-rules');
       return data;
-    }
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const { data: suppliers } = useQuery({

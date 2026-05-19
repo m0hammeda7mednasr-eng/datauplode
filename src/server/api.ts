@@ -593,7 +593,7 @@ function getApiErrorStatus(error: any) {
 
 function getApiErrorMessage(error: any) {
   if (isDatabaseUnavailableError(error)) {
-    return "Database is currently unavailable. Check DATABASE_URL and database reachability.";
+    return "Database is currently unavailable or DATABASE_URL is invalid. Check DATABASE_URL format and database reachability.";
   }
 
   return error?.message || "Internal server error";
@@ -607,7 +607,11 @@ function getApiErrorCode(error: any) {
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
   return (
-    error?.code === "P1001" || message.includes("Can't reach database server")
+    error?.code === "P1001" ||
+    message.includes("Can't reach database server") ||
+    message.includes("Error validating datasource `db`") ||
+    message.includes("URL must start with `postgresql://` or `postgres://`") ||
+    message.includes("Environment variable not found: DATABASE_URL")
   );
 }
 
@@ -1976,6 +1980,14 @@ router.get("/shopify/collections", async (req, res) => {
 
     if (error.message === "No active Shopify connection found") {
       return res.json([]);
+    }
+
+    if (isDatabaseUnavailableError(error)) {
+      return res.status(503).json({
+        error:
+          "Database is currently unavailable or DATABASE_URL is invalid. Check DATABASE_URL format and database reachability.",
+        code: "DB_UNAVAILABLE",
+      });
     }
 
     res.status(500).json({ error: error.message });

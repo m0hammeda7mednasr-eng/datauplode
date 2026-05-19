@@ -25,7 +25,18 @@ import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
 import SourcesPage from './pages/SourcesPage';
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      refetchOnWindowFocus: false,
+      retry: (failureCount, error: any) => {
+        const status = Number(error?.response?.status || 0);
+        if (status >= 400 && status < 500) return false;
+        return failureCount < 1;
+      },
+    },
+  },
+});
 
 function SidebarItem({ to, icon: Icon, label, active, badge }: { to: string, icon: any, label: string, active?: boolean, badge?: string }) {
   return (

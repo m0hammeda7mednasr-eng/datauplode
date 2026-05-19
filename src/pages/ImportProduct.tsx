@@ -130,7 +130,9 @@ export default function ImportProduct() {
     queryFn: async () => {
       const { data } = await axios.get('/api/shopify/collections');
       return data;
-    }
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const {
@@ -142,7 +144,9 @@ export default function ImportProduct() {
     queryFn: async () => {
       const { data } = await axios.get('/api/pricing-rules');
       return data;
-    }
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const analyzeMutation = useMutation({

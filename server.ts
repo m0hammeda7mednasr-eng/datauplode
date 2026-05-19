@@ -63,7 +63,11 @@ function getListenHost() {
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
   return (
-    error?.code === "P1001" || message.includes("Can't reach database server")
+    error?.code === "P1001" ||
+    message.includes("Can't reach database server") ||
+    message.includes("Error validating datasource `db`") ||
+    message.includes("URL must start with `postgresql://` or `postgres://`") ||
+    message.includes("Environment variable not found: DATABASE_URL")
   );
 }
 
@@ -138,7 +142,7 @@ async function startServer() {
         service: "syncly-api",
         database: "error",
         error: isDatabaseUnavailableError(error)
-          ? "Database is currently unavailable. Check DATABASE_URL and database reachability."
+          ? "Database is currently unavailable or DATABASE_URL is invalid. Check DATABASE_URL format and database reachability."
           : error.message,
         code: isDatabaseUnavailableError(error)
           ? "DB_UNAVAILABLE"
