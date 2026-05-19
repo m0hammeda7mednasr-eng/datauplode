@@ -1124,6 +1124,17 @@ router.post("/imports/analyze", async (req, res) => {
       pricingRule: rule,
     });
   } catch (error: any) {
+    if (error?.retryWithSnapshot) {
+      return res.json({
+        blocked: true,
+        error: error.message || "Source requires browser page snapshot.",
+        code: error.code,
+        supplier: error.supplier,
+        retryWithSnapshot: true,
+        details: error.details,
+      });
+    }
+
     res.status(error.status || 422).json({
       error: error.message || "Failed to analyze product URL",
       code: error.code,

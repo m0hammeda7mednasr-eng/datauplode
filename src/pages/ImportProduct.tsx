@@ -151,6 +151,15 @@ export default function ImportProduct() {
       return data;
     },
     onSuccess: (data) => {
+      if (data?.retryWithSnapshot || data?.blocked) {
+        setBlockedImport(data);
+        setAnalysisResult(null);
+        if (typeof data?.error === 'string' && data.error.trim()) {
+          toast.message(data.error);
+        }
+        return;
+      }
+
       setAnalysisResult(data);
       setBlockedImport(null);
       setNextSnapshotText('');
