@@ -16,6 +16,15 @@ coverage/
 *.db-shm
 scraper-*-results.json
 .syncly-cache/
+storage/
+probe-*.html
+probe-*.ts
+test-*-results.json
+brand-matrix-results.json
+metadata.json
+import-next-verify.png
+local-dev-screenshot.png
+log.txt
 
 # Local generated deployment notes (may contain real secrets)
 BACKEND-API-DEPLOYMENT.md

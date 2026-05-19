@@ -103,10 +103,9 @@ Ctrl + C
 ### اقرأ دول للتفاصيل:
 
 1. **`QUICK-START.md`** ⭐ - دليل البدء السريع الكامل
-2. **`PROJECT-STATUS.md`** - حالة المشروع وكل التفاصيل
-3. **`SETUP-GUIDE.md`** - دليل التثبيت والإعداد
-4. **`START-HERE.md`** - نقطة البداية
-5. **`README-AR.md`** - هذا الملف (ملخص سريع)
+2. **`RAILWAY_SETUP_CHECKLIST.md`** - إعدادات الإنتاج على Railway
+3. **`RAILWAY_VARIABLES.md`** - متغيرات البيئة المطلوبة
+4. **`README-AR.md`** - هذا الملف (ملخص سريع)
 
 ---
 
@@ -207,8 +206,8 @@ npm run dev
 ### اقرأ:
 
 - `QUICK-START.md` - للبدء السريع
-- `PROJECT-STATUS.md` - للتفاصيل الكاملة
-- `SETUP-GUIDE.md` - للتثبيت
+- `RAILWAY_SETUP_CHECKLIST.md` - لإعداد Railway
+- `RAILWAY_VARIABLES.md` - لمتغيرات التشغيل
 
 ### الموارد:
 
@@ -233,3 +232,4 @@ npm run dev
 ---
 
 **صنع بـ ❤️ في مصر**
+

@@ -1,6 +1,0 @@
-{
-  "name": "Syncly - Shopify Product Synchronizer",
-  "description": "Professional product import and real-time synchronization system for Shopify stores. Scrape, normalize, and sync from Zara, Shein, H&M and more.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["product_import", "inventory_sync", "scraping"]
-}
