@@ -1,7 +1,9 @@
 import axios from 'axios';
 
 function normalizeApiBaseUrl(value?: string) {
-  const trimmed = value?.trim().replace(/\/+$/, '');
+  const quoted = value?.trim();
+  const unquoted = quoted?.replace(/^['"]|['"]$/g, '');
+  const trimmed = unquoted?.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
   if (/\$\{[^}]+\}|^(MY_|YOUR[_-])/i.test(trimmed)) return '';
 

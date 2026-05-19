@@ -12,6 +12,7 @@
     "start": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
+    "env:check": "tsx scripts/check-env.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "postinstall": "prisma generate",

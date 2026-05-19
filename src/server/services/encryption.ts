@@ -1,13 +1,23 @@
 import crypto from 'crypto';
+import { envString, isProduction } from '../config/env.js';
 
 const ALGORITHM = 'aes-256-cbc';
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'default-key-32-characters-long-!!!!'; // Must be 32 bytes
 const IV_LENGTH = 16; 
 
 function getCipherKey() {
-  const rawKey = Buffer.from(ENCRYPTION_KEY);
+  const configured = envString('ENCRYPTION_KEY');
+  const encryptionKey = configured || (
+    isProduction()
+      ? ''
+      : 'syncly-local-dev-key-change-me'
+  );
+  if (!encryptionKey) {
+    throw new Error('ENCRYPTION_KEY is required in production.');
+  }
+
+  const rawKey = Buffer.from(encryptionKey);
   if (rawKey.length === 32) return rawKey;
-  return crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
+  return crypto.createHash('sha256').update(encryptionKey).digest();
 }
 
 export function encrypt(text: string): string {

@@ -5,6 +5,13 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { createServer as createHttpServer } from "http";
 import { createServer as createViteServer } from "vite";
+import {
+  envNumber,
+  envString,
+  isProduction,
+  printRuntimeValidation,
+  validateRuntimeEnv,
+} from "./src/server/config/env.js";
 import apiRouter from "./src/server/api.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
@@ -29,9 +36,9 @@ function normalizeOrigin(value?: string | null) {
 
 function getAllowedOrigins() {
   const configuredOrigins = [
-    process.env.FRONTEND_URL,
-    process.env.APP_URL,
-    ...(process.env.CORS_ORIGINS || "").split(","),
+    envString("FRONTEND_URL"),
+    envString("APP_URL"),
+    ...envString("CORS_ORIGINS", "").split(","),
   ];
 
   const defaults = [
@@ -48,9 +55,9 @@ function getAllowedOrigins() {
 }
 
 function getListenHost() {
-  const configuredHost = process.env.HOST || "0.0.0.0";
+  const configuredHost = envString("HOST", "0.0.0.0");
   const isRailway = Boolean(
-    process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN,
+    envString("RAILWAY_ENVIRONMENT") || envString("RAILWAY_PUBLIC_DOMAIN"),
   );
 
   if (isRailway && ["127.0.0.1", "localhost", "::1"].includes(configuredHost)) {
@@ -90,14 +97,20 @@ async function seedDefaultPricingRules() {
 }
 
 async function startServer() {
+  const envValidation = validateRuntimeEnv();
+  printRuntimeValidation(envValidation);
+  if (!envValidation.ok) {
+    throw new Error("Environment validation failed. Fix env errors and retry.");
+  }
+
   const app = express();
   const httpServer = createHttpServer(app);
-  const PORT = Number(process.env.PORT || 3000);
+  const PORT = envNumber("PORT", 3000);
   const HOST = getListenHost();
   const allowedOrigins = getAllowedOrigins();
 
   console.log("🚀 Starting server...");
-  console.log("Environment:", process.env.NODE_ENV);
+  console.log("Environment:", envString("NODE_ENV", "development"));
   console.log("Port:", PORT);
   console.log("Host:", HOST);
 
@@ -131,7 +144,7 @@ async function startServer() {
         ok: true,
         service: "syncly-api",
         database: "ok",
-        environment: process.env.NODE_ENV || "development",
+        environment: envString("NODE_ENV", "development"),
         startedAt: startedAt.toISOString(),
         uptimeSeconds: Math.round(process.uptime()),
       });
@@ -157,12 +170,12 @@ async function startServer() {
   console.log("✅ API routes mounted");
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction()) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr:
-          process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
+          envString("DISABLE_HMR") === "true" ? false : { server: httpServer },
       },
       appType: "spa",
     });
@@ -198,7 +211,7 @@ async function startServer() {
       app.get("*", (_req, res) => {
         res.json({
           service: "Syncly API",
-          frontend: process.env.FRONTEND_URL || "https://datauplode.vercel.app",
+          frontend: envString("FRONTEND_URL", "https://datauplode.vercel.app"),
           health: "/health",
         });
       });
@@ -207,7 +220,7 @@ async function startServer() {
 
   httpServer.listen(PORT, HOST, () => {
     console.log(`Server running at http://${HOST}:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+    console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
     void seedDefaultPricingRules();
     QueueService.startInventoryMonitor();

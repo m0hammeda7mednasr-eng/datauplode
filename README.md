@@ -88,9 +88,15 @@ npm run test:scraper:all
 ## Environment
 Copy `.env.example` and set:
 - `DATABASE_URL`
+- `ENCRYPTION_KEY`
 - `APP_URL`
 - `FRONTEND_URL`
 - optional scraper/log settings
+
+Validate env before running:
+```bash
+npm run env:check
+```
 
 ### Pro Bypass Routing (Optional)
 - Configure global bypass mode via `SCRAPER_BYPASS_MODE` (`never` / `auto` / `always`).

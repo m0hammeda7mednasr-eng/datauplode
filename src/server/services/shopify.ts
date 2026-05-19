@@ -1,8 +1,9 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import { decrypt, isDecryptionError } from './encryption.js';
+import { envString } from '../config/env.js';
 
-const DEFAULT_SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-04';
+const DEFAULT_SHOPIFY_API_VERSION = envString('SHOPIFY_API_VERSION', '2026-04');
 
 export interface ShopifyConfig {
   shopDomain: string;
@@ -64,8 +65,8 @@ export class ShopifyGraphqlClient {
 
 // Global client for legacy support (if any)
 export const shopifyClient = new ShopifyGraphqlClient({
-  shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || '',
-  accessToken: process.env.SHOPIFY_ACCESS_TOKEN || '',
+  shopDomain: envString('SHOPIFY_SHOP_DOMAIN'),
+  accessToken: envString('SHOPIFY_ACCESS_TOKEN'),
   apiVersion: DEFAULT_SHOPIFY_API_VERSION,
 });
 
