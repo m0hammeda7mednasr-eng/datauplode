@@ -29,6 +29,7 @@ const SCOPES = [
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState('shopify');
+  const [oauthLink, setOauthLink] = useState('');
   const queryClient = useQueryClient();
 
   const { data: config, isLoading: isLoadingConfig } = useQuery({
@@ -53,10 +54,26 @@ export default function Settings() {
   const connectMutation = useMutation({
     mutationFn: async () => {
       const { data } = await axios.post('/api/shopify/connect');
+      setOauthLink(data.url || '');
       window.location.href = data.url;
+      return data;
     },
     onError: (err: any) => {
       toast.error(apiErrorMessage(err, 'Failed to initiate connection'));
+    }
+  });
+
+  const generateLinkMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await axios.post('/api/shopify/connect');
+      return data;
+    },
+    onSuccess: (data: any) => {
+      setOauthLink(data?.url || '');
+      toast.success('OAuth link generated');
+    },
+    onError: (err: any) => {
+      toast.error(apiErrorMessage(err, 'Failed to generate OAuth link'));
     }
   });
 
@@ -320,6 +337,21 @@ export default function Settings() {
                         {config.isConnected ? 'Connected to Shopify' : 'Connect Store'}
                       </button>
 
+                      <button
+                        type="button"
+                        onClick={() => generateLinkMutation.mutate()}
+                        disabled={generateLinkMutation.isPending || !canConnect}
+                        className={cn(
+                          "px-6 py-3 rounded-xl text-xs font-black uppercase tracking-widest border transition-all flex items-center gap-2",
+                          !canConnect
+                            ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed"
+                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                        )}
+                      >
+                        {generateLinkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe size={14} />}
+                        Generate OAuth Link
+                      </button>
+
                       {config.isConnected && (
                         <button 
                           type="button"
@@ -336,6 +368,38 @@ export default function Settings() {
                     </>
                   )}
                 </div>
+
+                {oauthLink && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Shopify Connect Link</label>
+                    <div className="flex gap-2">
+                      <input
+                        readOnly
+                        value={oauthLink}
+                        className="w-full px-4 py-2.5 border border-slate-200 rounded-lg bg-slate-50 text-xs font-mono text-slate-600"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => window.open(oauthLink, '_blank', 'noopener,noreferrer')}
+                        className="px-4 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-all text-xs font-bold"
+                        title="Open OAuth link"
+                      >
+                        Open
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(oauthLink);
+                          toast.success('OAuth link copied');
+                        }}
+                        className="px-4 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-all text-xs font-bold"
+                        title="Copy OAuth link"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                )}
               </form>
 
               {config?.isConnected && (
