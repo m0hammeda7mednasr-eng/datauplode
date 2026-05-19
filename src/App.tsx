@@ -10,8 +10,7 @@ import {
   AlertCircle, 
   History, 
   DollarSign,
-  PackageSearch,
-  ShieldCheck
+  PackageSearch
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -77,24 +76,7 @@ function TopBar({ breadcrumb }: { breadcrumb: string }) {
 
 function Sidebar() {
   const location = useLocation();
-  
-  const getBreadcrumb = () => {
-    switch (location.pathname) {
-      case '/': return 'Dashboard';
-      case '/import': return 'Import Product';
-      case '/products': return 'Linked Products';
-      case '/pricing': return 'Pricing Rules';
-      case '/sync-jobs': return 'Sync Jobs';
-      case '/review': return 'Manual Review';
-      case '/settings': return 'Settings';
-      case '/scraper': return 'Extractor + Brand Test';
-      case '/scraper/source-scan': return 'Source Scan';
-      case '/products/review': return 'Product Review';
-      case '/sources': return 'Sources';
-      default: return 'Overview';
-    }
-  };
-  
+
   return (
     <aside className="w-60 bg-sidebar color-sidebar-foreground h-screen flex flex-col flex-shrink-0 sticky top-0 overflow-hidden">
       <div className="p-6 font-bold text-lg tracking-tight border-b border-sidebar-accent flex items-center gap-2.5 text-sidebar-foreground">
@@ -107,9 +89,6 @@ function Sidebar() {
       <nav className="flex-1 mt-4">
         <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={location.pathname === '/'} />
         <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
-        <SidebarItem to="/scraper" icon={PackageSearch} label="Extractor + Brand Test" active={location.pathname === '/scraper' || location.pathname.startsWith('/scraper/jobs/')} />
-        <SidebarItem to="/scraper/source-scan" icon={ShieldCheck} label="Source Scan" active={location.pathname.startsWith('/scraper/source-scan')} />
-        <SidebarItem to="/products/review" icon={ShieldCheck} label="Product Review" active={location.pathname.startsWith('/products/review')} />
         <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
         <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
         <SidebarItem to="/pricing" icon={DollarSign} label="Pricing Rules" active={location.pathname === '/pricing'} />

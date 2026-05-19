@@ -7,19 +7,11 @@ import {
   ExternalLink,
   Link2,
   Package,
-  SearchCode,
   ShieldCheck,
   TrendingUp,
 } from "lucide-react";
 import axios from "axios";
 import { cn } from "../lib/utils";
-
-const IMPORTANT_BRANDS = [
-  "Other (default)",
-  "Next",
-  "Max Fashion",
-  "SHEIN",
-];
 
 function formatRelative(value?: string) {
   if (!value) return "-";
@@ -163,36 +155,24 @@ export default function Dashboard() {
 
         <aside className="space-y-4">
           <div className="rounded-xl border border-card-border bg-white p-5">
-            <h2 className="text-sm font-black uppercase tracking-widest text-slate-500">Brand Tester</h2>
-            <p className="mt-2 text-xs font-medium leading-relaxed text-slate-600">
-              Dropdown location: <span className="font-bold text-slate-900">Extractor -&gt; Brand</span>. Use it to test special brands only; keep normal sites on Other.
-            </p>
-            <Link
-              to="/scraper"
-              className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-xs font-black uppercase tracking-widest text-white"
-            >
-              <SearchCode className="h-4 w-4" />
-              Open Extractor
-            </Link>
-          </div>
-
-          <div className="rounded-xl border border-card-border bg-white p-5">
-            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">Important Brands</h3>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {IMPORTANT_BRANDS.map((brand) => (
-                <span key={brand} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">
-                  {brand}
-                </span>
-              ))}
+            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">All Departments</h3>
+            <div className="mt-3 space-y-2 text-sm">
+              <QuickLink to="/import" icon={ExternalLink} label="Import Product" />
+              <QuickLink to="/products" icon={ExternalLink} label="Linked Products" />
+              <QuickLink to="/review" icon={AlertCircle} label="Manual Review" />
+              <QuickLink to="/pricing" icon={ExternalLink} label="Pricing Rules" />
+              <QuickLink to="/sync-jobs" icon={ExternalLink} label="Sync Jobs" />
+              <QuickLink to="/sources" icon={ExternalLink} label="Sources" />
+              <QuickLink to="/settings" icon={ExternalLink} label="Settings" />
             </div>
           </div>
 
           <div className="rounded-xl border border-card-border bg-white p-5">
-            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">Quick Access</h3>
+            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">Tools</h3>
             <div className="mt-3 space-y-2 text-sm">
-              <QuickLink to="/products" icon={ExternalLink} label="Linked Products + Full Details" />
-              <QuickLink to="/products/review" icon={ShieldCheck} label="Extracted Products + Review" />
-              <QuickLink to="/scraper" icon={SearchCode} label="Extractor + Brand Dropdown" />
+              <QuickLink to="/scraper" icon={ExternalLink} label="Extractor + Brand Test" />
+              <QuickLink to="/scraper/source-scan" icon={ShieldCheck} label="Source Scan" />
+              <QuickLink to="/products/review" icon={ShieldCheck} label="Product Review" />
               <div className="flex items-center gap-2 text-xs text-slate-500">
                 <Clock3 className="h-3.5 w-3.5" />
                 Last refresh: {formatRelative(new Date().toISOString())}
