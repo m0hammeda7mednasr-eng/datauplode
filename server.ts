@@ -100,7 +100,9 @@ async function startServer() {
   const envValidation = validateRuntimeEnv();
   printRuntimeValidation(envValidation);
   if (!envValidation.ok) {
-    throw new Error("Environment validation failed. Fix env errors and retry.");
+    console.error(
+      "[env] validation failed. Starting server in degraded mode to keep UI reachable.",
+    );
   }
 
   const app = express();
