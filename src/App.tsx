@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { 
@@ -23,12 +23,7 @@ import SyncJobs from './pages/SyncJobs';
 import ManualReview from './pages/ManualReview';
 import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
-import ScraperPage from './pages/ScraperPage';
-import ScraperJobPage from './pages/ScraperJobPage';
-import ProductReviewPage from './pages/ProductReviewPage';
-import ProductEditorPage from './pages/ProductEditorPage';
 import SourcesPage from './pages/SourcesPage';
-import SourceScanPage from './pages/scraper/SourceScanPage';
 
 const queryClient = new QueryClient();
 
@@ -113,11 +108,6 @@ export default function App() {
             <Routes>
               <Route path="/" element={<><TopBar breadcrumb="Dashboard" /><main className="flex-1 p-8 overflow-y-auto"><Dashboard /></main></>} />
               <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
-              <Route path="/scraper" element={<><TopBar breadcrumb="Extractor + Brand Test" /><main className="flex-1 p-8 overflow-y-auto"><ScraperPage /></main></>} />
-              <Route path="/scraper/source-scan" element={<><TopBar breadcrumb="Source Scan" /><main className="flex-1 p-8 overflow-y-auto"><SourceScanPage /></main></>} />
-              <Route path="/scraper/jobs/:id" element={<><TopBar breadcrumb="Extraction Job" /><main className="flex-1 p-8 overflow-y-auto"><ScraperJobPage /></main></>} />
-              <Route path="/products/review" element={<><TopBar breadcrumb="Product Review" /><main className="flex-1 p-8 overflow-y-auto"><ProductReviewPage /></main></>} />
-              <Route path="/products/review/:id" element={<><TopBar breadcrumb="Extracted Product" /><main className="flex-1 p-8 overflow-y-auto"><ProductEditorPage /></main></>} />
               <Route path="/products" element={<><TopBar breadcrumb="Linked Products" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
               <Route path="/products/:id" element={<><TopBar breadcrumb="Product Details" /><main className="flex-1 p-8 overflow-y-auto"><ProductDetail /></main></>} />
               <Route path="/pricing" element={<><TopBar breadcrumb="Pricing Rules" /><main className="flex-1 p-8 overflow-y-auto"><PricingRules /></main></>} />
@@ -125,6 +115,8 @@ export default function App() {
               <Route path="/review" element={<><TopBar breadcrumb="Manual Review" /><main className="flex-1 p-8 overflow-y-auto"><ManualReview /></main></>} />
               <Route path="/settings" element={<><TopBar breadcrumb="Settings" /><main className="flex-1 p-8 overflow-y-auto"><SettingsPage /></main></>} />
               <Route path="/sources" element={<><TopBar breadcrumb="Sources" /><main className="flex-1 p-8 overflow-y-auto"><SourcesPage /></main></>} />
+              <Route path="/scraper/*" element={<Navigate to="/" replace />} />
+              <Route path="/products/review/*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
         </div>

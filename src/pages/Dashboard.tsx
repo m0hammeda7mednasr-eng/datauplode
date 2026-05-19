@@ -3,11 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   AlertCircle,
-  Clock3,
   ExternalLink,
   Link2,
-  Package,
-  ShieldCheck,
   TrendingUp,
 } from "lucide-react";
 import axios from "axios";
@@ -31,32 +28,29 @@ export default function Dashboard() {
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard-real-data"],
     queryFn: async () => {
-      const [linkedRes, extractedRes] = await Promise.all([
+      const [linkedRes, reviewRes] = await Promise.all([
         axios.get("/api/products"),
-        axios.get("/api/extracted-products"),
+        axios.get("/api/manual-review"),
       ]);
       const linked = Array.isArray(linkedRes.data) ? linkedRes.data : [];
-      const extracted = Array.isArray(extractedRes.data) ? extractedRes.data : [];
-      return { linked, extracted };
+      const reviewItems = Array.isArray(reviewRes.data) ? reviewRes.data : [];
+      return { linked, reviewItems };
     },
   });
 
   const linked = data?.linked || [];
-  const extracted = data?.extracted || [];
+  const reviewItems = data?.reviewItems || [];
 
   const stats = useMemo(() => {
     const activeSync = linked.filter((item: any) => item.syncStatus === "active").length;
-    const pendingReview = extracted.filter((item: any) => item.status !== "READY").length;
     return {
       totalLinked: linked.length,
-      totalExtracted: extracted.length,
       activeSync,
-      pendingReview,
+      pendingReview: reviewItems.length,
     };
-  }, [linked, extracted]);
+  }, [linked, reviewItems]);
 
   const recentLinked = linked.slice(0, 6);
-  const recentExtracted = extracted.slice(0, 6);
 
   return (
     <div className="space-y-8">
@@ -69,7 +63,6 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         <StatCard icon={Link2} label="Linked Products" value={stats.totalLinked} tone="indigo" />
-        <StatCard icon={Package} label="Extracted Products" value={stats.totalExtracted} tone="slate" />
         <StatCard icon={TrendingUp} label="Active Sync" value={stats.activeSync} tone="emerald" />
         <StatCard icon={AlertCircle} label="Needs Review" value={stats.pendingReview} tone="amber" />
       </div>
@@ -116,41 +109,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-card-border bg-white p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-black uppercase tracking-widest text-slate-500">Recent Extracted</h2>
-              <Link className="text-xs font-bold text-primary hover:underline" to="/products/review">
-                Open Product Review
-              </Link>
-            </div>
-            <div className="space-y-2">
-              {!isLoading && recentExtracted.length === 0 && (
-                <p className="text-sm text-slate-500">No extracted products yet.</p>
-              )}
-              {recentExtracted.map((item: any) => (
-                <div key={item.id} className="flex items-center justify-between rounded-lg border border-slate-100 p-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-slate-900">{item.title}</p>
-                    <p className="truncate text-[11px] font-medium text-slate-500">{item.sourceUrl}</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span
-                      className={cn(
-                        "rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest",
-                        item.status === "READY" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700",
-                      )}
-                    >
-                      {item.status}
-                    </span>
-                    <span className="text-[11px] font-medium text-slate-500">{formatRelative(item.updatedAt)}</span>
-                    <Link className="text-primary hover:underline text-xs font-bold" to={`/products/review/${item.id}`}>
-                      Details
-                    </Link>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </section>
 
         <aside className="space-y-4">
@@ -168,13 +126,9 @@ export default function Dashboard() {
           </div>
 
           <div className="rounded-xl border border-card-border bg-white p-5">
-            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">Tools</h3>
+            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">Live Status</h3>
             <div className="mt-3 space-y-2 text-sm">
-              <QuickLink to="/scraper" icon={ExternalLink} label="Extractor + Brand Test" />
-              <QuickLink to="/scraper/source-scan" icon={ShieldCheck} label="Source Scan" />
-              <QuickLink to="/products/review" icon={ShieldCheck} label="Product Review" />
               <div className="flex items-center gap-2 text-xs text-slate-500">
-                <Clock3 className="h-3.5 w-3.5" />
                 Last refresh: {formatRelative(new Date().toISOString())}
               </div>
             </div>
