@@ -21,6 +21,164 @@ model Supplier {
   products    SourceProduct[]
 }
 
+model Source {
+  id                  String             @id @default(cuid())
+  name                String
+  baseUrl             String
+  domain              String             @unique
+  type                String
+  mode                String             @default("auto")
+  status              String             @default("READY")
+  rateLimitJson       String?
+  customSelectorsJson String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  extractedProducts   ExtractedProduct[]
+  productUrls         ProductUrl[]
+  crawlJobs           CrawlJob[]
+}
+
+model CrawlJob {
+  id                  String          @id @default(cuid())
+  sourceId            String?
+  source              Source?         @relation(fields: [sourceId], references: [id])
+  type                String
+  status              String          @default("pending")
+  progress            Int             @default(0)
+  logsJson            String?
+  errorsJson          String?
+  payloadJson         String?
+  resultJson          String?
+  sourceUrl           String?
+  extractedProductIds String?
+  startedAt           DateTime?
+  finishedAt          DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  productUrls         ProductUrl[]
+  extractedProducts   ExtractedProduct[]
+}
+
+model ProductUrl {
+  id          String    @id @default(cuid())
+  sourceId    String?
+  source      Source?   @relation(fields: [sourceId], references: [id])
+  crawlJobId  String?
+  crawlJob    CrawlJob? @relation(fields: [crawlJobId], references: [id])
+  url         String    @unique
+  status      String    @default("DISCOVERED")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model ExtractedProduct {
+  id             String           @id @default(cuid())
+  sourceId       String
+  source         Source           @relation(fields: [sourceId], references: [id])
+  crawlJobId     String?
+  crawlJob       CrawlJob?        @relation(fields: [crawlJobId], references: [id])
+  sourceUrl      String           @unique
+  canonicalUrl   String?
+  title          String
+  normalizedJson String
+  rawJson        String?
+  confidence     Int
+  status         String           @default("DRAFT")
+  warnings       ProductWarning[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+}
+
+model ProductWarning {
+  id                 String           @id @default(cuid())
+  extractedProductId String
+  extractedProduct   ExtractedProduct @relation(fields: [extractedProductId], references: [id], onDelete: Cascade)
+  code               String
+  message            String
+  field              String?
+  createdAt          DateTime         @default(now())
+}
+
+model SourceScan {
+  id                String                   @id @default(cuid())
+  sourceUrl         String                   @unique
+  domain            String
+  brandKey          String?
+  brandName         String?
+  region            String?
+  status            String                   @default("PENDING") // PENDING, COMPLETED, FAILED
+  reportJson        String?                  // JSON of SourceCapabilityReport
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  completedAt       DateTime?
+  warnings          SourceScanWarning[]
+  limitProfile      SourceLimitProfile?
+  capabilityReport  SourceCapabilityReport?
+}
+
+model SourceCapabilityReport {
+  id           String      @id @default(cuid())
+  sourceScanId String      @unique
+  sourceScan   SourceScan  @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  reportJson   String
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  warnings     SourceWarning[]
+}
+
+model SourceWarning {
+  id                 String                  @id @default(cuid())
+  sourceCapabilityReportId String
+  sourceCapabilityReport SourceCapabilityReport @relation(fields: [sourceCapabilityReportId], references: [id], onDelete: Cascade)
+  code               String
+  message            String
+  createdAt          DateTime                @default(now())
+}
+
+model SourceScanWarning {
+  id           String     @id @default(cuid())
+  sourceScanId String
+  sourceScan   SourceScan @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  code         String
+  message      String
+  createdAt    DateTime   @default(now())
+}
+
+model SourceLimitProfile {
+  id                   String     @id @default(cuid())
+  sourceScanId         String     @unique
+  sourceScan           SourceScan @relation(fields: [sourceScanId], references: [id], onDelete: Cascade)
+  maxConcurrency       Int        @default(1)
+  minDelayMs           Int        @default(3000)
+  maxRequestsPerMinute Int        @default(15)
+  maxProductsPerRun    Int        @default(100)
+  maxPagesPerRun       Int        @default(30)
+  retryCount           Int        @default(3)
+  timeoutMs            Int        @default(15000)
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+}
+
+model ExtractionLog {
+  id        String   @id @default(cuid())
+  jobId     String?
+  sourceUrl String?
+  level     String   @default("info")
+  message   String
+  metaJson  String?
+  createdAt DateTime @default(now())
+}
+
+model ImportBatch {
+  id          String   @id @default(cuid())
+  status      String   @default("DRAFT")
+  productIds  String
+  target      String   @default("shopify")
+  payloadJson String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 model SourceProduct {
   id              String   @id @default(cuid())
   supplierId      String

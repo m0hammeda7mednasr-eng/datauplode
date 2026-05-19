@@ -15,6 +15,7 @@ coverage/
 *.db-wal
 *.db-shm
 scraper-*-results.json
+.syncly-cache/
 
 # Local generated deployment notes (may contain real secrets)
 BACKEND-API-DEPLOYMENT.md

@@ -184,6 +184,44 @@ export class ShopifyService {
     };
   }
 
+  static async getProductBasic(client: ShopifyGraphqlClient, productId: string) {
+    const query = `
+      query ProductBasic($id: ID!) {
+        product(id: $id) {
+          id
+          handle
+          status
+        }
+      }
+    `;
+    const data = await client.request(query, { id: productId });
+    return data.product || null;
+  }
+
+  static async updateProductStatus(client: ShopifyGraphqlClient, productId: string, status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED') {
+    const mutation = `
+      mutation productUpdateStatus($product: ProductUpdateInput!) {
+        productUpdate(product: $product) {
+          product {
+            id
+            handle
+            status
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    return client.request(mutation, {
+      product: {
+        id: productId,
+        status,
+      },
+    });
+  }
+
   static async getInventoryLocation(client: ShopifyGraphqlClient) {
     const query = `
       query {

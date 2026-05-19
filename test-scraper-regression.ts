@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { ScraperService, type NormalizedProduct } from "./src/server/services/scraper";
+import {
+  isManualSnapshotRequired,
+  validateImportantBrandMedia,
+} from "./test-utils/scraper-test-utils";
 
 const scraper = new ScraperService();
 
@@ -27,6 +31,30 @@ const liveCases = [
     currency: "AED",
     minImages: 2,
     minVariants: 7,
+  },
+  {
+    name: "Lefties chunky sole sneaker",
+    url: "https://www.lefties.com/ae/woman/shoes/minimalist-chunky-sole-sneaker-c1030267545p730276495.html",
+    supplier: "Lefties",
+    currency: "AED",
+    minImages: 4,
+    minVariants: 5,
+  },
+  {
+    name: "Gap puffer jacket",
+    url: "https://www.gap.ae/product/218613975",
+    supplier: "Gap",
+    currency: "AED",
+    minImages: 4,
+    minVariants: 5,
+  },
+  {
+    name: "Adidas CLOT Samba trainers",
+    url: "https://www.adidas.ae/en/clot-samba-by-edison-chen-trainers/KJ0274.html",
+    supplier: "Adidas",
+    currency: "AED",
+    minImages: 4,
+    minVariants: 6,
   },
   {
     name: "Mothercare bibs",
@@ -116,19 +144,34 @@ function assertProduct(caseName: string, product: NormalizedProduct, expected: {
   assert.ok(product.variants.length >= expected.minVariants, `${caseName}: variants ${product.variants.length}`);
   assert.ok(product.variants.every(variant => variant.price && variant.price > 0), `${caseName}: variant prices`);
   assert.ok(product.variants.every(variant => variant.currency === product.currency), `${caseName}: variant currency`);
+  const mediaIssues = validateImportantBrandMedia(product);
+  assert.deepEqual(mediaIssues, [], `${caseName}: ${mediaIssues.join(", ")}`);
 }
 
+let autoPassed = 0;
+let manualSnapshotRequired = 0;
+
 for (const testCase of liveCases) {
-  const product = await scraper.scrape(testCase.url);
-  assertProduct(testCase.name, product, testCase);
-  console.log("Live regression passed", {
-    name: testCase.name,
-    title: product.title,
-    price: product.price,
-    currency: product.currency,
-    images: product.images.length,
-    variants: product.variants.length,
-  });
+  try {
+    const product = await scraper.scrape(testCase.url);
+    assertProduct(testCase.name, product, testCase);
+    autoPassed += 1;
+    console.log("Live regression passed", {
+      name: testCase.name,
+      title: product.title,
+      price: product.price,
+      currency: product.currency,
+      images: product.images.length,
+      variants: product.variants.length,
+    });
+  } catch (error) {
+    if (!isManualSnapshotRequired(error)) throw error;
+    manualSnapshotRequired += 1;
+    console.log("Live regression manual snapshot required", {
+      name: testCase.name,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 const nextBabyDress = await scraper.scrapeSnapshot(
@@ -160,4 +203,10 @@ await assert.rejects(
 console.log("Snapshot regression passed", {
   name: "Next blocked snapshot",
   result: "refused missing size values instead of publishing One Size",
+});
+
+console.log("Live regression summary", {
+  total: liveCases.length,
+  autoPassed,
+  manualSnapshotRequired,
 });

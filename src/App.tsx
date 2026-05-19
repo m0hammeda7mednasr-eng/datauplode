@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { 
@@ -23,6 +23,7 @@ import SyncJobs from './pages/SyncJobs';
 import ManualReview from './pages/ManualReview';
 import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
+import SourcesPage from './pages/SourcesPage';
 
 const queryClient = new QueryClient();
 
@@ -70,20 +71,7 @@ function TopBar({ breadcrumb }: { breadcrumb: string }) {
 
 function Sidebar() {
   const location = useLocation();
-  
-  const getBreadcrumb = () => {
-    switch (location.pathname) {
-      case '/': return 'Dashboard';
-      case '/import': return 'Import Product';
-      case '/products': return 'Linked Products';
-      case '/pricing': return 'Pricing Rules';
-      case '/sync-jobs': return 'Sync Jobs';
-      case '/review': return 'Manual Review';
-      case '/settings': return 'Settings';
-      default: return 'Overview';
-    }
-  };
-  
+
   return (
     <aside className="w-60 bg-sidebar color-sidebar-foreground h-screen flex flex-col flex-shrink-0 sticky top-0 overflow-hidden">
       <div className="p-6 font-bold text-lg tracking-tight border-b border-sidebar-accent flex items-center gap-2.5 text-sidebar-foreground">
@@ -103,6 +91,7 @@ function Sidebar() {
       </nav>
 
       <div className="mb-4">
+        <SidebarItem to="/sources" icon={PackageSearch} label="Sources" active={location.pathname === '/sources'} />
         <SidebarItem to="/settings" icon={Settings} label="Settings" active={location.pathname === '/settings'} />
       </div>
     </aside>
@@ -125,6 +114,9 @@ export default function App() {
               <Route path="/sync-jobs" element={<><TopBar breadcrumb="Sync Jobs" /><main className="flex-1 p-8 overflow-y-auto"><SyncJobs /></main></>} />
               <Route path="/review" element={<><TopBar breadcrumb="Manual Review" /><main className="flex-1 p-8 overflow-y-auto"><ManualReview /></main></>} />
               <Route path="/settings" element={<><TopBar breadcrumb="Settings" /><main className="flex-1 p-8 overflow-y-auto"><SettingsPage /></main></>} />
+              <Route path="/sources" element={<><TopBar breadcrumb="Sources" /><main className="flex-1 p-8 overflow-y-auto"><SourcesPage /></main></>} />
+              <Route path="/scraper/*" element={<Navigate to="/" replace />} />
+              <Route path="/products/review/*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
         </div>
