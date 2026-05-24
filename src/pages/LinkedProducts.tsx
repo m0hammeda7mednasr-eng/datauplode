@@ -29,10 +29,12 @@ export default function LinkedProducts() {
     queryKey: ['products', selectedCollection],
     queryFn: async () => {
       const { data } = await axios.get('/api/products', {
-        params: { collectionId: selectedCollection }
+        params: { collectionId: selectedCollection, limit: 200 }
       });
       return data;
-    }
+    },
+    refetchInterval: 8000,
+    refetchOnWindowFocus: true,
   });
 
   const { data: collections } = useQuery({
@@ -164,6 +166,7 @@ export default function LinkedProducts() {
           <thead className="bg-zinc-50 border-b border-zinc-100 uppercase text-[10px] tracking-widest font-bold text-zinc-500">
             <tr>
               <th className="px-6 py-4 text-left">Product</th>
+              <th className="px-6 py-4 text-left">Sheet Row</th>
               <th className="px-6 py-4 text-left">Links</th>
               <th className="px-6 py-4 text-left">Status</th>
               <th className="px-6 py-4 text-left">Pricing</th>
@@ -174,7 +177,7 @@ export default function LinkedProducts() {
           <tbody className="divide-y divide-zinc-50">
             {products?.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-muted-foreground italic">
+                <td colSpan={7} className="px-6 py-12 text-center text-muted-foreground italic">
                   No linked products yet. Start by importing a new product.
                 </td>
               </tr>
@@ -194,6 +197,11 @@ export default function LinkedProducts() {
                       <p className="text-[10px] uppercase font-bold text-zinc-400 tracking-tighter">{p.supplier?.name}</p>
                     </div>
                   </div>
+                </td>
+                <td className="px-6 py-4">
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-slate-600">
+                    {p.excelRowNumber ? `Row ${p.excelRowNumber}` : '-'}
+                  </span>
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex gap-2" onClick={e => e.stopPropagation()}>

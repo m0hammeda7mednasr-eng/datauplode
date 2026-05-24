@@ -1,4 +1,4 @@
-import "dotenv/config";
+﻿import "dotenv/config";
 import * as cheerio from "cheerio";
 import axios from "axios";
 import { execFile } from "node:child_process";
@@ -47,6 +47,7 @@ export interface NormalizedProduct {
     raw?: any;
   }>;
   raw: any;
+  importMeta?: Record<string, any>;
 }
 
 export interface AvailabilitySnapshot {
@@ -220,7 +221,17 @@ function normalizeManagedBypassMode(value: string): ManagedBypassMode {
 
 function managedBypassMode(): ManagedBypassMode {
   if (scraperLocalOnlyMode()) return "never";
-  return normalizeManagedBypassMode(process.env.SCRAPER_BYPASS_MODE || "never");
+  const configuredMode = cleanText(process.env.SCRAPER_BYPASS_MODE);
+  if (configuredMode) {
+    const mode = normalizeManagedBypassMode(configuredMode);
+    if (mode !== "never") return mode;
+    if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+    return mode;
+  }
+  // Prefer managed bypass automatically when ScraperAPI is configured,
+  // so blocked suppliers still scrape successfully without manual env tweaking.
+  if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+  return "never";
 }
 
 function inferBrandBypassKey(url: string): string {
@@ -509,40 +520,87 @@ async function fetchHtmlViaScraperApi(
   const ultraPremium =
     options.ultraPremium ?? envFlag("SCRAPERAPI_ULTRA_PREMIUM", false);
 
-  const params = new URLSearchParams();
-  params.set("api_key", apiKey);
-  if (jsRender) params.set("render", "true");
-  if (countryCode) params.set("country_code", countryCode);
-  if (deviceType === "mobile" || deviceType === "desktop")
-    params.set("device_type", deviceType);
-  if (ultraPremium) {
-    params.set("ultra_premium", "true");
-  } else if (premium) {
-    params.set("premium", "true");
-  }
-  params.set("url", url);
+  const buildParams = (config: {
+    render: boolean;
+    includeCountryAndDevice: boolean;
+    premium: boolean;
+    ultraPremium: boolean;
+  }) => {
+    const params = new URLSearchParams();
+    params.set("api_key", apiKey);
+    if (config.render) params.set("render", "true");
+    if (config.includeCountryAndDevice && countryCode) {
+      params.set("country_code", countryCode);
+    }
+    if (
+      config.includeCountryAndDevice &&
+      (deviceType === "mobile" || deviceType === "desktop")
+    ) {
+      params.set("device_type", deviceType);
+    }
+    if (config.ultraPremium) {
+      params.set("ultra_premium", "true");
+    } else if (config.premium) {
+      params.set("premium", "true");
+    }
+    params.set("url", url);
+    return params;
+  };
 
-  const response = await axios.get(
-    `https://api.scraperapi.com?${params.toString()}`,
-    {
+  const requestHtml = async (params: URLSearchParams) => {
+    const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
       timeout: 90000,
       responseType: "text",
-      validateStatus: (status) => status < 500,
+      validateStatus: () => true,
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`ScraperAPI HTTP ${response.status}`);
+    }
+
+    const html =
+      typeof response.data === "string" ? response.data : String(response.data);
+    if (!html.trim()) throw new Error("ScraperAPI returned an empty response");
+    if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
+      throw new Error("ScraperAPI returned a blocked page");
+    }
+    return html;
+  };
+
+  const attempts: Array<{
+    render: boolean;
+    includeCountryAndDevice: boolean;
+    premium: boolean;
+    ultraPremium: boolean;
+  }> = [
+    {
+      render: jsRender,
+      includeCountryAndDevice: true,
+      premium,
+      ultraPremium,
     },
-  );
+  ];
 
-  if (response.status !== 200) {
-    throw new Error(`ScraperAPI HTTP ${response.status}`);
+  if (jsRender || premium || ultraPremium) {
+    // Fallback profile for domains where rendered/premium requests fail (common on Next).
+    attempts.push({
+      render: false,
+      includeCountryAndDevice: false,
+      premium: false,
+      ultraPremium: false,
+    });
   }
 
-  const html =
-    typeof response.data === "string" ? response.data : String(response.data);
-  if (!html.trim()) throw new Error("ScraperAPI returned an empty response");
-  if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
-    throw new Error("ScraperAPI returned a blocked page");
+  const errors: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      return await requestHtml(buildParams(attempt));
+    } catch (error: any) {
+      errors.push(error?.message || String(error));
+    }
   }
 
-  return html;
+  throw new Error(`ScraperAPI failed (${errors.join("; ")})`);
 }
 
 async function fetchHtmlViaZenRows(
@@ -752,30 +810,30 @@ function resolveUrl(src: unknown, pageUrl: string): string | undefined {
 
 function normaliseNumberText(value: string): string {
   const arabicDigits: Record<string, string> = {
-    "٠": "0",
-    "١": "1",
-    "٢": "2",
-    "٣": "3",
-    "٤": "4",
-    "٥": "5",
-    "٦": "6",
-    "٧": "7",
-    "٨": "8",
-    "٩": "9",
-    "۰": "0",
-    "۱": "1",
-    "۲": "2",
-    "۳": "3",
-    "۴": "4",
-    "۵": "5",
-    "۶": "6",
-    "۷": "7",
-    "۸": "8",
-    "۹": "9",
+    "Ã™Â ": "0",
+    "Ã™Â¡": "1",
+    "Ã™Â¢": "2",
+    "Ã™Â£": "3",
+    "Ã™Â¤": "4",
+    "Ã™Â¥": "5",
+    "Ã™Â¦": "6",
+    "Ã™Â§": "7",
+    "Ã™Â¨": "8",
+    "Ã™Â©": "9",
+    "Ã›Â°": "0",
+    "Ã›Â±": "1",
+    "Ã›Â²": "2",
+    "Ã›Â³": "3",
+    "Ã›Â´": "4",
+    "Ã›Âµ": "5",
+    "Ã›Â¶": "6",
+    "Ã›Â·": "7",
+    "Ã›Â¸": "8",
+    "Ã›Â¹": "9",
   };
 
   return value
-    .replace(/[٠-٩۰-۹]/g, (digit) => arabicDigits[digit] || digit)
+    .replace(/[Ã™Â -Ã™Â©Ã›Â°-Ã›Â¹]/g, (digit) => arabicDigits[digit] || digit)
     .replace(/[\u066C,\s]/g, "")
     .replace(/\u066B/g, ".");
 }
@@ -916,8 +974,8 @@ function detectCurrency(text: string | undefined, fallback = "USD"): string {
   if (/TRY|TL|\u20ba/i.test(text)) return "TRY";
   if (/GBP|\u00a3/i.test(text)) return "GBP";
   if (/EUR|\u20ac/i.test(text)) return "EUR";
-  if (/GBP|£/i.test(text)) return "GBP";
-  if (/EUR|€/i.test(text)) return "EUR";
+  if (/GBP|Ã‚Â£/i.test(text)) return "GBP";
+  if (/EUR|Ã¢â€šÂ¬/i.test(text)) return "EUR";
   if (/USD|\$/i.test(text)) return "USD";
   return fallback;
 }
@@ -926,7 +984,7 @@ function looksLikeCurrencyText(text: string): boolean {
   return (
     /(?:EGP|AED|SAR|QAR|KWD|BHD|OMR|MXN|TRY|GBP|EUR|USD|TL|\$|\u00a3|\u20ac|\u20ba|\u062c\s*\.?\s*\u0645|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645)/i.test(
       text,
-    ) || /(?:Â£|â‚¬)/i.test(text)
+    ) || /(?:Ãƒâ€šÃ‚Â£|ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬)/i.test(text)
   );
 }
 
@@ -1537,7 +1595,7 @@ function inferNextColourFromTitle(title: string): string | undefined {
   if (
     !candidate ||
     candidate.length > 48 ||
-    /\b(?:baby|kids?|girls?|boys?|maman|b[eé]b[eé]|cotton|pack|piece|printed?)\b/i.test(
+    /\b(?:baby|kids?|girls?|boys?|maman|b[eÃƒÂ©]b[eÃƒÂ©]|cotton|pack|piece|printed?)\b/i.test(
       candidate,
     )
   ) {
@@ -1546,7 +1604,7 @@ function inferNextColourFromTitle(title: string): string | undefined {
 
   return candidate
     .replace(
-      /^(?:Next|Lipsy|Reiss|JoJo Maman B[eé]b[eé]|Baker by Ted Baker)\s+/i,
+      /^(?:Next|Lipsy|Reiss|JoJo Maman B[eÃƒÂ©]b[eÃƒÂ©]|Baker by Ted Baker)\s+/i,
       "",
     )
     .trim();
@@ -1652,7 +1710,7 @@ function formatNextProductCodeFromProductId(
 function stripNextCardPrice(title: string): string {
   return cleanText(title)
     .replace(
-      /\s+(?:was|now|from)?\s*(?:EGP|AED|USD|SAR|GBP|EUR|\$|£|€)\s*[\d,.].*$/i,
+      /\s+(?:was|now|from)?\s*(?:EGP|AED|USD|SAR|GBP|EUR|\$|Ã‚Â£|Ã¢â€šÂ¬)\s*[\d,.].*$/i,
       "",
     )
     .replace(/\s+(?:was|now|from)\s+.*$/i, "")
@@ -2586,6 +2644,133 @@ function uniqueCleanValues(values: Array<string | undefined>): string[] {
   return [...new Set(values.map((value) => cleanText(value)).filter(Boolean))];
 }
 
+function normalizeComparableOptionValue(value: string | undefined): string {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0600-\u06ff]+/g, " ")
+    .trim();
+}
+
+function textContainsComparableValue(text: string, value: string): boolean {
+  if (!text || !value) return false;
+  if (text === value) return true;
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\s)${escaped}($|\\s)`, "i").test(text);
+}
+
+function inferVariantOptionValuesFromTitle(
+  variant: NormalizedProduct["variants"][number],
+  optionValueMap: Map<string, Set<string>>,
+): Record<string, string> {
+  const inferred: Record<string, string> = {};
+  const variantTitle = cleanText(
+    (variant as any)?.title ||
+      (variant as any)?.name ||
+      variant?.raw?.title ||
+      variant?.raw?.name ||
+      "",
+  );
+  const comparableTitle = normalizeComparableOptionValue(variantTitle);
+  if (!comparableTitle) return inferred;
+
+  for (const [optionName, optionValues] of optionValueMap.entries()) {
+    const sortedValues = [...optionValues]
+      .map((value) => cleanProductOptionValue(optionName, value))
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+
+    const matched = sortedValues.find((value) =>
+      textContainsComparableValue(
+        comparableTitle,
+        normalizeComparableOptionValue(value),
+      ),
+    );
+    if (matched) {
+      inferred[optionName] = matched;
+    }
+  }
+
+  return inferred;
+}
+
+function collectRawDescriptionSegments(value: any, depth = 0): string[] {
+  if (depth > 4 || value === null || value === undefined) return [];
+
+  if (typeof value === "string") {
+    const cleaned = value
+      .split(/\r?\n|\u2022|;|\|/g)
+      .map((segment) => cleanText(segment))
+      .filter(Boolean);
+    return cleaned;
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectRawDescriptionSegments(item, depth + 1));
+  }
+
+  if (typeof value === "object") {
+    const record = value as Record<string, any>;
+    const pickedKeys = [
+      "description",
+      "shortDescription",
+      "longDescription",
+      "details",
+      "productDetails",
+      "bullets",
+      "features",
+      "benefits",
+      "composition",
+      "materials",
+      "care",
+      "careInstructions",
+      "highlights",
+    ];
+
+    let segments: string[] = [];
+    for (const key of pickedKeys) {
+      if (key in record) {
+        segments = segments.concat(
+          collectRawDescriptionSegments(record[key], depth + 1),
+        );
+      }
+    }
+
+    if (segments.length === 0 && depth <= 1) {
+      const likelyTextValues = Object.values(record).filter(
+        (entry) =>
+          typeof entry === "string" ||
+          Array.isArray(entry) ||
+          (entry && typeof entry === "object"),
+      );
+      segments = likelyTextValues.flatMap((entry) =>
+        collectRawDescriptionSegments(entry, depth + 1),
+      );
+    }
+
+    return segments;
+  }
+
+  return [];
+}
+
+function enrichProductDescription(product: NormalizedProduct): string | undefined {
+  const baseDescription = cleanText(product.description);
+  const rawSegments = uniqueCleanValues(
+    collectRawDescriptionSegments(product.raw).map((segment) => cleanText(segment)),
+  ).filter((segment) => segment.length >= 3);
+
+  if (!rawSegments.length) return baseDescription || undefined;
+
+  if (!baseDescription) {
+    return rawSegments.slice(0, 20).join("\n");
+  }
+
+  if (baseDescription.length >= 180) return baseDescription;
+
+  const combined = uniqueCleanValues([baseDescription, ...rawSegments]).slice(0, 24);
+  return combined.join("\n");
+}
+
 function isDefaultOptionValue(value: string | undefined): boolean {
   return (
     !value ||
@@ -2996,10 +3181,32 @@ function normalizeProductOptionsAndVariants(
   const seenVariantKeys = new Set<string>();
   const variants = (product.variants || []).map((variant, index) => {
     const optionValues = variantOptionValues(variant);
+    const inferredOptionValues = inferVariantOptionValuesFromTitle(
+      variant,
+      optionValueMap,
+    );
+    for (const [name, value] of Object.entries(inferredOptionValues)) {
+      if (!optionValues[name]) optionValues[name] = value;
+    }
 
     for (const [name, value] of Object.entries(optionValues)) {
       if (!optionValueMap.has(name)) optionValueMap.set(name, new Set());
       optionValueMap.get(name)?.add(value);
+    }
+
+    if (
+      !optionValues.Color &&
+      optionValueMap.has("Color") &&
+      (optionValueMap.get("Color")?.size || 0) === 1
+    ) {
+      optionValues.Color = [...(optionValueMap.get("Color") || new Set())][0];
+    }
+    if (
+      !optionValues.Size &&
+      optionValueMap.has("Size") &&
+      (optionValueMap.get("Size")?.size || 0) === 1
+    ) {
+      optionValues.Size = [...(optionValueMap.get("Size") || new Set())][0];
     }
 
     const color = optionValues.Color || cleanColorOptionValue(variant.color);
@@ -3077,6 +3284,7 @@ function normalizeProductOptionsAndVariants(
 
   return {
     ...product,
+    description: enrichProductDescription(product),
     images,
     price:
       product.price ||
@@ -3855,7 +4063,7 @@ function extractLeftiesReaderData(
   const price = parseLocalizedMoney(priceLine);
 
   const descriptionStart = lines.findIndex((line) =>
-    /^#{2,3}\s*(?:description|descripci[oó]n|descri[cç][aã]o|descrizione|a[cç][iı]klama|beschreibung)\b/i.test(
+    /^#{2,3}\s*(?:description|descripci[oÃƒÂ³]n|descri[cÃƒÂ§][aÃƒÂ£]o|descrizione|a[cÃƒÂ§][iÃ„Â±]klama|beschreibung)\b/i.test(
       line,
     ),
   );
@@ -6666,10 +6874,10 @@ function nextPriceLineMatchesRegion(
 ): boolean {
   if (!priceLine) return false;
   const currency = defaultNextCurrencyForUrl(url);
-  if (currency === "AED") return /AED|د\.?إ|درهم/i.test(priceLine);
+  if (currency === "AED") return /AED|Ã˜Â¯\.?Ã˜Â¥|Ã˜Â¯Ã˜Â±Ã™â€¡Ã™â€¦/i.test(priceLine);
   if (currency === "USD") return /USD|\$/i.test(priceLine);
-  if (currency === "GBP") return /GBP|£/i.test(priceLine);
-  if (currency === "EGP") return /EGP|ج\.?\s*م|جنيه/i.test(priceLine);
+  if (currency === "GBP") return /GBP|Ã‚Â£/i.test(priceLine);
+  if (currency === "EGP") return /EGP|Ã˜Â¬\.?\s*Ã™â€¦|Ã˜Â¬Ã™â€ Ã™Å Ã™â€¡/i.test(priceLine);
   return true;
 }
 
@@ -6679,7 +6887,7 @@ function nextReaderMarkdownMatchesRegion(
 ): boolean {
   const currency = defaultNextCurrencyForUrl(url);
   if (currency === "AED")
-    return /AED\s*[\d,.]+|[\d,.]+\s*AED|د\.?إ\s*[\d,.]+|[\d,.]+\s*د\.?إ|درهم/i.test(
+    return /AED\s*[\d,.]+|[\d,.]+\s*AED|Ã˜Â¯\.?Ã˜Â¥\s*[\d,.]+|[\d,.]+\s*Ã˜Â¯\.?Ã˜Â¥|Ã˜Â¯Ã˜Â±Ã™â€¡Ã™â€¦/i.test(
       markdown,
     );
   if (currency === "USD")
@@ -6687,9 +6895,9 @@ function nextReaderMarkdownMatchesRegion(
       markdown,
     );
   if (currency === "GBP")
-    return /GBP\s*[\d,.]+|[\d,.]+\s*GBP|£\s*[\d,.]+/i.test(markdown);
+    return /GBP\s*[\d,.]+|[\d,.]+\s*GBP|Ã‚Â£\s*[\d,.]+/i.test(markdown);
   if (currency === "EGP")
-    return /EGP\s*[\d,.]+|[\d,.]+\s*EGP|ج\.?\s*م\s*[\d,.]+|جنيه/i.test(
+    return /EGP\s*[\d,.]+|[\d,.]+\s*EGP|Ã˜Â¬\.?\s*Ã™â€¦\s*[\d,.]+|Ã˜Â¬Ã™â€ Ã™Å Ã™â€¡/i.test(
       markdown,
     );
   return true;
@@ -6755,7 +6963,7 @@ function parseMaxReaderMarkdown(
           line.length > 8 &&
           !ignoredTitleLine.test(line) &&
           !/^https?:\/\//i.test(line) &&
-          !/AED|د\.?إ|درهم|Inclusive of VAT/i.test(line) &&
+          !/AED|Ã˜Â¯\.?Ã˜Â¥|Ã˜Â¯Ã˜Â±Ã™â€¡Ã™â€¦|Inclusive of VAT/i.test(line) &&
           !/^\d+\s*-\s*\d+\s*(?:MTHS?|MONTHS?|YRS?|YEARS?)$/i.test(line),
       ) ||
       ""
@@ -6777,7 +6985,7 @@ function parseMaxReaderMarkdown(
       : lines;
   const priceLine =
     [...priceWindow].reverse().find((line) => parsePrice(line) > 0) ||
-    lines.find((line) => /AED|د\.?إ|درهم/i.test(line) && parsePrice(line) > 0);
+    lines.find((line) => /AED|Ã˜Â¯\.?Ã˜Â¥|Ã˜Â¯Ã˜Â±Ã™â€¡Ã™â€¦/i.test(line) && parsePrice(line) > 0);
   let price = parsePrice(priceLine);
   const currency = detectCurrency(markdown, "AED");
   const titleIndex = lines.findIndex(
@@ -6790,7 +6998,7 @@ function parseMaxReaderMarkdown(
     )
     .find(
       (line) =>
-        /AED|Ø¯\.?Ø¥|Ø¯Ø±Ù‡Ù…|USD|GBP|EUR|\$/i.test(line) &&
+        /AED|ÃƒËœÃ‚Â¯\.?ÃƒËœÃ‚Â¥|ÃƒËœÃ‚Â¯ÃƒËœÃ‚Â±Ãƒâ„¢Ã¢â‚¬Â¡Ãƒâ„¢Ã¢â‚¬Â¦|USD|GBP|EUR|\$/i.test(line) &&
         parsePrice(line) > 0 &&
         !/^\d+\s*-\s*\d+\s*(?:MTHS?|MONTHS?|YRS?|YEARS?)$/i.test(line) &&
         !/^(?:Size|Color|Colour|Product Code)/i.test(line),
@@ -6962,7 +7170,7 @@ function looksLikeNextPriceText(text: string): boolean {
     text.includes("\u20ac") ||
     text.includes("\u00c2\u00a3") ||
     text.includes("\u00e2\u201a\u00ac") ||
-    /^(?:Now|Was|From)?\s*\D{0,8}\d[\d,.]*(?:\s*[-–]\s*\D{0,8}\d[\d,.]*)?$/i.test(
+    /^(?:Now|Was|From)?\s*\D{0,8}\d[\d,.]*(?:\s*[-Ã¢â‚¬â€œ]\s*\D{0,8}\d[\d,.]*)?$/i.test(
       text,
     )
   );
@@ -7119,7 +7327,7 @@ function nextSnapshotHasSizePicker(lines: string[]): boolean {
   return lines
     .slice(sizeIndex, sizeIndex + 8)
     .some((line) =>
-      /Choose Size|Select Size|Size Guide|Add to Bag|\u0627\u062e\u062a(?:ر|\u0627\u0631)\s+\u0627\u0644\u0645\u0642\u0627\u0633/i.test(
+      /Choose Size|Select Size|Size Guide|Add to Bag|\u0627\u062e\u062a(?:Ã˜Â±|\u0627\u0631)\s+\u0627\u0644\u0645\u0642\u0627\u0633/i.test(
         line,
       ),
     );
@@ -7235,10 +7443,10 @@ function parseNextSnapshotText(
     (!rawFlags.readerFallback
       ? snapshotPriceLine ||
         priceWindow.find((line) =>
-          /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line),
+          /(?:EGP|\$|Ã‚Â£|Ã¢â€šÂ¬|\u062c\s*\.?\s*\u0645)/i.test(line),
         ) ||
         lines.find((line) =>
-          /(?:EGP|\$|£|€|\u062c\s*\.?\s*\u0645)/i.test(line),
+          /(?:EGP|\$|Ã‚Â£|Ã¢â€šÂ¬|\u062c\s*\.?\s*\u0645)/i.test(line),
         ) ||
         priceWindow.find(looksLikeCurrencyText) ||
         lines.find(looksLikeCurrencyText)
@@ -8235,7 +8443,7 @@ export class NextScraper implements SupplierScraper {
         }
       }
 
-      // Fallback to HTML scraping if API fails (mobile UA first — Next blocks desktop server traffic)
+      // Fallback to HTML scraping if API fails (mobile UA first Ã¢â‚¬â€ Next blocks desktop server traffic)
       let lastError: any = null;
       const htmlErrors: string[] = [];
       const pageUrls = [

@@ -10,7 +10,8 @@ import {
   AlertCircle, 
   History, 
   DollarSign,
-  PackageSearch
+  PackageSearch,
+  Sheet
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -24,6 +25,7 @@ import ManualReview from './pages/ManualReview';
 import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
 import SourcesPage from './pages/SourcesPage';
+import ExcelSheetPage from './pages/ExcelSheetPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -95,6 +97,7 @@ function Sidebar() {
       <nav className="flex-1 mt-4">
         <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={location.pathname === '/'} />
         <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
+        <SidebarItem to="/excel-sheet" icon={Sheet} label="Excel Sheet" active={location.pathname === '/excel-sheet'} />
         <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
         <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
         <SidebarItem to="/pricing" icon={DollarSign} label="Pricing Rules" active={location.pathname === '/pricing'} />
@@ -119,6 +122,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<><TopBar breadcrumb="Dashboard" /><main className="flex-1 p-8 overflow-y-auto"><Dashboard /></main></>} />
               <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
+              <Route path="/excel-sheet" element={<><TopBar breadcrumb="Excel Sheet" /><main className="flex-1 p-8 overflow-y-auto"><ExcelSheetPage /></main></>} />
               <Route path="/products" element={<><TopBar breadcrumb="Linked Products" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
               <Route path="/products/:id" element={<><TopBar breadcrumb="Product Details" /><main className="flex-1 p-8 overflow-y-auto"><ProductDetail /></main></>} />
               <Route path="/pricing" element={<><TopBar breadcrumb="Pricing Rules" /><main className="flex-1 p-8 overflow-y-auto"><PricingRules /></main></>} />

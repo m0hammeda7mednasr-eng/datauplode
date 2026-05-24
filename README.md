@@ -32,6 +32,32 @@ React + Node.js + Prisma app for **legal, brand-aware product source scanning** 
   - Restricted mode guard:
     - `This source needs permission, feed, API, or manual import.`
 
+### Bulk Excel Import (New)
+- New page: `/excel-sheet`
+- Upload `.xlsx`, `.xls`, or `.csv`, choose URL column, then run one bulk import.
+- Each valid row is analyzed and queued for Shopify publish automatically.
+- Rows already linked to Shopify are marked as `Skipped` (not treated as failed issues).
+- Failed rows are auto-created in `Manual Review` (`/review`) with the error reason.
+- API endpoint: `POST /api/imports/excel/process`
+- Optional env: `EXCEL_IMPORT_MAX_ROWS` (default: `300`)
+
+### Google Sheet Link + Auto Sync (New)
+- Supported columns in Google Sheet: `link` (or `url`), optional `price`, optional `collection`.
+- Manual run from link:
+  - `POST /api/imports/excel/process-sheet-link`
+- Auto sync controls:
+  - `GET /api/imports/excel/auto-sync/status`
+  - `POST /api/imports/excel/auto-sync/start`
+  - `POST /api/imports/excel/auto-sync/stop`
+- Run tracking (professional timeline):
+  - `GET /api/imports/excel/runs`
+  - `GET /api/imports/excel/runs/:id`
+- Each run now reports `published`, `skipped`, `failed`, and manual-review count.
+- Auto sync processes only new/changed rows based on `link + price + collection`.
+- Optional env:
+  - `GOOGLE_SHEET_FETCH_TIMEOUT_MS` (default `20000`)
+  - `GOOGLE_SHEET_PROCESSED_ROWS_TTL_HOURS` (default `720`)
+
 ## API
 - `POST /api/source-scan`
 - `GET /api/source-scan/:id`

@@ -2,14 +2,30 @@ import PQueue from 'p-queue';
 import { prisma } from '../db.js';
 import { ShopifyService } from './shopify.js';
 import { PricingEngine } from './pricing.js';
-import { ScraperService } from './scraper.js';
+import { ScraperService, type NormalizedProduct } from './scraper.js';
 
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
-const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 15);
+const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
 const INVENTORY_SYNC_BATCH_SIZE = Number(process.env.SYNC_INVENTORY_BATCH_SIZE || 25);
-const INVENTORY_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_INVENTORY_MIN_AGE_MINUTES || 1440);
+const INVENTORY_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_INVENTORY_MIN_AGE_MINUTES || 30);
+const FULL_SOURCE_SYNC_ENABLED = process.env.SYNC_FULL_SOURCE_REFRESH !== 'false';
+const REBUILD_ON_VARIANT_CHANGE = process.env.SYNC_REBUILD_ON_VARIANT_CHANGE !== 'false';
+const SYNC_JOB_WAIT_TIMEOUT_MS = Number(process.env.SYNC_JOB_WAIT_TIMEOUT_MS || 15 * 60 * 1000);
+const SYNC_JOB_RECOVERY_ENABLED = process.env.SYNC_JOB_RECOVERY_ENABLED !== 'false';
+const SYNC_JOB_RECOVERY_LIMIT = Number(process.env.SYNC_JOB_RECOVERY_LIMIT || 50);
+const SYNC_JOB_STALE_RUNNING_MINUTES = Number(process.env.SYNC_JOB_STALE_RUNNING_MINUTES || 10);
 const MAX_SHOPIFY_MEDIA_ITEMS = 250;
 const scraperService = new ScraperService();
+
+type CatalogSyncOptions = {
+  reason?: string;
+  refreshSource?: boolean;
+  pricingRuleId?: string | null;
+  priceMultiplier?: number | null;
+  priceOverride?: number | null;
+  collections?: string[];
+  sheetMeta?: Record<string, any>;
+};
 
 function inventorySyncCutoffDate(): Date {
   const minutes = Number.isFinite(INVENTORY_SYNC_MIN_AGE_MINUTES) && INVENTORY_SYNC_MIN_AGE_MINUTES > 0
@@ -495,12 +511,341 @@ function getInventoryQuantityForStatus(stockStatus: string) {
   return getFallbackInventoryQuantity({ available: true, stockStatus });
 }
 
+function toPositiveNumber(value: any): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function moneyClose(left: any, right: any): boolean {
+  const a = Number(left);
+  const b = Number(right);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 0.01;
+}
+
+function formatShopifyPrice(value: number): string {
+  return Number(value).toFixed(2);
+}
+
+function getImportMeta(product: any): Record<string, any> {
+  const parsed = parseProductRaw(product?.raw);
+  const importMeta = parsed?.import;
+  return importMeta && typeof importMeta === 'object' ? importMeta : {};
+}
+
+function cleanStringList(values: any): string[] {
+  return Array.isArray(values)
+    ? values.map(value => cleanOptionText(value)).filter(Boolean)
+    : [];
+}
+
+function parseStoredCollectionIds(value: any): string[] {
+  const raw = cleanOptionText(value);
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    return cleanStringList(parsed);
+  } catch {
+    return raw
+      .split(',')
+      .map(entry => entry.trim())
+      .filter(Boolean);
+  }
+}
+
+function getSyncCollections(product: any, options: CatalogSyncOptions): string[] {
+  const requested = cleanStringList(options.collections);
+  return requested.length ? requested : parseStoredCollectionIds(product?.shopifyProduct?.collectionIds);
+}
+
+function normalizeFreshProductPrices(product: NormalizedProduct, options: CatalogSyncOptions): NormalizedProduct {
+  const priceOverride = toPositiveNumber(options.priceOverride);
+  const variants = product.variants.map((variant) => {
+    const variantPrice =
+      priceOverride ||
+      toPositiveNumber(variant.price) ||
+      toPositiveNumber(product.price) ||
+      0;
+
+    return {
+      ...variant,
+      price: variantPrice,
+      currency: variant.currency || product.currency,
+    };
+  });
+  const variantPrices = variants
+    .map(variant => toPositiveNumber(variant.price))
+    .filter((price): price is number => Boolean(price));
+
+  return {
+    ...product,
+    price: priceOverride || (variantPrices.length ? Math.min(...variantPrices) : product.price),
+    variants,
+  };
+}
+
+function variantOptionValues(variant: any): Record<string, string> {
+  const parsedRaw = parseVariantRaw(variant?.raw);
+  const optionValues = {
+    ...(parsedRaw?.optionValues && typeof parsedRaw.optionValues === 'object'
+      ? parsedRaw.optionValues
+      : {}),
+    ...(variant?.optionValues && typeof variant.optionValues === 'object'
+      ? variant.optionValues
+      : {}),
+  };
+  const values: Record<string, string> = {};
+
+  for (const [name, value] of Object.entries(optionValues)) {
+    const cleanName = cleanOptionText(name === 'Colour' ? 'Color' : name);
+    const cleanValue = cleanOptionText(value);
+    if (cleanName && cleanValue && !/^default$/i.test(cleanValue)) {
+      values[cleanName] = cleanValue;
+    }
+  }
+
+  if (variant?.color) values.Color = cleanOptionText(variant.color);
+  if (variant?.size) values.Size = cleanOptionText(variant.size);
+
+  return values;
+}
+
+function variantOptionKey(variant: any): string {
+  return Object.entries(variantOptionValues(variant))
+    .map(([name, value]) => `${normalizeForMatch(name)}=${normalizeForMatch(value)}`)
+    .sort()
+    .join('|');
+}
+
+function variantMatchKeys(variant: any): string[] {
+  const keys: string[] = [];
+  const sourceVariantId = normalizeForMatch(variant?.sourceVariantId);
+  const sku = normalizeForMatch(variant?.sku);
+  const color = normalizeForMatch(variant?.color || variantOptionValues(variant).Color);
+  const size = normalizeForMatch(variant?.size || variantOptionValues(variant).Size);
+  const options = variantOptionKey(variant);
+
+  if (sourceVariantId) keys.push(`source:${sourceVariantId}`);
+  if (sku) keys.push(`sku:${sku}`);
+  if (color || size) keys.push(`combo:${color}|${size}`);
+  if (options) keys.push(`options:${options}`);
+
+  return [...new Set(keys)];
+}
+
+function primaryVariantKey(variant: any, index: number): string {
+  return variantMatchKeys(variant)[0] || `index:${index}`;
+}
+
+function buildVariantLookup(variants: any[]): Map<string, any> {
+  const lookup = new Map<string, any>();
+  variants.forEach((variant, index) => {
+    lookup.set(`index:${index}`, variant);
+    for (const key of variantMatchKeys(variant)) {
+      if (!lookup.has(key)) lookup.set(key, variant);
+    }
+  });
+  return lookup;
+}
+
+function findMatchingStoredVariant(
+  freshVariant: any,
+  freshIndex: number,
+  lookup: Map<string, any>,
+) {
+  for (const key of variantMatchKeys(freshVariant)) {
+    const match = lookup.get(key);
+    if (match) return match;
+  }
+
+  return lookup.get(`index:${freshIndex}`) || null;
+}
+
+function diffVariantStructure(existingVariants: any[], freshVariants: any[]) {
+  const existingKeys = existingVariants.map(primaryVariantKey);
+  const freshKeys = freshVariants.map(primaryVariantKey);
+  const existingSet = new Set(existingKeys);
+  const freshSet = new Set(freshKeys);
+  const added = freshKeys.filter(key => !existingSet.has(key));
+  const removed = existingKeys.filter(key => !freshSet.has(key));
+
+  return {
+    changed:
+      existingVariants.length !== freshVariants.length ||
+      added.length > 0 ||
+      removed.length > 0,
+    added,
+    removed,
+  };
+}
+
+function buildProductRawAfterSourceSync(
+  existingProduct: any,
+  freshProduct: NormalizedProduct,
+  options: CatalogSyncOptions,
+) {
+  const currentRaw = parseProductRaw(existingProduct?.raw);
+  const currentImportMeta = getImportMeta(existingProduct);
+  const nextImportMeta = {
+    ...currentImportMeta,
+    ...(options.sheetMeta || {}),
+    ...(options.pricingRuleId ? { pricingRuleId: options.pricingRuleId } : {}),
+    ...(toPositiveNumber(options.priceOverride)
+      ? { sheetPriceOverride: toPositiveNumber(options.priceOverride) }
+      : {}),
+    ...(toPositiveNumber(options.priceMultiplier)
+      ? { sheetPriceMultiplier: toPositiveNumber(options.priceMultiplier) }
+      : {}),
+    lastSourceSyncedAt: new Date().toISOString(),
+    lastSourceSyncReason: cleanOptionText(options.reason || 'scheduled'),
+  };
+
+  return JSON.stringify({
+    ...currentRaw,
+    options: freshProduct.options,
+    raw: freshProduct.raw,
+    import: nextImportMeta,
+  });
+}
+
+function imageRecordsForProduct(product: NormalizedProduct) {
+  return product.images
+    .filter(image => normalizeUrl(image.url))
+    .map((image, index) => ({
+      url: normalizeUrl(image.url),
+      alt: image.alt || product.title,
+      color: image.color,
+      position: Number.isInteger(image.position) ? image.position : index,
+    }));
+}
+
+function sourceVariantDataFromFresh(
+  product: NormalizedProduct,
+  variant: NormalizedProduct['variants'][number],
+  index: number,
+) {
+  const sourcePrice =
+    toPositiveNumber(variant.price) ||
+    toPositiveNumber(product.price) ||
+    0;
+
+  return {
+    sourceVariantId:
+      variant.sourceVariantId ||
+      variant.sku ||
+      `${product.source.productId || 'variant'}-${index + 1}`,
+    sku: variant.sku,
+    color: variant.color,
+    size: variant.size,
+    price: sourcePrice,
+    currency: variant.currency || product.currency,
+    available: variant.available ?? true,
+    stockStatus: variant.stockStatus || 'unknown',
+    imageUrl: variant.imageUrl,
+    raw: JSON.stringify({
+      optionValues: variant.optionValues,
+      raw: variant.raw,
+    }),
+  };
+}
+
+async function resolvePricingRule(product: any, options: CatalogSyncOptions) {
+  const payloadMultiplier = toPositiveNumber(options.priceMultiplier);
+  const importMeta = getImportMeta(product);
+  const storedMultiplier = toPositiveNumber(importMeta.sheetPriceMultiplier);
+  const multiplier = payloadMultiplier || storedMultiplier;
+  if (multiplier) {
+    return {
+      multiplier,
+      fixedMarkup: 0,
+      percentageMarkup: 0,
+      rounding: 'none',
+      minPrice: null,
+      maxPrice: null,
+    };
+  }
+
+  const pricingRuleId =
+    cleanOptionText(options.pricingRuleId) ||
+    cleanOptionText(importMeta.pricingRuleId);
+  if (pricingRuleId) {
+    const rule = await prisma.pricingRule.findUnique({ where: { id: pricingRuleId } });
+    if (rule) return rule;
+  }
+
+  const rules = await prisma.pricingRule.findMany();
+  return PricingEngine.selectBestRule(rules, {
+    supplierId: product.supplierId,
+    currency: product.currency,
+  });
+}
+
+function calculatedVariantPrice(sourcePrice: any, rule: any) {
+  const price = toPositiveNumber(sourcePrice);
+  if (!price) return null;
+  return rule ? PricingEngine.calculatePrice(price, rule) : Number(price.toFixed(2));
+}
+
+function isTransientQueueDbError(error: any) {
+  const message = String(error?.message || error || '');
+  return (
+    ['P1001', 'P1017'].includes(String(error?.code || '')) ||
+    /can't reach database server|server has closed the connection|connection terminated|econnreset|timeout|forcibly closed/i.test(
+      message,
+    )
+  );
+}
+
+async function queueDbRetry<T>(
+  label: string,
+  operation: () => Promise<T>,
+  attempts = 8,
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      if (!isTransientQueueDbError(error) || attempt === attempts) break;
+      const delayMs = Math.min(30000, 1500 * attempt);
+      console.warn(`${label} transient DB error; retry ${attempt}/${attempts}`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 export class QueueService {
   private static queue = new PQueue({ concurrency: 2 });
   private static inventoryMonitorStarted = false;
   private static inventoryMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
   static async addTask(type: string, payload: any) {
+    if (type === 'SYNC_PRODUCT' && payload?.sourceProductId) {
+      const activeJobs = await prisma.syncJob.findMany({
+        where: {
+          type: 'SYNC_PRODUCT',
+          status: { in: ['pending', 'running'] },
+          createdAt: {
+            gte: new Date(Date.now() - SYNC_JOB_WAIT_TIMEOUT_MS),
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      const existingJob = activeJobs.find((job) => {
+        try {
+          const existingPayload = JSON.parse(job.payload || '{}');
+          return existingPayload?.sourceProductId === payload.sourceProductId;
+        } catch {
+          return false;
+        }
+      });
+
+      if (existingJob) return existingJob;
+    }
+
     const job = await prisma.syncJob.create({
       data: {
         type,
@@ -515,6 +860,88 @@ export class QueueService {
     return job;
   }
 
+  static async recoverInterruptedJobs() {
+    if (!SYNC_JOB_RECOVERY_ENABLED) {
+      console.log('Sync job recovery disabled by SYNC_JOB_RECOVERY_ENABLED=false');
+      return { recovered: 0 };
+    }
+
+    const staleMinutes =
+      Number.isFinite(SYNC_JOB_STALE_RUNNING_MINUTES) && SYNC_JOB_STALE_RUNNING_MINUTES > 0
+        ? SYNC_JOB_STALE_RUNNING_MINUTES
+        : 10;
+    const recoveryLimit =
+      Number.isFinite(SYNC_JOB_RECOVERY_LIMIT) && SYNC_JOB_RECOVERY_LIMIT > 0
+        ? Math.floor(SYNC_JOB_RECOVERY_LIMIT)
+        : 50;
+    const staleCutoff = new Date(Date.now() - staleMinutes * 60 * 1000);
+    const recoverableTypes = [
+      'PUBLISH_TO_SHOPIFY',
+      'REPUBLISH_TO_SHOPIFY',
+      'SYNC_PRODUCT',
+      'SYNC_INVENTORY',
+    ];
+    const jobs = await prisma.syncJob.findMany({
+      where: {
+        type: { in: recoverableTypes },
+        OR: [
+          { status: 'pending' },
+          {
+            status: 'running',
+            OR: [
+              { startedAt: null },
+              { startedAt: { lte: staleCutoff } },
+            ],
+          },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+      take: recoveryLimit,
+    });
+
+    const recoveredProductIds = new Set<string>();
+    for (const job of jobs) {
+      if (job.type === 'SYNC_PRODUCT') {
+        let sourceProductId = '';
+        try {
+          sourceProductId = cleanOptionText(JSON.parse(job.payload || '{}')?.sourceProductId);
+        } catch {}
+
+        if (sourceProductId && recoveredProductIds.has(sourceProductId)) {
+          await prisma.syncJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'completed',
+              completedAt: new Date(),
+              result: JSON.stringify({
+                skipped: true,
+                reason: 'Duplicate recovered SYNC_PRODUCT job for the same product',
+                sourceProductId,
+              }),
+            },
+          });
+          continue;
+        }
+
+        if (sourceProductId) recoveredProductIds.add(sourceProductId);
+      }
+
+      if (job.status === 'running') {
+        await prisma.syncJob.update({
+          where: { id: job.id },
+          data: { status: 'pending', startedAt: null },
+        });
+      }
+      this.processJob(job.id);
+    }
+
+    if (jobs.length > 0) {
+      console.log(`Recovered ${jobs.length} interrupted sync job(s)`);
+    }
+
+    return { recovered: jobs.length };
+  }
+
   static startInventoryMonitor() {
     if (this.inventoryMonitorStarted) return;
     if (process.env.SYNC_INVENTORY_AUTOSTART === 'false') {
@@ -524,7 +951,7 @@ export class QueueService {
 
     const intervalMinutes = Number.isFinite(INVENTORY_SYNC_INTERVAL_MINUTES) && INVENTORY_SYNC_INTERVAL_MINUTES > 0
       ? INVENTORY_SYNC_INTERVAL_MINUTES
-      : 15;
+      : 30;
     const intervalMs = intervalMinutes * 60 * 1000;
 
     const enqueueInventorySync = async () => {
@@ -549,8 +976,180 @@ export class QueueService {
     console.log(`Inventory monitor enabled: every ${intervalMinutes} minute(s), batch size ${INVENTORY_SYNC_BATCH_SIZE}`);
   }
 
-  private static async syncProductInventory(sourceProductId: string, jobId: string) {
-    const product = await prisma.sourceProduct.findUnique({
+  private static async waitForJobCompletion(jobId: string, timeoutMs = SYNC_JOB_WAIT_TIMEOUT_MS) {
+    const deadline = Date.now() + Math.max(30_000, timeoutMs);
+
+    while (Date.now() < deadline) {
+      const job = await prisma.syncJob.findUnique({ where: { id: jobId } });
+      if (!job) throw new Error(`Missing sync job ${jobId}`);
+
+      if (job.status === 'completed' || job.status === 'failed') {
+        let parsedResult: any = {};
+        try {
+          parsedResult = job.result ? JSON.parse(job.result) : {};
+        } catch {}
+        return { ...job, parsedResult };
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+
+    throw new Error(`Timed out waiting for sync job ${jobId}`);
+  }
+
+  private static async refreshStoredSourceProduct(
+    existingProduct: any,
+    freshProduct: NormalizedProduct,
+    options: CatalogSyncOptions,
+  ) {
+    const variantLookup = buildVariantLookup(existingProduct.variants || []);
+    const imageRecords = imageRecordsForProduct(freshProduct);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.sourceImage.deleteMany({
+        where: { sourceProductId: existingProduct.id },
+      });
+
+      await tx.sourceProduct.update({
+        where: { id: existingProduct.id },
+        data: {
+          productId: freshProduct.source.productId,
+          title: freshProduct.title,
+          description: freshProduct.description,
+          brand: freshProduct.brand || freshProduct.source.supplier,
+          currency: freshProduct.currency,
+          price: freshProduct.price,
+          raw: buildProductRawAfterSourceSync(existingProduct, freshProduct, options),
+          syncStatus: 'active',
+          images: { create: imageRecords },
+        },
+      });
+
+      for (const [index, freshVariant] of freshProduct.variants.entries()) {
+        const existingVariant = findMatchingStoredVariant(freshVariant, index, variantLookup);
+        const data = sourceVariantDataFromFresh(freshProduct, freshVariant, index);
+
+        if (existingVariant?.id) {
+          await tx.sourceVariant.update({
+            where: { id: existingVariant.id },
+            data,
+          });
+        } else {
+          await tx.sourceVariant.create({
+            data: {
+              ...data,
+              sourceProductId: existingProduct.id,
+            },
+          });
+        }
+      }
+    });
+
+    return prisma.sourceProduct.findUnique({
+      where: { id: existingProduct.id },
+      include: {
+        variants: { include: { shopifyVariant: true } },
+        images: true,
+        shopifyProduct: true,
+        supplier: true,
+      },
+    });
+  }
+
+  private static async rebuildLinkedProductFromFreshSource(
+    client: any,
+    existingProduct: any,
+    freshProduct: NormalizedProduct,
+    options: CatalogSyncOptions,
+  ) {
+    const collections = getSyncCollections(existingProduct, options);
+    const importMeta = getImportMeta(existingProduct);
+    const pricingRuleId =
+      cleanOptionText(options.pricingRuleId) ||
+      cleanOptionText(importMeta.pricingRuleId) ||
+      null;
+    const priceMultiplier =
+      toPositiveNumber(options.priceMultiplier) ||
+      toPositiveNumber(importMeta.sheetPriceMultiplier);
+    const shopifyId = existingProduct.shopifyProduct?.shopifyId;
+
+    if (!shopifyId) {
+      throw new Error('Product is not linked to Shopify');
+    }
+
+    await ShopifyService.deleteProduct(client, shopifyId);
+
+    await prisma.$transaction(async (tx) => {
+      if (existingProduct.shopifyProduct?.id) {
+        await tx.shopifyVariant.deleteMany({
+          where: { shopifyProductId: existingProduct.shopifyProduct.id },
+        });
+        await tx.shopifyProduct.delete({
+          where: { id: existingProduct.shopifyProduct.id },
+        });
+      }
+
+      await tx.sourceImage.deleteMany({
+        where: { sourceProductId: existingProduct.id },
+      });
+      await tx.sourceVariant.deleteMany({
+        where: { sourceProductId: existingProduct.id },
+      });
+      await tx.manualReviewItem.deleteMany({
+        where: { sourceProductId: existingProduct.id, status: 'pending' },
+      });
+
+      await tx.sourceProduct.update({
+        where: { id: existingProduct.id },
+        data: {
+          productId: freshProduct.source.productId,
+          title: freshProduct.title,
+          description: freshProduct.description,
+          brand: freshProduct.brand || freshProduct.source.supplier,
+          currency: freshProduct.currency,
+          price: freshProduct.price,
+          raw: buildProductRawAfterSourceSync(existingProduct, freshProduct, options),
+          syncStatus: 'pending',
+          images: { create: imageRecordsForProduct(freshProduct) },
+          variants: {
+            create: freshProduct.variants.map((variant, index) =>
+              sourceVariantDataFromFresh(freshProduct, variant, index),
+            ),
+          },
+        },
+      });
+    });
+
+    const publishJob = await this.addTask('PUBLISH_TO_SHOPIFY', {
+      sourceProductId: existingProduct.id,
+      pricingRuleId,
+      collections,
+      ...(priceMultiplier ? { priceMultiplier } : {}),
+    });
+    const finishedJob = await this.waitForJobCompletion(publishJob.id);
+
+    if (finishedJob.status === 'failed') {
+      throw new Error(
+        cleanOptionText(finishedJob.parsedResult?.error) ||
+          `Shopify rebuild publish failed (${publishJob.id})`,
+      );
+    }
+
+    return {
+      productRebuilt: true,
+      rebuildPublishJobId: publishJob.id,
+      rebuiltShopifyId: cleanOptionText(finishedJob.parsedResult?.shopifyId),
+      variantsCreated: Number(finishedJob.parsedResult?.variantsCreated || 0),
+      variantsExpected: Number(finishedJob.parsedResult?.variantsExpected || 0),
+    };
+  }
+
+  private static async syncProductInventory(
+    sourceProductId: string,
+    jobId: string,
+    options: CatalogSyncOptions = {},
+  ) {
+    let product = await prisma.sourceProduct.findUnique({
       where: { id: sourceProductId },
       include: {
         variants: { include: { shopifyVariant: true } },
@@ -567,13 +1166,114 @@ export class QueueService {
     if (!product.shopifyProduct) {
       throw new Error('Product is not linked to Shopify');
     }
-    if (!product.shopifyProduct.syncEnabled || !product.shopifyProduct.syncInventory) {
-      return { skipped: true, reason: 'Inventory sync disabled for product', sourceProductId };
+    if (!product.shopifyProduct.syncEnabled) {
+      return { skipped: true, reason: 'Product sync is disabled', sourceProductId };
+    }
+
+    const shouldSyncInventory = Boolean(product.shopifyProduct.syncInventory);
+    const shouldSyncPrice = Boolean(product.shopifyProduct.syncPrice);
+    const shouldSyncImages = Boolean(product.shopifyProduct.syncImages);
+    if (!shouldSyncInventory && !shouldSyncPrice && !shouldSyncImages) {
+      return { skipped: true, reason: 'Price, inventory, and image sync are disabled for product', sourceProductId };
     }
 
     const client = await ShopifyService.getClientFromDb(prisma);
     const inventoryLocation = await ShopifyService.getInventoryLocation(client);
-    const availabilitySnapshot = await scraperService.checkAvailability(product.url);
+    const summary: any = {
+      sourceProductId,
+      shopifyProductId: product.shopifyProduct.shopifyId,
+      inventoryLocationId: inventoryLocation.id,
+      inventoryLocationName: inventoryLocation.name,
+      reason: cleanOptionText(options.reason || 'scheduled'),
+      sourceRefreshed: false,
+      productDetailsUpdated: false,
+      productRebuilt: false,
+      variantStructureChanged: false,
+      variantsAdded: 0,
+      variantsRemoved: 0,
+      variantsChecked: product.variants.length,
+      pricesChecked: 0,
+      pricesUpdated: 0,
+      variantsUpdated: 0,
+      inStock: 0,
+      outOfStock: 0,
+      lowStock: 0,
+      skippedVariants: 0,
+      variantImagesChecked: 0,
+      variantImagesUpdated: 0,
+      sourceRefreshError: null,
+    };
+
+    const shouldRefreshSource =
+      FULL_SOURCE_SYNC_ENABLED && options.refreshSource !== false;
+    if (shouldRefreshSource) {
+      try {
+        const scraped = normalizeFreshProductPrices(
+          await scraperService.scrape(product.url),
+          options,
+        );
+        const variantDiff = diffVariantStructure(product.variants || [], scraped.variants || []);
+        summary.variantStructureChanged = variantDiff.changed;
+        summary.variantsAdded = variantDiff.added.length;
+        summary.variantsRemoved = variantDiff.removed.length;
+        summary.sourceVariantsScraped = scraped.variants.length;
+
+        if (variantDiff.changed && REBUILD_ON_VARIANT_CHANGE) {
+          const rebuildResult = await this.rebuildLinkedProductFromFreshSource(
+            client,
+            product,
+            scraped,
+            options,
+          );
+          const rebuildSummary = {
+            ...summary,
+            ...rebuildResult,
+            sourceRefreshed: true,
+          };
+          await prisma.auditLog.create({
+            data: {
+              sourceProductId: product.id,
+              action: 'SYNC_PRODUCT_FULL',
+              details: JSON.stringify(rebuildSummary),
+            },
+          });
+          return rebuildSummary;
+        }
+
+        const refreshedProduct = await this.refreshStoredSourceProduct(product, scraped, options);
+        if (refreshedProduct) {
+          product = refreshedProduct;
+          summary.sourceRefreshed = true;
+          summary.variantsChecked = product.variants.length;
+        }
+
+        const productUpdate = await ShopifyService.updateProductDetails(
+          client,
+          product.shopifyProduct.shopifyId,
+          {
+            title: product.title,
+            descriptionHtml: product.description || undefined,
+            vendor: product.brand || product.supplier.name,
+            status: 'ACTIVE',
+            tags: [product.supplier.name, product.brand, 'SyncEngine'].filter(Boolean),
+          },
+        );
+        const productUpdateErrors = productUpdate.productUpdate?.userErrors || [];
+        if (productUpdateErrors.length > 0) {
+          throw new Error(`Shopify Product Update Error: ${productUpdateErrors[0].message}`);
+        }
+        summary.productDetailsUpdated = true;
+      } catch (error: any) {
+        if (summary.variantStructureChanged && REBUILD_ON_VARIANT_CHANGE) {
+          throw error;
+        }
+        summary.sourceRefreshError = error?.message || 'Source refresh failed';
+      }
+    }
+
+    const availabilitySnapshot = shouldSyncInventory
+      ? await scraperService.checkAvailability(product.url)
+      : { available: true, variants: [] };
     const shopifyInventoryVariants = await ShopifyService.getProductInventoryVariants(
       client,
       product.shopifyProduct.shopifyId,
@@ -583,23 +1283,10 @@ export class QueueService {
     );
 
     const quantities: Array<{ inventoryItemId: string; quantity: number }> = [];
+    const priceUpdates: Array<{ id: string; price: string }> = [];
     const sourceUpdates: any[] = [];
-    const summary = {
-      sourceProductId,
-      shopifyProductId: product.shopifyProduct.shopifyId,
-      inventoryLocationId: inventoryLocation.id,
-      inventoryLocationName: inventoryLocation.name,
-      variantsChecked: product.variants.length,
-      variantsUpdated: 0,
-      inStock: 0,
-      outOfStock: 0,
-      lowStock: 0,
-      skippedVariants: 0,
-      variantImagesChecked: 0,
-      variantImagesUpdated: 0,
-    };
     const imageVariantPayloads: Array<{ sourceVariant: any; imageUrl: string; input: any }> = [];
-    const shouldSyncImages = Boolean(product.shopifyProduct.syncImages);
+    const pricingRule = shouldSyncPrice ? await resolvePricingRule(product, options) : null;
 
     for (const sourceVariant of product.variants) {
       const shopifyVariant = sourceVariant.shopifyVariant;
@@ -622,6 +1309,32 @@ export class QueueService {
             },
           });
         }
+      }
+
+      if (shouldSyncPrice && shopifyVariant) {
+        const targetPrice = calculatedVariantPrice(sourceVariant.price || product.price, pricingRule);
+        if (targetPrice) {
+          summary.pricesChecked += 1;
+          if (
+            !moneyClose(shopifyVariant.price, targetPrice) ||
+            !moneyClose(inventoryVariant?.price, targetPrice)
+          ) {
+            priceUpdates.push({
+              id: shopifyVariant.shopifyId,
+              price: formatShopifyPrice(targetPrice),
+            });
+            sourceUpdates.push(
+              prisma.shopifyVariant.update({
+                where: { id: shopifyVariant.id },
+                data: { price: targetPrice },
+              }),
+            );
+          }
+        }
+      }
+
+      if (!shouldSyncInventory) {
+        continue;
       }
 
       if (!inventoryItemId) {
@@ -651,21 +1364,36 @@ export class QueueService {
       );
     }
 
-    if (quantities.length === 0) {
-      throw new Error('No linked Shopify inventory items found for this product');
+    if (priceUpdates.length > 0) {
+      const priceResponse = await ShopifyService.updateVariantsBulk(
+        client,
+        product.shopifyProduct.shopifyId,
+        priceUpdates,
+      );
+      const priceErrors = priceResponse.productVariantsBulkUpdate?.userErrors || [];
+      if (priceErrors.length > 0) {
+        throw new Error(`Shopify Price Sync Error: ${priceErrors[0].message}`);
+      }
+      summary.pricesUpdated = priceUpdates.length;
     }
 
-    const inventoryResponse = await ShopifyService.setInventoryQuantities(client, {
-      locationId: inventoryLocation.id,
-      quantities,
-      referenceDocumentUri: `gid://syncly/SyncJob/${jobId}`,
-    });
-    const userErrors = inventoryResponse.inventorySetQuantities?.userErrors || [];
-    if (userErrors.length > 0) {
-      throw new Error(`Shopify Inventory Error: ${userErrors[0].message}`);
-    }
+    if (shouldSyncInventory) {
+      if (quantities.length === 0) {
+        throw new Error('No linked Shopify inventory items found for this product');
+      }
 
-    summary.variantsUpdated = quantities.length;
+      const inventoryResponse = await ShopifyService.setInventoryQuantities(client, {
+        locationId: inventoryLocation.id,
+        quantities,
+        referenceDocumentUri: `gid://syncly/SyncJob/${jobId}`,
+      });
+      const userErrors = inventoryResponse.inventorySetQuantities?.userErrors || [];
+      if (userErrors.length > 0) {
+        throw new Error(`Shopify Inventory Error: ${userErrors[0].message}`);
+      }
+
+      summary.variantsUpdated = quantities.length;
+    }
 
     if (imageVariantPayloads.length > 0) {
       const optionNames = buildShopifyOptionNames(product.variants);
@@ -686,6 +1414,22 @@ export class QueueService {
         .length;
     }
 
+    const collections = getSyncCollections(product, options);
+    if (collections.length > 0) {
+      for (const collectionId of collections) {
+        await ShopifyService.addProductToCollection(
+          client,
+          product.shopifyProduct.shopifyId,
+          collectionId,
+        );
+      }
+      await prisma.shopifyProduct.update({
+        where: { id: product.shopifyProduct.id },
+        data: { collectionIds: collections.join(',') },
+      });
+      summary.collectionsEnsured = collections.length;
+    }
+
     await prisma.$transaction([
       ...sourceUpdates,
       prisma.sourceProduct.update({
@@ -698,7 +1442,7 @@ export class QueueService {
       prisma.auditLog.create({
         data: {
           sourceProductId: product.id,
-          action: 'SYNC_INVENTORY',
+          action: 'SYNC_PRODUCT_FULL',
           details: JSON.stringify(summary),
         },
       }),
@@ -720,7 +1464,11 @@ export class QueueService {
         shopifyProduct: {
           is: {
             syncEnabled: true,
-            syncInventory: true,
+            OR: [
+              { syncInventory: true },
+              { syncPrice: true },
+              { syncImages: true },
+            ],
           },
         },
       },
@@ -742,23 +1490,30 @@ export class QueueService {
     };
   }
 
-  private static async processJob(jobId: string) {
-    const job = await prisma.syncJob.findUnique({ where: { id: jobId } });
-    if (!job) return;
-
-    await prisma.syncJob.update({
-      where: { id: jobId },
-      data: { status: 'running', startedAt: new Date() }
-    });
-
-    this.queue.add(async () => {
+  private static processJob(jobId: string) {
+    void this.queue.add(async () => {
+      let job: any = null;
       try {
+        job = await queueDbRetry('syncJob.findUnique.start', () =>
+          prisma.syncJob.findUnique({ where: { id: jobId } }),
+        );
+        if (!job) return;
+
+        await queueDbRetry('syncJob.update.running', () =>
+          prisma.syncJob.update({
+            where: { id: jobId },
+            data: { status: 'running', startedAt: new Date() }
+          }),
+        );
+
         const payload = JSON.parse(job.payload || '{}');
         let result: any = {};
 
         switch (job.type) {
           case 'PUBLISH_TO_SHOPIFY': {
-            const { sourceProductId, pricingRuleId, collections } = payload;
+            const { sourceProductId, pricingRuleId, collections, priceMultiplier } = payload;
+            let createdShopifyProductId: string | null = null;
+            let client: any = null;
             
             // 1. Fetch source product
             const product = await prisma.sourceProduct.findUnique({
@@ -768,11 +1523,21 @@ export class QueueService {
             if (!product) throw new Error('Source product not found');
 
             // 2. Prepare Shopify Input
-            const client = await ShopifyService.getClientFromDb(prisma);
+            client = await ShopifyService.getClientFromDb(prisma);
             
             // Apply pricing rule
-            let rule = null;
-            if (pricingRuleId) {
+            let rule: any = null;
+            const payloadMultiplier = Number(priceMultiplier);
+            if (Number.isFinite(payloadMultiplier) && payloadMultiplier > 0) {
+              rule = {
+                multiplier: payloadMultiplier,
+                fixedMarkup: 0,
+                percentageMarkup: 0,
+                rounding: 'none',
+                minPrice: null,
+                maxPrice: null,
+              };
+            } else if (pricingRuleId) {
               rule = await prisma.pricingRule.findUnique({ where: { id: pricingRuleId } });
               if (!rule) throw new Error('Selected pricing rule was not found');
             } else {
@@ -804,114 +1569,129 @@ export class QueueService {
               },
             };
 
-            // 3. Create in Shopify
-            const shopifyResponse = await ShopifyService.createProduct(client, input);
-            const { product: shopifyProductResult, userErrors } = shopifyResponse.productCreate;
-
-            if (userErrors && userErrors.length > 0) {
-              throw new Error(`Shopify Error: ${userErrors[0].message}`);
-            }
-
-            const variantsResponse = await ShopifyService.createVariantsBulk(
-              client,
-              shopifyProductResult.id,
-              variantPayloads.map((variantPayload: any) => variantPayload.input),
-              productMedia,
-            );
-            const {
-              productVariants: createdVariants,
-              userErrors: variantErrors,
-            } = variantsResponse.productVariantsBulkCreate;
-
-            if (variantErrors && variantErrors.length > 0) {
-              throw new Error(`Shopify Variant Error: ${variantErrors[0].message}`);
-            }
-            if (!createdVariants || createdVariants.length === 0) {
-              throw new Error('Shopify did not return created variants');
-            }
-            const verifiedShopifyProduct = await ShopifyService.getProductBasic(
-              client,
-              shopifyProductResult.id,
-            );
-
-            // 4. Save to DB
-            const dbShopifyProduct = await prisma.shopifyProduct.create({
-              data: {
-                sourceProductId,
-                shopifyId: shopifyProductResult.id,
-                handle: shopifyProductResult.handle,
-                status: String(shopifyProductResult.status || 'ACTIVE').toLowerCase(),
-                collectionIds: collections?.join(',') || null,
-                price: createdVariants[0]?.price ? parseFloat(createdVariants[0].price) : variantPayloads[0].price,
-                variants: {
-                  create: createdVariants.map((variant: any, index: number) => {
-                    const variantPayload = matchCreatedVariantPayload(variant, variantPayloads, optionNames, index);
-
-                    return {
-                      shopifyId: variant.id,
-                      sku: variant.inventoryItem?.sku,
-                      price: variant.price ? parseFloat(variant.price) : variantPayload?.price,
-                      sourceVariantId: variantPayload?.sourceVariant.id || product.variants[0].id
-                    };
-                  })
-                }
-              }
-            });
-            await prisma.sourceProduct.update({
-              where: { id: sourceProductId },
-              data: { syncStatus: 'active' },
-            });
-
-            // 5. Add to collections if any
-            if (collections && collections.length > 0) {
-              for (const collectionId of collections) {
-                await ShopifyService.addProductToCollection(client, shopifyProductResult.id, collectionId);
-              }
-            }
-
-            let publicationResult: any = {
-              publishedCount: 0,
-              publications: [],
-              warning: null,
-            };
             try {
-              publicationResult = await ShopifyService.publishProductToSalesChannels(
+              // 3. Create in Shopify
+              const shopifyResponse = await ShopifyService.createProduct(client, input);
+              const { product: shopifyProductResult, userErrors } = shopifyResponse.productCreate;
+
+              if (userErrors && userErrors.length > 0) {
+                throw new Error(`Shopify Error: ${userErrors[0].message}`);
+              }
+              createdShopifyProductId = shopifyProductResult?.id || null;
+
+              const variantsResponse = await ShopifyService.createVariantsBulk(
+                client,
+                shopifyProductResult.id,
+                variantPayloads.map((variantPayload: any) => variantPayload.input),
+                productMedia,
+              );
+              const {
+                productVariants: createdVariants,
+                userErrors: variantErrors,
+              } = variantsResponse.productVariantsBulkCreate;
+
+              if (variantErrors && variantErrors.length > 0) {
+                throw new Error(`Shopify Variant Error: ${variantErrors[0].message}`);
+              }
+              if (!createdVariants || createdVariants.length === 0) {
+                throw new Error('Shopify did not return created variants');
+              }
+              const verifiedShopifyProduct = await ShopifyService.getProductBasic(
                 client,
                 shopifyProductResult.id,
               );
-              const publicationErrors = publicationResult.userErrors || [];
-              if (publicationErrors.length > 0) {
-                publicationResult.warning = `Shopify publication warning: ${publicationErrors[0].message}`;
+
+              // 4. Save to DB
+              const dbShopifyProduct = await prisma.shopifyProduct.create({
+                data: {
+                  sourceProductId,
+                  shopifyId: shopifyProductResult.id,
+                  handle: shopifyProductResult.handle,
+                  status: String(shopifyProductResult.status || 'ACTIVE').toLowerCase(),
+                  collectionIds: collections?.join(',') || null,
+                  price: createdVariants[0]?.price ? parseFloat(createdVariants[0].price) : variantPayloads[0].price,
+                  variants: {
+                    create: createdVariants.map((variant: any, index: number) => {
+                      const variantPayload = matchCreatedVariantPayload(variant, variantPayloads, optionNames, index);
+
+                      return {
+                        shopifyId: variant.id,
+                        sku: variant.inventoryItem?.sku,
+                        price: variant.price ? parseFloat(variant.price) : variantPayload?.price,
+                        sourceVariantId: variantPayload?.sourceVariant.id || product.variants[0].id
+                      };
+                    })
+                  }
+                }
+              });
+              await prisma.sourceProduct.update({
+                where: { id: sourceProductId },
+                data: { syncStatus: 'active' },
+              });
+
+              // 5. Add to collections if any
+              if (collections && collections.length > 0) {
+                for (const collectionId of collections) {
+                  await ShopifyService.addProductToCollection(client, shopifyProductResult.id, collectionId);
+                }
+              }
+
+              let publicationResult: any = {
+                publishedCount: 0,
+                publications: [],
+                warning: null,
+              };
+              try {
+                publicationResult = await ShopifyService.publishProductToSalesChannels(
+                  client,
+                  shopifyProductResult.id,
+                );
+                const publicationErrors = publicationResult.userErrors || [];
+                if (publicationErrors.length > 0) {
+                  publicationResult.warning = `Shopify publication warning: ${publicationErrors[0].message}`;
+                  console.warn(publicationResult.warning);
+                }
+              } catch (publicationError: any) {
+                publicationResult.warning =
+                  `Product created, but sales-channel publishing failed: ${publicationError.message}. ` +
+                  'Reconnect Shopify with read_publications and write_publications scopes.';
                 console.warn(publicationResult.warning);
               }
-            } catch (publicationError: any) {
-              publicationResult.warning =
-                `Product created, but sales-channel publishing failed: ${publicationError.message}. ` +
-                'Reconnect Shopify with read_publications and write_publications scopes.';
-              console.warn(publicationResult.warning);
-            }
 
-            result = {
-              shopifyProductId: dbShopifyProduct.id,
-              shopifyId: shopifyProductResult.id,
-              inventoryLocationId: inventoryLocation.id,
-              inventoryLocationName: inventoryLocation.name,
-              variantsCreated: createdVariants.length,
-              productMediaSubmitted: productMedia.length,
-              variantImagesRequested: variantPayloads.filter((variantPayload: any) => variantPayload.imageUrl).length,
-              variantImagesLinked: createdVariants.filter((variant: any) => (variant.media?.nodes || []).length > 0).length,
-              variantsLinked: createdVariants.length,
-              variantsExpected: variantPayloads.length,
-              variantsVerified: createdVariants.length === variantPayloads.length,
-              shopifyVerified: Boolean(verifiedShopifyProduct?.id),
-              shopifyStatus: String(verifiedShopifyProduct?.status || shopifyProductResult.status || 'ACTIVE').toLowerCase(),
-              salesChannelsPublished: publicationResult.publishedCount,
-              salesChannels: publicationResult.publications
-                .flatMap((publication: any) => publication.channels || [])
-                .map((channel: any) => channel.name || channel.handle)
-                .filter(Boolean),
-              publicationWarning: publicationResult.warning,
-            };
+              result = {
+                shopifyProductId: dbShopifyProduct.id,
+                shopifyId: shopifyProductResult.id,
+                inventoryLocationId: inventoryLocation.id,
+                inventoryLocationName: inventoryLocation.name,
+                variantsCreated: createdVariants.length,
+                productMediaSubmitted: productMedia.length,
+                variantImagesRequested: variantPayloads.filter((variantPayload: any) => variantPayload.imageUrl).length,
+                variantImagesLinked: createdVariants.filter((variant: any) => (variant.media?.nodes || []).length > 0).length,
+                variantsLinked: createdVariants.length,
+                variantsExpected: variantPayloads.length,
+                variantsVerified: createdVariants.length === variantPayloads.length,
+                shopifyVerified: Boolean(verifiedShopifyProduct?.id),
+                shopifyStatus: String(verifiedShopifyProduct?.status || shopifyProductResult.status || 'ACTIVE').toLowerCase(),
+                salesChannelsPublished: publicationResult.publishedCount,
+                salesChannels: publicationResult.publications
+                  .flatMap((publication: any) => publication.channels || [])
+                  .map((channel: any) => channel.name || channel.handle)
+                  .filter(Boolean),
+                publicationWarning: publicationResult.warning,
+              };
+            } catch (publishError: any) {
+              if (createdShopifyProductId) {
+                try {
+                  await ShopifyService.deleteProduct(client, createdShopifyProductId);
+                } catch (cleanupError: any) {
+                  const cleanupMessage = cleanupError?.message || 'unknown cleanup error';
+                  throw new Error(
+                    `${publishError?.message || publishError}; rollback failed for ${createdShopifyProductId}: ${cleanupMessage}`,
+                  );
+                }
+              }
+              throw publishError;
+            }
             break;
           }
           case 'REPUBLISH_TO_SHOPIFY': {
@@ -1044,7 +1824,7 @@ export class QueueService {
           case 'SYNC_PRODUCT': {
             const { sourceProductId } = payload;
             if (!sourceProductId) throw new Error('Missing sourceProductId');
-            result = await this.syncProductInventory(sourceProductId, jobId);
+            result = await this.syncProductInventory(sourceProductId, jobId, payload);
             break;
           }
           case 'SYNC_INVENTORY':
@@ -1054,33 +1834,71 @@ export class QueueService {
             throw new Error(`Unknown job type: ${job.type}`);
         }
 
-        await prisma.syncJob.update({
-          where: { id: jobId },
-          data: { 
-            status: 'completed', 
-            completedAt: new Date(),
-            result: JSON.stringify(result)
-          }
-        });
+        await queueDbRetry('syncJob.update.completed', () =>
+          prisma.syncJob.update({
+            where: { id: jobId },
+            data: {
+              status: 'completed',
+              completedAt: new Date(),
+              result: JSON.stringify(result)
+            }
+          }),
+        );
       } catch (error: any) {
+        if (!job) {
+          console.error('Failed to start sync job:', error?.message || error);
+          return;
+        }
+
+        if (job.type === 'PUBLISH_TO_SHOPIFY') {
+          try {
+            const payload = JSON.parse(job.payload || '{}');
+            const sourceProductId = String(payload?.sourceProductId || '').trim();
+            if (sourceProductId) {
+              const sourceProduct = await prisma.sourceProduct.findUnique({
+                where: { id: sourceProductId },
+                select: { id: true, shopifyProduct: { select: { id: true } } },
+              });
+
+              // If Shopify product creation partially succeeded but DB linking did not,
+              // we still mark source product as error and keep catalog state consistent.
+              if (sourceProduct && !sourceProduct.shopifyProduct) {
+                await prisma.sourceProduct.update({
+                  where: { id: sourceProduct.id },
+                  data: { syncStatus: 'error' },
+                });
+              }
+            }
+          } catch {}
+        }
+
         try {
           const payload = JSON.parse(job.payload || '{}');
           if ((job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY' || job.type === 'REPUBLISH_TO_SHOPIFY') && payload.sourceProductId) {
-            await prisma.sourceProduct.update({
+            await prisma.sourceProduct.updateMany({
               where: { id: payload.sourceProductId },
               data: { syncStatus: 'error' },
             });
           }
         } catch {}
 
-        await prisma.syncJob.update({
-          where: { id: jobId },
-          data: { 
-            status: 'failed', 
-            completedAt: new Date(),
-            result: JSON.stringify({ error: error.message })
-          }
-        });
+        try {
+          await queueDbRetry('syncJob.update.failed', () =>
+            prisma.syncJob.update({
+              where: { id: jobId },
+              data: {
+                status: 'failed',
+                completedAt: new Date(),
+                result: JSON.stringify({ error: error.message })
+              }
+            }),
+          );
+        } catch (statusError: any) {
+          console.error(
+            `Failed to mark sync job ${jobId} as failed:`,
+            statusError?.message || statusError,
+          );
+        }
       }
     });
   }

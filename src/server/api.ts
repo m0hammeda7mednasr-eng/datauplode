@@ -76,6 +76,56 @@ const nextListingPersistentCache = new PersistentJsonCache<NextListingDiscoveryR
   process.env.NEXT_LISTING_CACHE_FILE || ".syncly-cache/next-listings.json",
   { maxEntries: 500 },
 );
+const googleSheetProcessedRowsCache = new PersistentJsonCache<Record<string, number>>(
+  process.env.GOOGLE_SHEET_PROCESSED_ROWS_CACHE_FILE ||
+    ".syncly-cache/google-sheet-processed-rows.json",
+  { maxEntries: 100 },
+);
+const configuredGoogleSheetAutoSyncInterval = Number(
+  process.env.GOOGLE_SHEET_AUTO_SYNC_DEFAULT_INTERVAL_SECONDS || 1800,
+);
+const DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS = Number.isFinite(
+  configuredGoogleSheetAutoSyncInterval,
+)
+  ? Math.max(20, Math.floor(configuredGoogleSheetAutoSyncInterval))
+  : 1800;
+
+type GoogleSheetAutoSyncState = {
+  running: boolean;
+  sheetUrl: string | null;
+  csvUrl: string | null;
+  intervalSeconds: number;
+  pricingRuleId: string | null;
+  defaultCollections: string[];
+  createManualReview: boolean;
+  lastRunAt: string | null;
+  lastResult: any;
+  lastError: string | null;
+  lastBatchId: string | null;
+};
+
+type GoogleSheetRow = {
+  rowNumber: number;
+  url: string;
+  price: number | null;
+  priceMultiplier: number | null;
+  collection: string;
+};
+
+let googleSheetAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
+const googleSheetAutoSyncState: GoogleSheetAutoSyncState = {
+  running: false,
+  sheetUrl: null,
+  csvUrl: null,
+  intervalSeconds: DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS,
+  pricingRuleId: null,
+  defaultCollections: [],
+  createManualReview: true,
+  lastRunAt: null,
+  lastResult: null,
+  lastError: null,
+  lastBatchId: null,
+};
 
 function envNumber(name: string, defaultValue: number): number {
   const raw = String(process.env[name] || "").trim();
@@ -180,6 +230,117 @@ const localBridgeTaskByKey = new Map<string, string>();
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseSyncJobResult(result: string | null | undefined): Record<string, any> {
+  if (!result) return {};
+  try {
+    const parsed = JSON.parse(result);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return { raw: String(result) };
+  }
+}
+
+type SyncJobStatus = "pending" | "running" | "completed" | "failed";
+
+async function waitForSyncJobCompletion(jobId: string) {
+  const timeoutMs = Math.max(
+    15000,
+    envNumber("EXCEL_IMPORT_PUBLISH_TIMEOUT_MS", 10 * 60 * 1000),
+  );
+  const pollMs = Math.max(500, envNumber("EXCEL_IMPORT_PUBLISH_POLL_MS", 1500));
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const job = await prisma.syncJob.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        result: true,
+        createdAt: true,
+        startedAt: true,
+        completedAt: true,
+      },
+    });
+
+    if (!job) {
+      throw new Error(`Sync job not found (${jobId})`);
+    }
+
+    const status = String(job.status || "").toLowerCase() as SyncJobStatus;
+    if (status === "completed" || status === "failed") {
+      return {
+        ...job,
+        status,
+        parsedResult: parseSyncJobResult(job.result),
+      };
+    }
+
+    await sleep(pollMs);
+  }
+
+  throw new Error(
+    `Timed out while waiting for Shopify publish job ${jobId} to complete`,
+  );
+}
+
+function verifyPublishJobResult(jobResult: Record<string, any>) {
+  const errorText = String(jobResult?.error || jobResult?.raw || "").trim();
+  if (errorText) {
+    throw new Error(errorText);
+  }
+
+  if (!jobResult?.shopifyId) {
+    throw new Error("Shopify publish finished without a Shopify product id");
+  }
+
+  if (jobResult?.shopifyVerified === false) {
+    throw new Error("Shopify product verification failed after publish");
+  }
+
+  const variantsExpected = Number(jobResult?.variantsExpected);
+  const variantsCreated = Number(jobResult?.variantsCreated);
+  const variantsLinked = Number(jobResult?.variantsLinked);
+
+  if (
+    Number.isFinite(variantsExpected) &&
+    variantsExpected > 0 &&
+    Number.isFinite(variantsCreated) &&
+    variantsCreated < variantsExpected
+  ) {
+    throw new Error(
+      `Variant creation mismatch (${variantsCreated}/${variantsExpected})`,
+    );
+  }
+
+  if (
+    Number.isFinite(variantsExpected) &&
+    variantsExpected > 0 &&
+    Number.isFinite(variantsLinked) &&
+    variantsLinked < variantsExpected
+  ) {
+    throw new Error(
+      `Variant linking mismatch (${variantsLinked}/${variantsExpected})`,
+    );
+  }
+
+  if (jobResult?.variantsVerified === false) {
+    throw new Error("Shopify variant verification failed");
+  }
+
+  const variantImagesRequested = Number(jobResult?.variantImagesRequested);
+  const variantImagesLinked = Number(jobResult?.variantImagesLinked);
+  if (
+    Number.isFinite(variantImagesRequested) &&
+    variantImagesRequested > 0 &&
+    Number.isFinite(variantImagesLinked) &&
+    variantImagesLinked <= 0
+  ) {
+    throw new Error("Variant images were requested but none were linked");
+  }
 }
 
 function shouldPrewarmAnalyzeUrl(url: string): boolean {
@@ -1015,6 +1176,489 @@ function resolveVariantImageUrl(
   return undefined;
 }
 
+function strictShopifyCatalogGuardEnabled() {
+  return envFlag("STRICT_SHOPIFY_CATALOG_GUARD", true);
+}
+
+function normalizeCatalogUrlForDedupe(value: any) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    parsed.hash = "";
+    parsed.search = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return parsed.toString();
+  } catch {
+    return String(value || "").trim();
+  }
+}
+
+function variantOptionText(value: any) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getVariantOptionValuesForQuality(variant: any) {
+  const optionValuesFromVariant = variant?.optionValues;
+  if (optionValuesFromVariant && typeof optionValuesFromVariant === "object") {
+    return optionValuesFromVariant;
+  }
+  const raw = parseRawObject(variant?.raw);
+  if (raw?.optionValues && typeof raw.optionValues === "object") {
+    return raw.optionValues;
+  }
+  return {};
+}
+
+function buildVariantQualitySignature(variant: any, index: number) {
+  const optionValues = getVariantOptionValuesForQuality(variant);
+  const optionEntries = Object.entries(optionValues)
+    .map(([key, value]) => [normalizeLabel(key), normalizeLabel(value)])
+    .filter(([key, value]) => Boolean(key && value))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${value}`);
+
+  const color = normalizeLabel(variant?.color);
+  const size = normalizeLabel(variant?.size);
+  if (color) optionEntries.push(`color:${color}`);
+  if (size) optionEntries.push(`size:${size}`);
+
+  if (optionEntries.length > 0) return optionEntries.join("|");
+  const sourceVariantId = normalizeLabel(variant?.sourceVariantId);
+  if (sourceVariantId) return `source:${sourceVariantId}`;
+  const sku = normalizeLabel(variant?.sku);
+  if (sku) return `sku:${sku}`;
+  return `index:${index}`;
+}
+
+function collectCatalogQualityIssues(
+  productData: any,
+  normalizedVariants: any[] = [],
+  normalizedImages: any[] = [],
+) {
+  const issues: string[] = [];
+  const sourceUrl = String(productData?.source?.url || "").trim();
+  const title = String(productData?.title || "").replace(/\s+/g, " ").trim();
+  const currency = String(productData?.currency || "").trim().toUpperCase();
+  const sourceSupplier = String(productData?.source?.supplier || "").trim();
+  const variants = Array.isArray(normalizedVariants) ? normalizedVariants : [];
+  const images = Array.isArray(normalizedImages) ? normalizedImages : [];
+  const sourcePrice = Number(productData?.price);
+
+  if (!sourceUrl || !isHttpUrl(sourceUrl)) {
+    issues.push("missing/invalid product source URL");
+  }
+  if (!title || title.length < 3) {
+    issues.push("missing/invalid product title");
+  }
+  if (!sourceSupplier) {
+    issues.push("missing supplier name");
+  }
+  if (!productSupplierMatchesUrl(sourceUrl, productData)) {
+    issues.push("supplier does not match source URL domain");
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    issues.push("missing/invalid currency code");
+  }
+  if (!PricingEngine.validatePrice(sourcePrice)) {
+    issues.push("invalid product price");
+  }
+  if (!variants.length) {
+    issues.push("product has no variants");
+  }
+
+  const variantSignatures = new Set<string>();
+  const duplicateVariantSignatures = new Set<string>();
+  const duplicateSkus = new Set<string>();
+  const duplicateSourceVariantIds = new Set<string>();
+  const skuSeen = new Set<string>();
+  const sourceVariantSeen = new Set<string>();
+
+  for (const [index, variant] of variants.entries()) {
+    const variantPrice = Number(variant?.price ?? sourcePrice);
+    if (!PricingEngine.validatePrice(variantPrice)) {
+      issues.push(`variant #${index + 1} has invalid price`);
+    }
+
+    const signature = buildVariantQualitySignature(variant, index);
+    if (variantSignatures.has(signature)) {
+      duplicateVariantSignatures.add(signature);
+    } else {
+      variantSignatures.add(signature);
+    }
+
+    const sku = normalizeLabel(variant?.sku);
+    if (sku) {
+      if (skuSeen.has(sku)) duplicateSkus.add(sku);
+      skuSeen.add(sku);
+    }
+
+    const sourceVariantId = normalizeLabel(variant?.sourceVariantId);
+    if (sourceVariantId) {
+      if (sourceVariantSeen.has(sourceVariantId)) {
+        duplicateSourceVariantIds.add(sourceVariantId);
+      }
+      sourceVariantSeen.add(sourceVariantId);
+    }
+  }
+
+  if (duplicateVariantSignatures.size > 0) {
+    issues.push("duplicate variant options detected");
+  }
+  if (duplicateSkus.size > 0) {
+    issues.push("duplicate variant SKU detected");
+  }
+  if (duplicateSourceVariantIds.size > 0) {
+    issues.push("duplicate source variant id detected");
+  }
+
+  const imageUrlSeen = new Set<string>();
+  const duplicateImageUrls = new Set<string>();
+  const validImageUrls: string[] = [];
+
+  for (const image of images) {
+    const url = String(image?.url || "").trim();
+    if (!url) continue;
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (imageUrlSeen.has(url)) {
+      duplicateImageUrls.add(url);
+    } else {
+      imageUrlSeen.add(url);
+      validImageUrls.push(url);
+    }
+  }
+
+  if (duplicateImageUrls.size > 0) {
+    issues.push("duplicate product images detected");
+  }
+
+  const hasVariantImage = variants.some((variant) =>
+    /^https?:\/\//i.test(String(variant?.imageUrl || "").trim()),
+  );
+  if (validImageUrls.length === 0 && !hasVariantImage) {
+    issues.push("product has no valid images");
+  }
+
+  return [...new Set(issues)];
+}
+
+function assertStrictCatalogQuality(
+  productData: any,
+  normalizedVariants: any[],
+  normalizedImages: any[],
+) {
+  if (!strictShopifyCatalogGuardEnabled()) return;
+  const issues = collectCatalogQualityIssues(
+    productData,
+    normalizedVariants,
+    normalizedImages,
+  );
+  if (issues.length === 0) return;
+
+  throw Object.assign(
+    new Error(`Product quality check failed: ${issues.join("; ")}`),
+    { statusCode: 422, code: "PRODUCT_QUALITY_FAILED", issues },
+  );
+}
+
+function buildCatalogDuplicateKey(product: any) {
+  const supplierKey = String(product?.supplierId || "").trim();
+  const productId = normalizeLabel(product?.productId);
+  if (supplierKey && productId) return `${supplierKey}|pid:${productId}`;
+
+  const url = normalizeCatalogUrlForDedupe(product?.url);
+  if (url) return `url:${url}`;
+
+  const title = normalizeLabel(product?.title);
+  const brand = normalizeLabel(product?.brand);
+  const price = Number(product?.price);
+  if (supplierKey && title) {
+    const normalizedPrice = Number.isFinite(price) ? price.toFixed(2) : "na";
+    return `${supplierKey}|title:${title}|brand:${brand}|price:${normalizedPrice}`;
+  }
+
+  return null;
+}
+
+function buildStoredProductQualityInput(product: any) {
+  const variants = Array.isArray(product?.variants)
+    ? product.variants.map((variant: any) => ({
+        sourceVariantId: variant.sourceVariantId,
+        sku: variant.sku,
+        color: variant.color,
+        size: variant.size,
+        price: variant.price,
+        currency: variant.currency,
+        available: variant.available,
+        stockStatus: variant.stockStatus,
+        imageUrl: variant.imageUrl,
+        raw: parseJsonObject(variant.raw) || {},
+      }))
+    : [];
+  const images = Array.isArray(product?.images)
+    ? product.images.map((image: any) => ({
+        url: image.url,
+        alt: image.alt,
+        color: image.color,
+        position: image.position,
+      }))
+    : [];
+
+  return {
+    source: {
+      supplier: product?.supplier?.name || "",
+      url: product?.url || "",
+      productId: product?.productId || "",
+    },
+    title: product?.title || "",
+    description: product?.description || "",
+    brand: product?.brand || "",
+    currency: product?.currency || "",
+    price: product?.price,
+    variants,
+    images,
+  };
+}
+
+function dedupeCatalogImages(images: any[]) {
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  let removed = 0;
+
+  for (const image of images) {
+    const url = String(image?.url || "").trim();
+    if (!url) continue;
+    const key = url.toLowerCase();
+    if (seen.has(key)) {
+      removed += 1;
+      continue;
+    }
+    seen.add(key);
+    deduped.push(image);
+  }
+
+  return { images: deduped, removed };
+}
+
+function dedupeCatalogVariants(variants: any[]) {
+  const seenSignatures = new Set<string>();
+  const seenSkus = new Set<string>();
+  const seenSourceVariantIds = new Set<string>();
+  const deduped: any[] = [];
+  let removed = 0;
+
+  for (const [index, variant] of variants.entries()) {
+    const signature = buildVariantQualitySignature(variant, index);
+    const sku = normalizeLabel(variant?.sku);
+    const sourceVariantId = normalizeLabel(variant?.sourceVariantId);
+
+    const duplicateBySignature = seenSignatures.has(signature);
+    const duplicateBySku = Boolean(sku) && seenSkus.has(sku);
+    const duplicateBySourceVariantId =
+      Boolean(sourceVariantId) && seenSourceVariantIds.has(sourceVariantId);
+
+    if (duplicateBySignature || duplicateBySku || duplicateBySourceVariantId) {
+      removed += 1;
+      continue;
+    }
+
+    seenSignatures.add(signature);
+    if (sku) seenSkus.add(sku);
+    if (sourceVariantId) seenSourceVariantIds.add(sourceVariantId);
+    deduped.push(variant);
+  }
+
+  return { variants: deduped, removed };
+}
+
+async function hardDeleteCatalogProduct(params: {
+  sourceProductId: string;
+  reason: string;
+  deleteFromShopify: boolean;
+  shopifyClient?: any;
+}) {
+  const target = await prisma.sourceProduct.findUnique({
+    where: { id: params.sourceProductId },
+    select: {
+      id: true,
+      url: true,
+      shopifyProduct: {
+        select: { id: true, shopifyId: true },
+      },
+    },
+  });
+  if (!target) {
+    return {
+      deleted: false,
+      sourceProductId: params.sourceProductId,
+      reason: params.reason,
+      skipped: "not_found",
+    };
+  }
+
+  let shopifyDeleteError: string | null = null;
+  if (
+    params.deleteFromShopify &&
+    params.shopifyClient &&
+    target.shopifyProduct?.shopifyId
+  ) {
+    try {
+      await ShopifyService.deleteProduct(
+        params.shopifyClient,
+        target.shopifyProduct.shopifyId,
+      );
+    } catch (error: any) {
+      shopifyDeleteError = String(
+        error?.message || "Unknown Shopify delete error",
+      );
+    }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shopifyVariant.deleteMany({
+      where: {
+        OR: [
+          { sourceVariant: { sourceProductId: target.id } },
+          ...(target.shopifyProduct?.id
+            ? [{ shopifyProductId: target.shopifyProduct.id }]
+            : []),
+        ],
+      },
+    });
+    await tx.shopifyProduct.deleteMany({ where: { sourceProductId: target.id } });
+    await tx.manualReviewItem.deleteMany({ where: { sourceProductId: target.id } });
+    await tx.auditLog.deleteMany({ where: { sourceProductId: target.id } });
+    await tx.sourceImage.deleteMany({ where: { sourceProductId: target.id } });
+    await tx.sourceVariant.deleteMany({ where: { sourceProductId: target.id } });
+    await tx.sourceProduct.delete({ where: { id: target.id } });
+  });
+
+  return {
+    deleted: true,
+    sourceProductId: target.id,
+    url: target.url,
+    shopifyId: target.shopifyProduct?.shopifyId || null,
+    reason: params.reason,
+    shopifyDeleteError,
+  };
+}
+
+async function cleanupCatalogIntegrity(params: {
+  dryRun?: boolean;
+  limit?: number;
+} = {}) {
+  const dryRun = params.dryRun === true;
+  const limitRaw = Number(params.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.max(1, Math.floor(limitRaw))
+    : undefined;
+
+  const products = await prisma.sourceProduct.findMany({
+    include: {
+      supplier: true,
+      variants: true,
+      images: true,
+      shopifyProduct: {
+        select: { id: true, shopifyId: true },
+      },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    ...(limit ? { take: limit } : {}),
+  });
+
+  const keepByKey = new Map<string, string>();
+  const candidates: Array<{
+    sourceProductId: string;
+    reason: string;
+    hasShopify: boolean;
+    issues: string[];
+    duplicateOf?: string;
+  }> = [];
+
+  for (const product of products) {
+    const qualityInput = buildStoredProductQualityInput(product);
+    const issues = collectCatalogQualityIssues(
+      qualityInput,
+      qualityInput.variants,
+      qualityInput.images,
+    );
+
+    const duplicateKey = buildCatalogDuplicateKey(product);
+    const duplicateOf = duplicateKey ? keepByKey.get(duplicateKey) : undefined;
+    if (duplicateKey && !duplicateOf) {
+      keepByKey.set(duplicateKey, product.id);
+    }
+
+    if (issues.length === 0 && !duplicateOf) continue;
+
+    candidates.push({
+      sourceProductId: product.id,
+      reason:
+        issues.length > 0
+          ? `quality_failed:${issues.join("|")}`
+          : `duplicate_of:${duplicateOf}`,
+      hasShopify: Boolean(product.shopifyProduct?.shopifyId),
+      issues,
+      ...(duplicateOf ? { duplicateOf } : {}),
+    });
+  }
+
+  if (dryRun) {
+    return {
+      scanned: products.length,
+      candidates: candidates.length,
+      deleted: 0,
+      skipped: 0,
+      dryRun: true,
+      details: candidates,
+    };
+  }
+
+  let shopifyClient: any = null;
+  try {
+    shopifyClient = await ShopifyService.getClientFromDb(prisma);
+  } catch {
+    shopifyClient = null;
+  }
+
+  const deleted: any[] = [];
+  const skipped: any[] = [];
+
+  for (const candidate of candidates) {
+    if (candidate.hasShopify && !shopifyClient) {
+      skipped.push({
+        sourceProductId: candidate.sourceProductId,
+        reason: candidate.reason,
+        skipped: "shopify_client_unavailable",
+      });
+      continue;
+    }
+
+    const result = await hardDeleteCatalogProduct({
+      sourceProductId: candidate.sourceProductId,
+      reason: candidate.reason,
+      deleteFromShopify: candidate.hasShopify,
+      shopifyClient: shopifyClient || undefined,
+    });
+
+    if (result.deleted) {
+      deleted.push(result);
+    } else {
+      skipped.push(result);
+    }
+  }
+
+  return {
+    scanned: products.length,
+    candidates: candidates.length,
+    deleted: deleted.length,
+    skipped: skipped.length,
+    dryRun: false,
+    deletedItems: deleted,
+    skippedItems: skipped,
+  };
+}
+
 function asOptionalString(value: any) {
   const text = String(value || "").trim();
   return text || null;
@@ -1095,6 +1739,1336 @@ async function findBestPricingRuleForProduct(product: any) {
     );
     return null;
   }
+}
+
+function isHttpUrl(value: any) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeManualReviewReason(value: any) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "Unknown import issue";
+  return text.slice(0, 500);
+}
+
+function parseJsonObject(value: any): Record<string, any> | null {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, any>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractExcelRowNumberFromReason(reason: any): number | null {
+  const text = String(reason || "");
+  const match = text.match(/\[Excel Row\s+(\d+)\]/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+function extractExcelRowNumberFromRaw(rawValue: any): number | null {
+  const raw = parseJsonObject(rawValue);
+  if (!raw) return null;
+
+  const direct = Number(raw.rowNumber);
+  if (Number.isFinite(direct) && direct > 0) return Math.floor(direct);
+
+  const importMeta = parseJsonObject(raw.import);
+  const importRow = Number(importMeta?.excelRowNumber ?? importMeta?.rowNumber);
+  if (Number.isFinite(importRow) && importRow > 0) return Math.floor(importRow);
+
+  return null;
+}
+
+function normalizeExcelImportMeta(meta: Record<string, any> | null | undefined) {
+  const row = Number(meta?.excelRowNumber ?? meta?.rowNumber);
+  const sheetPriceMultiplier = toPositiveSheetNumber(meta?.sheetPriceMultiplier);
+  const sheetPriceOverride = toPriceNumber(meta?.sheetPriceOverride);
+  return {
+    excelRowNumber:
+      Number.isFinite(row) && row > 0 ? Math.floor(row) : undefined,
+    sheetUrl: asOptionalString(meta?.sheetUrl),
+    csvUrl: asOptionalString(meta?.csvUrl),
+    mode: asOptionalString(meta?.mode),
+    sheetCollection: asOptionalString(meta?.sheetCollection),
+    sheetPriceMultiplier,
+    sheetPriceOverride,
+  };
+}
+
+async function upsertSourceProductExcelImportMeta(
+  sourceProductUrl: string,
+  importMeta: Record<string, any>,
+) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(sourceProductUrl);
+  const product = await prisma.sourceProduct.findUnique({
+    where: { url: normalizedUrl },
+    select: { id: true, raw: true },
+  });
+  if (!product) return;
+
+  const currentRaw = parseJsonObject(product.raw) || {};
+  const currentImportMeta = parseJsonObject(currentRaw.import) || {};
+  const normalizedMeta = normalizeExcelImportMeta(importMeta);
+  const mergedImportMeta = {
+    ...currentImportMeta,
+    ...Object.fromEntries(
+      Object.entries(normalizedMeta).filter(([, value]) => value !== undefined && value !== null),
+    ),
+  };
+  const nextRaw = {
+    ...currentRaw,
+    import: mergedImportMeta,
+  };
+
+  await prisma.sourceProduct.update({
+    where: { id: product.id },
+    data: { raw: JSON.stringify(nextRaw) },
+  });
+}
+
+function isAlreadyLinkedToShopifyMessage(value: any) {
+  const text = String(value || "").toLowerCase();
+  return (
+    text.includes("already linked to shopify") &&
+    text.includes("sync now")
+  );
+}
+
+function parseImportBatchPayload(payloadJson: string | null | undefined) {
+  if (!payloadJson) return {};
+  try {
+    const parsed = JSON.parse(payloadJson);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getExcelRunStatus(summary: any) {
+  const processedRows = Number(summary?.processedRows ?? summary?.total ?? 0);
+  const published = Number(summary?.published || 0);
+  const syncedExisting = Number(summary?.syncedExisting || 0);
+  const skipped = Number(summary?.skipped || 0);
+  const failed = Number(summary?.failed || 0);
+  const processedNewRows = Number(summary?.processedNewRows ?? processedRows);
+
+  if (processedRows === 0 || processedNewRows === 0) return "NO_CHANGES";
+  if (published === 0 && failed === 0 && skipped > 0) return "NO_CHANGES";
+  if ((published > 0 || syncedExisting > 0 || skipped > 0) && failed === 0) return "COMPLETED";
+  if (published > 0 && failed > 0) return "PARTIAL";
+  if (syncedExisting > 0 && failed > 0) return "PARTIAL";
+  if (published === 0 && failed > 0) return "FAILED";
+  return "UNKNOWN";
+}
+
+async function saveExcelImportRun(params: {
+  mode: "sheet_link" | "auto_sync" | "file_upload";
+  sheetUrl?: string | null;
+  csvUrl?: string | null;
+  summary: any;
+  successful: any[];
+  skipped?: any[];
+  failed: any[];
+  metadata?: Record<string, any>;
+}) {
+  const successful = Array.isArray(params.successful) ? params.successful : [];
+  const skipped = Array.isArray(params.skipped) ? params.skipped : [];
+  const failed = Array.isArray(params.failed) ? params.failed : [];
+  const summary = params.summary || {};
+  const status = getExcelRunStatus(summary);
+  const payload = {
+    mode: params.mode,
+    sheetUrl: params.sheetUrl || null,
+    csvUrl: params.csvUrl || null,
+    summary,
+    successful,
+    skipped,
+    failed,
+    metadata: params.metadata || {},
+    completedAt: new Date().toISOString(),
+  };
+  const productIds = successful
+    .map((entry: any) => String(entry?.sourceProductId || "").trim())
+    .filter(Boolean)
+    .join(",");
+
+  return prisma.importBatch.create({
+    data: {
+      status,
+      target: "excel_sheet",
+      productIds,
+      payloadJson: JSON.stringify(payload),
+    },
+  });
+}
+
+async function ensureShopifyConnection() {
+  const connection = await prisma.shopifyConnection.findFirst({
+    where: { isConnected: true },
+    select: { accessTokenEnc: true },
+  });
+
+  if (!connection?.accessTokenEnc) {
+    throw Object.assign(
+      new Error("Connect Shopify before publishing products."),
+      { statusCode: 400 },
+    );
+  }
+}
+
+function normalizeGoogleSheetUrl(sheetUrl: any) {
+  const input = String(sheetUrl || "").trim();
+  if (!input) {
+    throw Object.assign(new Error("Google Sheet URL is required"), {
+      statusCode: 400,
+    });
+  }
+
+  if (/\/export\?format=csv/i.test(input) || /output=csv/i.test(input)) {
+    return input;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw Object.assign(new Error("Invalid Google Sheet URL"), {
+      statusCode: 400,
+    });
+  }
+
+  const fileMatch = parsed.pathname.match(/\/spreadsheets\/d\/([^/]+)/i);
+  if (!fileMatch?.[1]) {
+    throw Object.assign(new Error("Could not detect Google Sheet ID from URL"), {
+      statusCode: 400,
+    });
+  }
+
+  const fileId = fileMatch[1];
+  const gid = parsed.searchParams.get("gid") || "0";
+  return `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv&gid=${encodeURIComponent(gid)}`;
+}
+
+function parseCsvMatrix(csvText: string) {
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentCell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < csvText.length; i += 1) {
+    const char = csvText[i];
+    const nextChar = csvText[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        currentCell += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      currentRow.push(currentCell);
+      currentCell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && nextChar === "\n") i += 1;
+      currentRow.push(currentCell);
+      rows.push(currentRow);
+      currentRow = [];
+      currentCell = "";
+      continue;
+    }
+
+    currentCell += char;
+  }
+
+  currentRow.push(currentCell);
+  if (currentRow.some((cell) => String(cell || "").trim().length > 0)) {
+    rows.push(currentRow);
+  }
+
+  return rows;
+}
+
+function detectSheetColumn(headers: string[], patterns: RegExp[]) {
+  return (
+    headers.find((header) => patterns.some((pattern) => pattern.test(header))) ||
+    ""
+  );
+}
+
+function toSheetHeaderKey(value: any) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function toPriceNumber(value: any) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/[^0-9.,-]/g, "").replace(/,/g, ".");
+  const numberValue = Number(normalized);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) return null;
+  return numberValue;
+}
+
+function toPositiveSheetNumber(value: any) {
+  return toPriceNumber(value);
+}
+
+async function loadGoogleSheetRows(sheetUrl: string) {
+  const csvUrl = normalizeGoogleSheetUrl(sheetUrl);
+  const response = await axios.get(csvUrl, {
+    timeout: Math.max(5000, envNumber("GOOGLE_SHEET_FETCH_TIMEOUT_MS", 20000)),
+  });
+  const csvText = String(response.data || "");
+  const matrix = parseCsvMatrix(csvText);
+  if (matrix.length === 0) {
+    return {
+      csvUrl,
+      headers: [],
+      rows: [] as GoogleSheetRow[],
+    };
+  }
+
+  const firstRow = matrix[0].map((cell) => String(cell || "").trim());
+  const firstRowLooksLikeData = firstRow.some((cell) => isHttpUrl(cell));
+
+  if (firstRowLooksLikeData) {
+    const rows = matrix
+      .map((row, index) => ({
+        rowNumber: index + 1,
+        url: String(row[0] || "").trim(),
+        price: null,
+        priceMultiplier: toPositiveSheetNumber(row[1]),
+        collection: String(row[2] || "").trim(),
+      }))
+      .filter((row) => row.url.length > 0);
+
+    return {
+      csvUrl,
+      headers: ["link", "multiplier", "collection"],
+      rows,
+    };
+  }
+
+  if (matrix.length < 2) {
+    return {
+      csvUrl,
+      headers: [],
+      rows: [] as GoogleSheetRow[],
+    };
+  }
+
+  const headers = matrix[0].map((cell) => toSheetHeaderKey(cell));
+  const urlColumn =
+    detectSheetColumn(headers, [
+      /(^|[^a-z])(url|link)($|[^a-z])/i,
+      /product[\s_-]*(url|link)/i,
+      /supplier[\s_-]*(url|link)/i,
+    ]) || headers[0];
+  const priceColumn = detectSheetColumn(headers, [/^price$/i, /source[\s_-]*price/i]);
+  const multiplierColumn = detectSheetColumn(headers, [
+    /^multiplier$/i,
+    /^price[\s_-]*multiplier$/i,
+    /^row[\s_-]*multiplier$/i,
+    /^markup[\s_-]*multiplier$/i,
+  ]);
+  const collectionColumn = detectSheetColumn(headers, [
+    /^collection$/i,
+    /shopify[\s_-]*collection/i,
+  ]);
+
+  const urlIndex = headers.indexOf(urlColumn);
+  const priceIndex = priceColumn ? headers.indexOf(priceColumn) : -1;
+  const multiplierIndex = multiplierColumn ? headers.indexOf(multiplierColumn) : -1;
+  const collectionIndex = collectionColumn ? headers.indexOf(collectionColumn) : -1;
+
+  const rows = matrix
+    .slice(1)
+    .map((row, index) => ({
+      rowNumber: index + 2,
+      url: String(row[urlIndex] || "").trim(),
+      price: priceIndex >= 0 ? toPriceNumber(row[priceIndex]) : null,
+      priceMultiplier:
+        multiplierIndex >= 0 ? toPositiveSheetNumber(row[multiplierIndex]) : null,
+      collection: collectionIndex >= 0 ? String(row[collectionIndex] || "").trim() : "",
+    }))
+    .filter((row) => row.url.length > 0);
+
+  return {
+    csvUrl,
+    headers,
+    rows,
+  };
+}
+
+function getProcessedSheetRowsMap(sheetKey: string) {
+  const state = googleSheetProcessedRowsCache.get(sheetKey);
+  if (!state || typeof state !== "object") return {};
+  return state;
+}
+
+function setProcessedSheetRowsMap(sheetKey: string, map: Record<string, number>) {
+  const maxHours = Math.max(1, envNumber("GOOGLE_SHEET_PROCESSED_ROWS_TTL_HOURS", 720));
+  googleSheetProcessedRowsCache.set(sheetKey, map, maxHours * 60 * 60 * 1000);
+}
+
+async function sleepMs(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function scrapeWithBridgeFallback(url: string) {
+  try {
+    return await scraperService.scrape(url);
+  } catch (error: any) {
+    if (!error?.retryWithSnapshot) throw error;
+
+    const bridge = localBridgeIsOperational();
+    const task = getOrCreateLocalBridgeTask(url);
+    if (!bridge.enabled || !task) throw error;
+
+    const waitMs = Math.max(5000, envNumber("LOCAL_BRIDGE_WAIT_MS", 90000));
+    const pollMs = Math.max(1000, envNumber("LOCAL_BRIDGE_WAIT_POLL_MS", 2000));
+    const deadline = Date.now() + waitMs;
+    const normalizedUrl = normalizeAnalyzeCacheUrl(url);
+
+    while (Date.now() < deadline) {
+      const cached = getCachedAnalyzeProduct(normalizedUrl);
+      if (cached) {
+        return cached;
+      }
+
+      const currentTask = localBridgeTasks.get(task.id);
+      if (currentTask?.status === "failed" && currentTask.lastError) {
+        throw Object.assign(
+          new Error(
+            `Bridge task failed: ${currentTask.lastError}`,
+          ),
+          { statusCode: 422, code: "LOCAL_BRIDGE_TASK_FAILED" },
+        );
+      }
+
+      await sleepMs(pollMs);
+    }
+
+    throw Object.assign(
+      new Error(
+        "Bridge task timeout while waiting for browser snapshot result.",
+      ),
+      { statusCode: 408, code: "LOCAL_BRIDGE_TIMEOUT" },
+    );
+  }
+}
+
+function isLikelyBlockedImportError(error: any) {
+  const reason = String(error?.message || error || "").toLowerCase();
+  return (
+    reason.includes("http 403") ||
+    reason.includes("source_blocked") ||
+    reason.includes("blocked automated server access") ||
+    reason.includes("bridge task timeout") ||
+    reason.includes("bridge task failed") ||
+    error?.retryWithSnapshot === true
+  );
+}
+
+function guessProductIdFromUrl(url: string) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(url);
+  const nextStyleMatch = normalizedUrl.match(/\/style\/([a-z0-9]+)\/([a-z0-9]+)/i);
+  if (nextStyleMatch?.[2]) return nextStyleMatch[2].toUpperCase();
+  const lastSegment = normalizedUrl.split("/").filter(Boolean).pop() || "";
+  const cleaned = lastSegment.replace(/[^a-z0-9_-]/gi, "");
+  return cleaned ? cleaned.toUpperCase() : null;
+}
+
+async function buildBlockedSheetFallbackProduct(params: {
+  url: string;
+  rowNumber: number;
+  price: number;
+  sheetUrl: string;
+  csvUrl: string;
+  mode: "sheet_link" | "auto_sync" | "file_upload";
+  collection: string;
+}) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(params.url);
+  const existing = await prisma.sourceProduct.findUnique({
+    where: { url: normalizedUrl },
+    include: {
+      images: { orderBy: { position: "asc" } },
+      variants: { orderBy: { createdAt: "asc" } },
+      supplier: true,
+    },
+  });
+
+  const supplierName =
+    existing?.supplier?.name ||
+    expectedSupplierForUrl(normalizedUrl) ||
+    "Unknown Supplier";
+  const guessedProductId = existing?.productId || guessProductIdFromUrl(normalizedUrl);
+  const title =
+    existing?.title && !existing.title.startsWith("Excel Import Issue")
+      ? existing.title
+      : `Blocked Source Product - Row ${params.rowNumber}`;
+  const description =
+    existing?.description ||
+    `Auto-published from sheet row ${params.rowNumber} because supplier source access was blocked during scrape.`;
+  const brand = existing?.brand || (supplierName === "Next" ? "Next" : supplierName);
+  const currency =
+    existing?.currency && existing.currency !== "USD"
+      ? existing.currency
+      : supplierName === "Next"
+      ? "AED"
+      : "USD";
+
+  const images =
+    existing?.images?.map((img: any) => ({
+      url: img.url,
+      alt: img.alt || undefined,
+      color: img.color || undefined,
+      position: img.position,
+    })) || [];
+
+  const variants =
+    existing?.variants && existing.variants.length > 0
+      ? existing.variants.map((variant: any, index: number) => ({
+          sourceVariantId:
+            variant.sourceVariantId ||
+            `${guessedProductId || "variant"}-${index + 1}`,
+          sku: variant.sku || undefined,
+          color: variant.color || undefined,
+          size: variant.size || undefined,
+          price: params.price,
+          currency,
+          available: variant.available ?? true,
+          stockStatus: variant.stockStatus || "unknown",
+          imageUrl: variant.imageUrl || undefined,
+        }))
+      : [
+          {
+            sourceVariantId: guessedProductId || `row-${params.rowNumber}`,
+            price: params.price,
+            currency,
+            available: true,
+            stockStatus: "unknown",
+          },
+        ];
+
+  return {
+    source: {
+      supplier: supplierName,
+      url: normalizedUrl,
+      productId: guessedProductId,
+    },
+    title,
+    description,
+    brand,
+    currency,
+    price: params.price,
+    images,
+    options: [
+      {
+        name: "Default",
+        values: ["Default"],
+      },
+    ],
+    variants,
+    raw: {
+      fallbackFromBlockedSource: true,
+      rowNumber: params.rowNumber,
+      originalUrl: normalizedUrl,
+    },
+    importMeta: {
+      excelRowNumber: params.rowNumber,
+      sheetUrl: params.sheetUrl,
+      csvUrl: params.csvUrl,
+      mode: params.mode,
+      sheetCollection: params.collection || null,
+    },
+  };
+}
+
+async function processGoogleSheetBatch(params: {
+  sheetUrl: string;
+  pricingRuleId?: string | null;
+  defaultCollections?: string[];
+  createManualReview?: boolean;
+  processOnlyNewRows?: boolean;
+  rowNumbers?: number[];
+  waitForPublishCompletion?: boolean;
+  mode?: "sheet_link" | "auto_sync";
+}) {
+  await ensureShopifyConnection();
+  const selectedPricingRuleId = asOptionalString(params.pricingRuleId);
+  const createManualReview = params.createManualReview !== false;
+  const waitForPublishCompletion = params.waitForPublishCompletion !== false;
+  const sheetData = await loadGoogleSheetRows(params.sheetUrl);
+  const sheetKey = normalizeAnalyzeCacheUrl(sheetData.csvUrl);
+  const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
+  const requestedRowNumbers = Array.isArray(params.rowNumbers)
+    ? params.rowNumbers
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.max(1, Math.floor(value)))
+    : [];
+  const rowFilterSet = new Set<number>(requestedRowNumbers);
+  const filteredRows = rowFilterSet.size
+    ? sheetData.rows.filter((row) => rowFilterSet.has(row.rowNumber))
+    : sheetData.rows;
+  const processRows = filteredRows.slice(0, maxRows);
+
+  if (selectedPricingRuleId) {
+    const ruleExists = await prisma.pricingRule.findUnique({
+      where: { id: selectedPricingRuleId },
+      select: { id: true },
+    });
+    if (!ruleExists) {
+      throw Object.assign(new Error("Selected pricing rule was not found"), {
+        statusCode: 400,
+      });
+    }
+  }
+
+  const shopifyClient = await ShopifyService.getClientFromDb(prisma);
+  const shopifyCollections = await ShopifyService.getCollections(shopifyClient);
+  const collectionByName = new Map<string, string>(
+    shopifyCollections
+      .map((collection: any) => [normalizeLabel(collection.title), String(collection.id)] as const)
+      .filter((entry) => Boolean(entry[0] && entry[1])),
+  );
+
+  const seenMap = getProcessedSheetRowsMap(sheetKey);
+  const successful: Array<{
+    rowNumber: number;
+    url: string;
+    action?: "published" | "synced_existing";
+    priceOverride: number | null;
+    priceMultiplier: number | null;
+    collection: string;
+    sourceProductId: string;
+    jobId: string;
+    verification?: {
+      shopifyId: string;
+      variantsExpected?: number;
+      variantsCreated?: number;
+      variantsLinked?: number;
+      variantImagesRequested?: number;
+      variantImagesLinked?: number;
+      salesChannelsPublished?: number;
+    };
+  }> = [];
+  const skipped: Array<{
+    rowNumber: number;
+    url: string;
+    reason: string;
+    sourceProductId?: string;
+  }> = [];
+  const failed: Array<{
+    rowNumber: number;
+    url: string;
+    reason: string;
+    sourceProductId?: string;
+    manualReviewId?: string;
+  }> = [];
+  const processedUrls = new Set<string>();
+  let processedNewRows = 0;
+  let syncedExistingRows = 0;
+
+  for (const row of processRows) {
+    const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
+    const fingerprint = [
+      normalizedUrl,
+      row.price === null ? "" : row.price.toFixed(2),
+      row.priceMultiplier === null ? "" : row.priceMultiplier.toFixed(4),
+      normalizeLabel(row.collection),
+    ].join("|");
+    const fingerprintHash = crypto
+      .createHash("sha1")
+      .update(fingerprint)
+      .digest("hex");
+
+    if (params.processOnlyNewRows && seenMap[fingerprintHash]) {
+      continue;
+    }
+
+    if (processedUrls.has(normalizedUrl)) {
+      skipped.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        reason: "Duplicate URL inside the same Google Sheet batch",
+      });
+      seenMap[fingerprintHash] = Date.now();
+      processedNewRows += 1;
+      continue;
+    }
+    processedUrls.add(normalizedUrl);
+
+    const registerFailure = async (reason: string) => {
+      let review: { sourceProductId: string; manualReviewId: string } | null = null;
+      if (createManualReview) {
+        try {
+          review = await createManualReviewIssueForExcel({
+            url: normalizedUrl,
+            rowNumber: row.rowNumber,
+            reason,
+          });
+        } catch (reviewError) {
+          console.warn(
+            "Manual review auto-create failed:",
+            reviewError instanceof Error ? reviewError.message : reviewError,
+          );
+        }
+      }
+
+      failed.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        reason: normalizeManualReviewReason(reason),
+        sourceProductId: review?.sourceProductId,
+        manualReviewId: review?.manualReviewId,
+      });
+    };
+
+    if (!isHttpUrl(normalizedUrl)) {
+      await registerFailure("Invalid product URL");
+      seenMap[fingerprintHash] = Date.now();
+      processedNewRows += 1;
+      continue;
+    }
+
+    const rowCollectionNames = row.collection
+      .split(/[|,]/)
+      .map((name) => name.trim())
+      .filter(Boolean);
+    const rowCollectionIds = rowCollectionNames
+      .map((name) => collectionByName.get(normalizeLabel(name)) || "")
+      .filter(Boolean);
+    const fallbackCollectionIds = (params.defaultCollections || [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean);
+    const selectedCollectionIds = rowCollectionIds.length
+      ? rowCollectionIds
+      : fallbackCollectionIds;
+
+    const queueExistingLinkedProductSync = async (reason: string) => {
+      const existing = await prisma.sourceProduct.findUnique({
+        where: { url: normalizedUrl },
+        select: {
+          id: true,
+          shopifyProduct: { select: { id: true } },
+        },
+      });
+
+      if (!existing?.shopifyProduct?.id) {
+        return false;
+      }
+
+      await upsertSourceProductExcelImportMeta(normalizedUrl, {
+        excelRowNumber: row.rowNumber,
+        sheetUrl: params.sheetUrl,
+        csvUrl: sheetData.csvUrl,
+        mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
+        sheetCollection: row.collection || null,
+        sheetPriceMultiplier: row.priceMultiplier,
+      });
+
+      const syncJob = await QueueService.addTask("SYNC_PRODUCT", {
+        sourceProductId: existing.id,
+        reason,
+        refreshSource: true,
+        priceMultiplier: row.priceMultiplier,
+        priceOverride:
+          row.price !== null && PricingEngine.validatePrice(row.price)
+            ? row.price
+            : null,
+        pricingRuleId: selectedPricingRuleId,
+        collections: selectedCollectionIds,
+        sheetMeta: {
+          excelRowNumber: row.rowNumber,
+          sheetUrl: params.sheetUrl,
+          csvUrl: sheetData.csvUrl,
+          mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
+          sheetCollection: row.collection || null,
+          sheetPriceMultiplier: row.priceMultiplier,
+        },
+      });
+
+      successful.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        action: "synced_existing",
+        priceOverride: row.price,
+        priceMultiplier: row.priceMultiplier,
+        collection: row.collection,
+        sourceProductId: existing.id,
+        jobId: syncJob.id,
+      });
+      syncedExistingRows += 1;
+      return true;
+    };
+
+    try {
+      const analyzed = await scrapeWithBridgeFallback(normalizedUrl);
+      if (row.price !== null && PricingEngine.validatePrice(row.price)) {
+        analyzed.price = row.price;
+        analyzed.variants = analyzed.variants.map((variant: any) => ({
+          ...variant,
+          price: row.price,
+        }));
+      }
+      analyzed.importMeta = {
+        excelRowNumber: row.rowNumber,
+        sheetUrl: params.sheetUrl,
+        csvUrl: sheetData.csvUrl,
+        mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
+        sheetCollection: row.collection || null,
+        sheetPriceMultiplier: row.priceMultiplier,
+      };
+      setCachedAnalyzeProduct(normalizedUrl, analyzed);
+
+      const publishResult = await publishPreparedProductToQueue({
+        productData: analyzed,
+        pricingRuleId: selectedPricingRuleId,
+        collections: selectedCollectionIds,
+        priceMultiplier: row.priceMultiplier,
+      });
+
+      let verification:
+        | {
+            shopifyId: string;
+            variantsExpected?: number;
+            variantsCreated?: number;
+            variantsLinked?: number;
+            variantImagesRequested?: number;
+            variantImagesLinked?: number;
+            salesChannelsPublished?: number;
+          }
+        | undefined;
+      if (waitForPublishCompletion) {
+        const publishJob = await waitForSyncJobCompletion(publishResult.jobId);
+        if (publishJob.status === "failed") {
+          const reason =
+            String(publishJob.parsedResult?.error || "").trim() ||
+            `Shopify publish job failed (${publishResult.jobId})`;
+          throw new Error(reason);
+        }
+
+        verifyPublishJobResult(publishJob.parsedResult || {});
+        verification = {
+          shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+          variantsExpected: Number(publishJob.parsedResult?.variantsExpected),
+          variantsCreated: Number(publishJob.parsedResult?.variantsCreated),
+          variantsLinked: Number(publishJob.parsedResult?.variantsLinked),
+          variantImagesRequested: Number(
+            publishJob.parsedResult?.variantImagesRequested,
+          ),
+          variantImagesLinked: Number(
+            publishJob.parsedResult?.variantImagesLinked,
+          ),
+          salesChannelsPublished: Number(
+            publishJob.parsedResult?.salesChannelsPublished,
+          ),
+        };
+      }
+
+      successful.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        priceOverride: row.price,
+        priceMultiplier: row.priceMultiplier,
+        collection: row.collection,
+        sourceProductId: publishResult.sourceProductId,
+        jobId: publishResult.jobId,
+        ...(verification ? { verification } : {}),
+      });
+    } catch (error: any) {
+      const reason = error?.message || "Failed to analyze or publish this URL";
+      if (isAlreadyLinkedToShopifyMessage(reason)) {
+        const queued = await queueExistingLinkedProductSync("sheet_row_already_linked");
+        if (!queued) {
+          const existing = await prisma.sourceProduct.findUnique({
+            where: { url: normalizedUrl },
+            select: { id: true },
+          });
+          skipped.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            reason,
+            sourceProductId: existing?.id,
+          });
+        }
+      } else if (isLikelyBlockedImportError(error) && row.price !== null && PricingEngine.validatePrice(row.price)) {
+        try {
+          const fallbackProduct = await buildBlockedSheetFallbackProduct({
+            url: normalizedUrl,
+            rowNumber: row.rowNumber,
+            price: row.price,
+            sheetUrl: params.sheetUrl,
+            csvUrl: sheetData.csvUrl,
+            mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
+            collection: row.collection,
+          });
+          const publishResult = await publishPreparedProductToQueue({
+            productData: fallbackProduct,
+            pricingRuleId: selectedPricingRuleId,
+            collections: selectedCollectionIds,
+            priceMultiplier: row.priceMultiplier,
+          });
+
+          let verification:
+            | {
+                shopifyId: string;
+                variantsExpected?: number;
+                variantsCreated?: number;
+                variantsLinked?: number;
+                variantImagesRequested?: number;
+                variantImagesLinked?: number;
+                salesChannelsPublished?: number;
+              }
+            | undefined;
+          if (waitForPublishCompletion) {
+            const publishJob = await waitForSyncJobCompletion(
+              publishResult.jobId,
+            );
+            if (publishJob.status === "failed") {
+              const reason =
+                String(publishJob.parsedResult?.error || "").trim() ||
+                `Shopify publish job failed (${publishResult.jobId})`;
+              throw new Error(reason);
+            }
+
+            verifyPublishJobResult(publishJob.parsedResult || {});
+            verification = {
+              shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+              variantsExpected: Number(
+                publishJob.parsedResult?.variantsExpected,
+              ),
+              variantsCreated: Number(
+                publishJob.parsedResult?.variantsCreated,
+              ),
+              variantsLinked: Number(publishJob.parsedResult?.variantsLinked),
+              variantImagesRequested: Number(
+                publishJob.parsedResult?.variantImagesRequested,
+              ),
+              variantImagesLinked: Number(
+                publishJob.parsedResult?.variantImagesLinked,
+              ),
+              salesChannelsPublished: Number(
+                publishJob.parsedResult?.salesChannelsPublished,
+              ),
+            };
+          }
+          successful.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            priceOverride: row.price,
+            priceMultiplier: row.priceMultiplier,
+            collection: row.collection,
+            sourceProductId: publishResult.sourceProductId,
+            jobId: publishResult.jobId,
+            ...(verification ? { verification } : {}),
+          });
+        } catch (fallbackError: any) {
+          const fallbackReason =
+            fallbackError?.message ||
+            `Fallback publish failed after source blocked: ${reason}`;
+          if (isAlreadyLinkedToShopifyMessage(fallbackReason)) {
+            const queued = await queueExistingLinkedProductSync("sheet_fallback_already_linked");
+            if (!queued) {
+              const existing = await prisma.sourceProduct.findUnique({
+                where: { url: normalizedUrl },
+                select: { id: true },
+              });
+              skipped.push({
+                rowNumber: row.rowNumber,
+                url: normalizedUrl,
+                reason: fallbackReason,
+                sourceProductId: existing?.id,
+              });
+            }
+          } else {
+            await registerFailure(fallbackReason);
+          }
+        }
+      } else {
+        await registerFailure(reason);
+      }
+    }
+
+    seenMap[fingerprintHash] = Date.now();
+    processedNewRows += 1;
+  }
+
+  setProcessedSheetRowsMap(sheetKey, seenMap);
+  const publishedRows = successful.filter(
+    (entry) => entry.action !== "synced_existing",
+  ).length;
+
+  const responsePayload = {
+    success: true,
+    csvUrl: sheetData.csvUrl,
+    headers: sheetData.headers,
+    summary: {
+      totalRowsInSheet: sheetData.rows.length,
+      selectedRows: filteredRows.length,
+      processedRows: processRows.length,
+      processedNewRows,
+      published: publishedRows,
+      syncedExisting: syncedExistingRows,
+      skipped: skipped.length,
+      failed: failed.length,
+      manualReviewCreated: failed.filter((entry) => entry.manualReviewId).length,
+    },
+    successful,
+    skipped,
+    failed,
+  };
+
+  const batch = await saveExcelImportRun({
+    mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
+    sheetUrl: params.sheetUrl,
+    csvUrl: sheetData.csvUrl,
+    summary: responsePayload.summary,
+    successful,
+    skipped,
+    failed,
+    metadata: {
+      processOnlyNewRows: params.processOnlyNewRows === true,
+      rowNumbers: rowFilterSet.size ? [...rowFilterSet] : null,
+      pricingRuleId: selectedPricingRuleId,
+      defaultCollections: params.defaultCollections || [],
+    },
+  });
+
+  return {
+    ...responsePayload,
+    batchId: batch.id,
+    batchStatus: batch.status,
+    batchCreatedAt: batch.createdAt.toISOString(),
+  };
+}
+
+async function createManualReviewIssueForExcel(params: {
+  url: string;
+  rowNumber: number;
+  reason: string;
+}) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(params.url);
+  const issueReason = normalizeManualReviewReason(
+    `[Excel Row ${params.rowNumber}] ${params.reason}`,
+  );
+  const guessedSupplier = expectedSupplierForUrl(normalizedUrl) || "Unknown Supplier";
+
+  const result = await prisma.$transaction(async (tx) => {
+    const supplier = await tx.supplier.upsert({
+      where: { name: guessedSupplier },
+      update: {},
+      create: {
+        name: guessedSupplier,
+        baseUrl: normalizedUrl,
+      },
+    });
+
+    let sourceProduct = await tx.sourceProduct.findUnique({
+      where: { url: normalizedUrl },
+      select: { id: true, raw: true },
+    });
+
+    if (!sourceProduct) {
+      sourceProduct = await tx.sourceProduct.create({
+        data: {
+          supplierId: supplier.id,
+          url: normalizedUrl,
+          productId: null,
+          title: `Excel Import Issue - Row ${params.rowNumber}`,
+          description:
+            "Created automatically because this Excel row failed and requires manual review.",
+          brand: null,
+          currency: "USD",
+          price: 0,
+          syncStatus: "error",
+          raw: JSON.stringify({
+            excelImportIssue: true,
+            rowNumber: params.rowNumber,
+            reason: issueReason,
+            sourceUrl: normalizedUrl,
+          }),
+        },
+        select: { id: true, raw: true },
+      });
+    } else {
+      const currentRaw = parseJsonObject(sourceProduct.raw) || {};
+      const currentImportMeta = parseJsonObject(currentRaw.import) || {};
+      const mergedImportMeta = {
+        ...currentImportMeta,
+        excelRowNumber: params.rowNumber,
+      };
+      await tx.sourceProduct.update({
+        where: { id: sourceProduct.id },
+        data: {
+          raw: JSON.stringify({
+            ...currentRaw,
+            import: mergedImportMeta,
+          }),
+        },
+      });
+    }
+
+    const existingReview = await tx.manualReviewItem.findFirst({
+      where: {
+        sourceProductId: sourceProduct.id,
+        status: "pending",
+        reason: issueReason,
+      },
+      select: { id: true },
+    });
+
+    if (existingReview) {
+      return { sourceProductId: sourceProduct.id, manualReviewId: existingReview.id };
+    }
+
+    const manualReview = await tx.manualReviewItem.create({
+      data: {
+        sourceProductId: sourceProduct.id,
+        reason: issueReason,
+        status: "pending",
+      },
+      select: { id: true },
+    });
+
+    return { sourceProductId: sourceProduct.id, manualReviewId: manualReview.id };
+  });
+
+  return result;
+}
+
+async function publishPreparedProductToQueue(params: {
+  productData: any;
+  pricingRuleId?: string | null;
+  collections?: string[];
+  priceMultiplier?: number | null;
+}) {
+  const { productData, pricingRuleId, collections, priceMultiplier } = params;
+  const sourceUrl = String(productData?.source?.url || "").trim();
+  if (!sourceUrl || !isHttpUrl(sourceUrl)) {
+    throw Object.assign(new Error("Product source URL is missing or invalid"), {
+      statusCode: 400,
+      code: "INVALID_SOURCE_URL",
+    });
+  }
+
+  const sourcePrice = Number(productData.price);
+  if (!PricingEngine.validatePrice(sourcePrice)) {
+    throw Object.assign(new Error("Product source price is invalid"), {
+      statusCode: 400,
+    });
+  }
+
+  const selectedPricingRuleId = asOptionalString(pricingRuleId);
+  const selectedPriceMultiplier = toPositiveSheetNumber(priceMultiplier);
+  if (selectedPricingRuleId) {
+    const ruleExists = await prisma.pricingRule.findUnique({
+      where: { id: selectedPricingRuleId },
+      select: { id: true },
+    });
+
+    if (!ruleExists) {
+      throw Object.assign(new Error("Selected pricing rule was not found"), {
+        statusCode: 400,
+      });
+    }
+  }
+
+  const supplierName =
+    String(productData.source?.supplier || "Unknown Supplier").trim() ||
+    "Unknown Supplier";
+  const requestedImages = Array.isArray(productData.images)
+    ? productData.images
+    : [];
+  const requestedVariants =
+    Array.isArray(productData.variants) && productData.variants.length > 0
+      ? productData.variants
+      : [
+          {
+            sourceVariantId: productData.source.productId || "default",
+            price: sourcePrice,
+            currency: productData.currency,
+            available: true,
+            stockStatus: "unknown",
+          },
+        ];
+  const nextSafePayload = removeRelatedNextColorways(
+    productData,
+    requestedVariants,
+    requestedImages,
+  );
+  const normalizedImages = normalizeProductImageList(nextSafePayload.images, {
+    keepIfAllRejected: false,
+    maxImages: 30,
+  });
+  if (requestedImages.length > 0 && normalizedImages.length === 0) {
+    throw Object.assign(
+      new Error("Selected product images are not valid image URLs"),
+      { statusCode: 400 },
+    );
+  }
+  const { images, removed: removedDuplicateImages } =
+    dedupeCatalogImages(normalizedImages);
+  const { variants, removed: removedDuplicateVariants } = dedupeCatalogVariants(
+    nextSafePayload.variants,
+  );
+
+  assertStrictCatalogQuality(productData, variants, images);
+
+  const collectionIds = Array.isArray(collections) ? collections : [];
+  const importMeta = normalizeExcelImportMeta(parseJsonObject(productData?.importMeta));
+
+  const sourceProduct = await prisma.$transaction(async (tx) => {
+    const supplier = await tx.supplier.upsert({
+      where: { name: supplierName },
+      update: {},
+      create: { name: supplierName, baseUrl: productData.source.url },
+    });
+
+    const existingProduct = await tx.sourceProduct.findUnique({
+      where: { url: productData.source.url },
+      include: { shopifyProduct: true },
+    });
+
+    if (existingProduct?.shopifyProduct) {
+      throw Object.assign(
+        new Error(
+          "This product is already linked to Shopify. Use Sync Now from the product detail page.",
+        ),
+        {
+          statusCode: 409,
+        },
+      );
+    }
+
+    const productRecord = {
+      supplierId: supplier.id,
+      productId: productData.source.productId,
+      title: productData.title,
+      description: productData.description,
+      brand: productData.brand,
+      currency: productData.currency,
+      price: sourcePrice,
+      raw: JSON.stringify({
+        options: productData.options,
+          raw: productData.raw,
+          import: {
+            pricingRuleId: selectedPricingRuleId,
+            ...(selectedPriceMultiplier
+              ? { sheetPriceMultiplier: selectedPriceMultiplier }
+              : {}),
+            selectedImageCount: images.length,
+            removedDuplicateImages,
+            removedDuplicateVariants,
+            ...Object.fromEntries(
+              Object.entries(importMeta).filter(([, value]) => value !== undefined && value !== null),
+            ),
+          },
+        }),
+      syncStatus: "pending",
+    };
+
+    const imageRecords = images
+      .filter((img: any) => img?.url)
+      .map((img: any, index: number) => ({
+        url: img.url,
+        alt: img.alt,
+        color: img.color,
+        position: Number.isInteger(img.position) ? img.position : index,
+      }));
+
+    const variantRecords = variants.map((v: any, index: number) => {
+      const resolvedImageUrl = resolveVariantImageUrl(v, images, variants);
+      const variantPrice = Number(v.price || sourcePrice);
+
+      return {
+        sourceVariantId:
+          v.sourceVariantId ||
+          v.sku ||
+          `${productData.source.productId || "variant"}-${index}`,
+        sku: v.sku,
+        color: v.color,
+        size: v.size,
+        price: PricingEngine.validatePrice(variantPrice)
+          ? variantPrice
+          : sourcePrice,
+        currency: v.currency || productData.currency,
+        available: v.available ?? true,
+        stockStatus: v.stockStatus || "unknown",
+        imageUrl: resolvedImageUrl,
+        raw: JSON.stringify({
+          optionValues: v.optionValues,
+          calculatedPrice: v.calculatedPrice,
+          imageUrl: resolvedImageUrl,
+          raw: v.raw,
+        }),
+      };
+    });
+
+    if (existingProduct) {
+      await tx.sourceImage.deleteMany({
+        where: { sourceProductId: existingProduct.id },
+      });
+      await tx.sourceVariant.deleteMany({
+        where: { sourceProductId: existingProduct.id },
+      });
+      await tx.manualReviewItem.deleteMany({
+        where: { sourceProductId: existingProduct.id, status: "pending" },
+      });
+
+      return tx.sourceProduct.update({
+        where: { id: existingProduct.id },
+        data: {
+          ...productRecord,
+          images: { create: imageRecords },
+          variants: { create: variantRecords },
+        },
+      });
+    }
+
+    return tx.sourceProduct.create({
+      data: {
+        ...productRecord,
+        url: productData.source.url,
+        images: { create: imageRecords },
+        variants: { create: variantRecords },
+      },
+    });
+  });
+
+  const job = await QueueService.addTask("PUBLISH_TO_SHOPIFY", {
+    sourceProductId: sourceProduct.id,
+    pricingRuleId: selectedPricingRuleId,
+    collections: collectionIds,
+    ...(selectedPriceMultiplier ? { priceMultiplier: selectedPriceMultiplier } : {}),
+  });
+
+  return { sourceProductId: sourceProduct.id, jobId: job.id };
 }
 
 function verifyShopifyHmac(query: any, clientSecret: string) {
@@ -1454,8 +3428,33 @@ router.post("/imports/analyze", async (req, res) => {
 });
 
 // Products
+router.get("/products/stats", async (req, res) => {
+  const [totalLinked, activeSync] = await Promise.all([
+    prisma.sourceProduct.count({
+      where: {
+        shopifyProduct: { isNot: null },
+      },
+    }),
+    prisma.sourceProduct.count({
+      where: {
+        syncStatus: "active",
+        shopifyProduct: { isNot: null },
+      },
+    }),
+  ]);
+
+  res.json({
+    totalLinked,
+    activeSync,
+  });
+});
+
 router.get("/products", async (req, res) => {
   const { collectionId } = req.query;
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(500, Math.max(20, Math.floor(limitRaw)))
+    : 160;
 
   const where: any = {};
   if (collectionId) {
@@ -1468,14 +3467,80 @@ router.get("/products", async (req, res) => {
 
   const products = await prisma.sourceProduct.findMany({
     where,
-    include: {
-      shopifyProduct: true,
-      supplier: true,
-      images: { orderBy: { position: "asc" } },
+    select: {
+      id: true,
+      url: true,
+      title: true,
+      currency: true,
+      price: true,
+      syncStatus: true,
+      updatedAt: true,
+      lastScrapedAt: true,
+      raw: true,
+      supplier: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      shopifyProduct: {
+        select: {
+          id: true,
+          shopifyId: true,
+          price: true,
+          status: true,
+          collectionIds: true,
+          syncEnabled: true,
+          syncPrice: true,
+          syncInventory: true,
+          syncImages: true,
+          outOfStockAction: true,
+        },
+      },
+      images: {
+        orderBy: { position: "asc" },
+        take: 1,
+        select: {
+          id: true,
+          url: true,
+          alt: true,
+          color: true,
+          position: true,
+        },
+      },
     },
     orderBy: { updatedAt: "desc" },
+    take: limit,
   });
-  res.json(products);
+  const response = products.map((product: any) => {
+    const excelRowNumber = extractExcelRowNumberFromRaw(product.raw);
+    const { raw, ...rest } = product;
+    return {
+      ...rest,
+      excelRowNumber,
+    };
+  });
+  res.json(response);
+});
+
+router.post("/products/cleanup-integrity", async (req, res) => {
+  try {
+    const dryRun = req.body?.dryRun === true;
+    const limitRaw = Number(req.body?.limit);
+    const result = await cleanupCatalogIntegrity({
+      dryRun,
+      limit: Number.isFinite(limitRaw) ? Math.floor(limitRaw) : undefined,
+    });
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error: any) {
+    res.status(error.statusCode || 500).json({
+      error: error.message || "Failed to cleanup catalog integrity",
+      code: error.code || "CATALOG_CLEANUP_FAILED",
+    });
+  }
 });
 
 router.get("/products/:id", async (req, res) => {
@@ -1492,7 +3557,10 @@ router.get("/products/:id", async (req, res) => {
     },
   });
   if (!product) return res.status(404).json({ error: "Product not found" });
-  res.json(product);
+  res.json({
+    ...product,
+    excelRowNumber: extractExcelRowNumberFromRaw((product as any).raw),
+  });
 });
 
 router.delete("/products/:id", async (req, res) => {
@@ -1631,6 +3699,424 @@ router.get("/sync-jobs", async (req, res) => {
 });
 
 // Publishing
+router.post("/imports/excel/process-sheet-link", async (req, res) => {
+  const sheetUrl = String(req.body?.sheetUrl || "").trim();
+  const pricingRuleId = asOptionalString(req.body?.pricingRuleId);
+  const rowNumbers = Array.isArray(req.body?.rowNumbers)
+    ? req.body.rowNumbers
+        .map((value: any) => Number(value))
+        .filter((value: number) => Number.isFinite(value))
+        .map((value: number) => Math.max(1, Math.floor(value)))
+    : [];
+  const collections = Array.isArray(req.body?.collections)
+    ? req.body.collections
+    : [];
+  const createManualReview = req.body?.createManualReview !== false;
+  const processOnlyNewRows = req.body?.processOnlyNewRows === true;
+  const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
+
+  if (!sheetUrl) {
+    return res.status(400).json({ error: "sheetUrl is required" });
+  }
+
+  try {
+    const result = await processGoogleSheetBatch({
+      sheetUrl,
+      pricingRuleId,
+      rowNumbers,
+      defaultCollections: collections,
+      createManualReview,
+      processOnlyNewRows,
+      waitForPublishCompletion,
+      mode: processOnlyNewRows ? "auto_sync" : "sheet_link",
+    });
+    res.json(result);
+  } catch (error: any) {
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
+
+router.get("/imports/excel/auto-sync/status", async (req, res) => {
+  res.json({
+    ...googleSheetAutoSyncState,
+    running: Boolean(googleSheetAutoSyncTimer),
+  });
+});
+
+router.post("/imports/excel/auto-sync/start", async (req, res) => {
+  const sheetUrl = String(req.body?.sheetUrl || "").trim();
+  const pricingRuleId = asOptionalString(req.body?.pricingRuleId);
+  const collections = Array.isArray(req.body?.collections)
+    ? req.body.collections.map((value: any) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const createManualReview = req.body?.createManualReview !== false;
+  const intervalSecondsRaw = Number(req.body?.intervalSeconds);
+  const intervalSeconds = Number.isFinite(intervalSecondsRaw)
+    ? Math.max(20, Math.floor(intervalSecondsRaw))
+    : DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS;
+
+  if (!sheetUrl) {
+    return res.status(400).json({ error: "sheetUrl is required" });
+  }
+
+  const run = async () => {
+    try {
+      const result = await processGoogleSheetBatch({
+        sheetUrl,
+        pricingRuleId,
+        defaultCollections: collections,
+        createManualReview,
+        processOnlyNewRows: true,
+        waitForPublishCompletion: false,
+        mode: "auto_sync",
+      });
+      googleSheetAutoSyncState.lastRunAt = new Date().toISOString();
+      googleSheetAutoSyncState.lastResult = result.summary;
+      googleSheetAutoSyncState.lastError = null;
+      googleSheetAutoSyncState.lastBatchId = result.batchId || null;
+    } catch (error: any) {
+      googleSheetAutoSyncState.lastRunAt = new Date().toISOString();
+      googleSheetAutoSyncState.lastError = error?.message || "Auto sync failed";
+      googleSheetAutoSyncState.lastBatchId = null;
+    }
+  };
+
+  if (googleSheetAutoSyncTimer) {
+    clearInterval(googleSheetAutoSyncTimer);
+    googleSheetAutoSyncTimer = null;
+  }
+
+  googleSheetAutoSyncState.running = true;
+  googleSheetAutoSyncState.sheetUrl = sheetUrl;
+  googleSheetAutoSyncState.csvUrl = normalizeGoogleSheetUrl(sheetUrl);
+  googleSheetAutoSyncState.intervalSeconds = intervalSeconds;
+  googleSheetAutoSyncState.pricingRuleId = pricingRuleId;
+  googleSheetAutoSyncState.defaultCollections = collections;
+  googleSheetAutoSyncState.createManualReview = createManualReview;
+  googleSheetAutoSyncState.lastError = null;
+  googleSheetAutoSyncState.lastBatchId = null;
+
+  void run();
+  googleSheetAutoSyncTimer = setInterval(() => {
+    void run();
+  }, intervalSeconds * 1000);
+  (googleSheetAutoSyncTimer as any).unref?.();
+
+  res.json({
+    success: true,
+    message: "Google Sheet auto sync started",
+    state: {
+      ...googleSheetAutoSyncState,
+      running: true,
+    },
+  });
+});
+
+router.post("/imports/excel/auto-sync/stop", async (req, res) => {
+  if (googleSheetAutoSyncTimer) {
+    clearInterval(googleSheetAutoSyncTimer);
+    googleSheetAutoSyncTimer = null;
+  }
+
+  googleSheetAutoSyncState.running = false;
+  res.json({
+    success: true,
+    message: "Google Sheet auto sync stopped",
+    state: {
+      ...googleSheetAutoSyncState,
+      running: false,
+    },
+  });
+});
+
+router.get("/imports/excel/runs", async (req, res) => {
+  const takeRaw = Number(req.query.take);
+  const take = Number.isFinite(takeRaw) ? Math.min(200, Math.max(1, Math.floor(takeRaw))) : 50;
+
+  const runs = await prisma.importBatch.findMany({
+    where: { target: "excel_sheet" },
+    orderBy: { createdAt: "desc" },
+    take,
+  });
+
+  const response = runs.map((run) => {
+    const payload = parseImportBatchPayload(run.payloadJson);
+    return {
+      id: run.id,
+      status: run.status,
+      target: run.target,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+      mode: payload.mode || "unknown",
+      sheetUrl: payload.sheetUrl || null,
+      csvUrl: payload.csvUrl || null,
+      summary: payload.summary || {},
+      metadata: payload.metadata || {},
+      successfulCount: Array.isArray(payload.successful) ? payload.successful.length : 0,
+      skippedCount: Array.isArray(payload.skipped) ? payload.skipped.length : 0,
+      failedCount: Array.isArray(payload.failed) ? payload.failed.length : 0,
+    };
+  });
+
+  res.json(response);
+});
+
+router.get("/imports/excel/runs/:id", async (req, res) => {
+  const run = await prisma.importBatch.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!run || run.target !== "excel_sheet") {
+    return res.status(404).json({ error: "Excel run not found" });
+  }
+
+  const payload = parseImportBatchPayload(run.payloadJson);
+  res.json({
+    id: run.id,
+    status: run.status,
+    target: run.target,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    mode: payload.mode || "unknown",
+    sheetUrl: payload.sheetUrl || null,
+    csvUrl: payload.csvUrl || null,
+    summary: payload.summary || {},
+    metadata: payload.metadata || {},
+    successful: Array.isArray(payload.successful) ? payload.successful : [],
+    skipped: Array.isArray(payload.skipped) ? payload.skipped : [],
+    failed: Array.isArray(payload.failed) ? payload.failed : [],
+  });
+});
+
+router.post("/imports/excel/process", async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  const selectedPricingRuleId = asOptionalString(req.body?.pricingRuleId);
+  const collections = Array.isArray(req.body?.collections)
+    ? req.body.collections.map((value: any) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const createManualReview = req.body?.createManualReview !== false;
+  const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
+  const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
+
+  if (rows.length === 0) {
+    return res.status(400).json({ error: "rows is required" });
+  }
+  if (rows.length > maxRows) {
+    return res.status(400).json({
+      error: `Excel import allows up to ${maxRows} rows per batch.`,
+    });
+  }
+
+  try {
+    await ensureShopifyConnection();
+    if (selectedPricingRuleId) {
+      const ruleExists = await prisma.pricingRule.findUnique({
+        where: { id: selectedPricingRuleId },
+        select: { id: true },
+      });
+      if (!ruleExists) {
+        return res.status(400).json({ error: "Selected pricing rule was not found" });
+      }
+    }
+
+    const successful: Array<{
+      rowNumber: number;
+      url: string;
+      sourceProductId: string;
+      jobId: string;
+      verification?: {
+        shopifyId: string;
+        variantsExpected?: number;
+        variantsCreated?: number;
+        variantsLinked?: number;
+        variantImagesRequested?: number;
+        variantImagesLinked?: number;
+        salesChannelsPublished?: number;
+      };
+    }> = [];
+    const skipped: Array<{
+      rowNumber: number;
+      url: string;
+      reason: string;
+      sourceProductId?: string;
+    }> = [];
+    const failed: Array<{
+      rowNumber: number;
+      url: string;
+      reason: string;
+      sourceProductId?: string;
+      manualReviewId?: string;
+    }> = [];
+    const processedUrls = new Set<string>();
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index] || {};
+      const rowNumberRaw = Number(row?.rowNumber);
+      const rowNumber = Number.isFinite(rowNumberRaw)
+        ? Math.max(1, Math.floor(rowNumberRaw))
+        : index + 2;
+      const rawUrl = String(row?.url || "").trim();
+      const normalizedUrl = normalizeAnalyzeCacheUrl(rawUrl);
+
+      const registerFailure = async (reason: string) => {
+        let review: { sourceProductId: string; manualReviewId: string } | null = null;
+        if (createManualReview && normalizedUrl) {
+          try {
+            review = await createManualReviewIssueForExcel({
+              url: normalizedUrl,
+              rowNumber,
+              reason,
+            });
+          } catch (reviewError) {
+            console.warn(
+              "Manual review auto-create failed:",
+              reviewError instanceof Error ? reviewError.message : reviewError,
+            );
+          }
+        }
+
+        failed.push({
+          rowNumber,
+          url: normalizedUrl || rawUrl,
+          reason: normalizeManualReviewReason(reason),
+          sourceProductId: review?.sourceProductId,
+          manualReviewId: review?.manualReviewId,
+        });
+      };
+
+      if (!rawUrl) {
+        await registerFailure("Missing product URL");
+        continue;
+      }
+      if (!isHttpUrl(rawUrl)) {
+        await registerFailure("Invalid product URL");
+        continue;
+      }
+      if (processedUrls.has(normalizedUrl)) {
+        await registerFailure("Duplicate URL inside the same Excel batch");
+        continue;
+      }
+      processedUrls.add(normalizedUrl);
+
+      try {
+        const analyzed = await scrapeWithBridgeFallback(normalizedUrl);
+        analyzed.importMeta = {
+          excelRowNumber: rowNumber,
+          mode: "file_upload",
+        };
+        setCachedAnalyzeProduct(normalizedUrl, analyzed);
+        const publishResult = await publishPreparedProductToQueue({
+          productData: analyzed,
+          pricingRuleId: selectedPricingRuleId,
+          collections,
+        });
+
+        let verification:
+          | {
+              shopifyId: string;
+              variantsExpected?: number;
+              variantsCreated?: number;
+              variantsLinked?: number;
+              variantImagesRequested?: number;
+              variantImagesLinked?: number;
+              salesChannelsPublished?: number;
+            }
+          | undefined;
+        if (waitForPublishCompletion) {
+          const publishJob = await waitForSyncJobCompletion(publishResult.jobId);
+          if (publishJob.status === "failed") {
+            const reason =
+              String(publishJob.parsedResult?.error || "").trim() ||
+              `Shopify publish job failed (${publishResult.jobId})`;
+            throw new Error(reason);
+          }
+
+          verifyPublishJobResult(publishJob.parsedResult || {});
+          verification = {
+            shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+            variantsExpected: Number(publishJob.parsedResult?.variantsExpected),
+            variantsCreated: Number(publishJob.parsedResult?.variantsCreated),
+            variantsLinked: Number(publishJob.parsedResult?.variantsLinked),
+            variantImagesRequested: Number(
+              publishJob.parsedResult?.variantImagesRequested,
+            ),
+            variantImagesLinked: Number(
+              publishJob.parsedResult?.variantImagesLinked,
+            ),
+            salesChannelsPublished: Number(
+              publishJob.parsedResult?.salesChannelsPublished,
+            ),
+          };
+        }
+
+        successful.push({
+          rowNumber,
+          url: normalizedUrl,
+          sourceProductId: publishResult.sourceProductId,
+          jobId: publishResult.jobId,
+          ...(verification ? { verification } : {}),
+        });
+      } catch (error: any) {
+        const reason = error?.message || "Failed to analyze or publish this URL";
+        if (isAlreadyLinkedToShopifyMessage(reason)) {
+          const existing = await prisma.sourceProduct.findUnique({
+            where: { url: normalizedUrl },
+            select: { id: true },
+          });
+          if (existing?.id) {
+            await upsertSourceProductExcelImportMeta(normalizedUrl, {
+              excelRowNumber: rowNumber,
+              mode: "file_upload",
+            });
+          }
+          skipped.push({
+            rowNumber,
+            url: normalizedUrl || rawUrl,
+            reason,
+            sourceProductId: existing?.id,
+          });
+        } else {
+          await registerFailure(reason);
+        }
+      }
+    }
+
+    const summary = {
+      total: rows.length,
+      processedRows: rows.length,
+      processedNewRows: rows.length,
+      published: successful.length,
+      skipped: skipped.length,
+      failed: failed.length,
+      manualReviewCreated: failed.filter((entry) => entry.manualReviewId).length,
+    };
+
+    const batch = await saveExcelImportRun({
+      mode: "file_upload",
+      summary,
+      successful,
+      skipped,
+      failed,
+      metadata: {
+        pricingRuleId: selectedPricingRuleId,
+        collections,
+      },
+    });
+
+    return res.json({
+      success: true,
+      summary,
+      successful,
+      skipped,
+      failed,
+      batchId: batch.id,
+      batchStatus: batch.status,
+      batchCreatedAt: batch.createdAt.toISOString(),
+    });
+  } catch (error: any) {
+    return res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
+
 router.post("/imports/publish", async (req, res) => {
   const { productData, pricingRuleId, collections } = req.body;
   if (!productData)
@@ -1639,187 +4125,18 @@ router.post("/imports/publish", async (req, res) => {
     return res.status(400).json({ error: "Product source URL is required" });
 
   try {
-    const sourcePrice = Number(productData.price);
-    if (!PricingEngine.validatePrice(sourcePrice)) {
-      return res.status(400).json({ error: "Product source price is invalid" });
-    }
-
-    const selectedPricingRuleId = asOptionalString(pricingRuleId);
-    if (selectedPricingRuleId) {
-      const ruleExists = await prisma.pricingRule.findUnique({
-        where: { id: selectedPricingRuleId },
-        select: { id: true },
-      });
-
-      if (!ruleExists) {
-        return res
-          .status(400)
-          .json({ error: "Selected pricing rule was not found" });
-      }
-    }
-
-    const connection = await prisma.shopifyConnection.findFirst({
-      where: { isConnected: true },
-      select: { accessTokenEnc: true },
-    });
-
-    if (!connection?.accessTokenEnc) {
-      return res
-        .status(400)
-        .json({ error: "Connect Shopify before publishing products." });
-    }
-
-    const supplierName =
-      String(productData.source?.supplier || "Unknown Supplier").trim() ||
-      "Unknown Supplier";
-    const requestedImages = Array.isArray(productData.images)
-      ? productData.images
-      : [];
-    const requestedVariants =
-      Array.isArray(productData.variants) && productData.variants.length > 0
-        ? productData.variants
-        : [
-            {
-              sourceVariantId: productData.source.productId || "default",
-              price: sourcePrice,
-              currency: productData.currency,
-              available: true,
-              stockStatus: "unknown",
-            },
-          ];
-    const nextSafePayload = removeRelatedNextColorways(
+    await ensureShopifyConnection();
+    const queued = await publishPreparedProductToQueue({
       productData,
-      requestedVariants,
-      requestedImages,
-    );
-    const images = normalizeProductImageList(nextSafePayload.images, {
-      keepIfAllRejected: false,
-      maxImages: 30,
-    });
-    if (requestedImages.length > 0 && images.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Selected product images are not valid image URLs" });
-    }
-    const variants = nextSafePayload.variants;
-    const collectionIds = Array.isArray(collections) ? collections : [];
-
-    // 1. Create Source Product record
-    const sourceProduct = await prisma.$transaction(async (tx) => {
-      const supplier = await tx.supplier.upsert({
-        where: { name: supplierName },
-        update: {},
-        create: { name: supplierName, baseUrl: productData.source.url },
-      });
-
-      const existingProduct = await tx.sourceProduct.findUnique({
-        where: { url: productData.source.url },
-        include: { shopifyProduct: true },
-      });
-
-      if (existingProduct?.shopifyProduct) {
-        throw Object.assign(
-          new Error(
-            "This product is already linked to Shopify. Use Sync Now from the product detail page.",
-          ),
-          {
-            statusCode: 409,
-          },
-        );
-      }
-
-      const productRecord = {
-        supplierId: supplier.id,
-        productId: productData.source.productId,
-        title: productData.title,
-        description: productData.description,
-        brand: productData.brand,
-        currency: productData.currency,
-        price: sourcePrice,
-        raw: JSON.stringify({
-          options: productData.options,
-          raw: productData.raw,
-          import: {
-            pricingRuleId: selectedPricingRuleId,
-            selectedImageCount: images.length,
-          },
-        }),
-        syncStatus: "pending",
-      };
-
-      const imageRecords = images
-        .filter((img: any) => img?.url)
-        .map((img: any, index: number) => ({
-          url: img.url,
-          alt: img.alt,
-          color: img.color,
-          position: Number.isInteger(img.position) ? img.position : index,
-        }));
-
-      const variantRecords = variants.map((v: any, index: number) => {
-        const resolvedImageUrl = resolveVariantImageUrl(v, images, variants);
-        const variantPrice = Number(v.price || sourcePrice);
-
-        return {
-          sourceVariantId:
-            v.sourceVariantId ||
-            v.sku ||
-            `${productData.source.productId || "variant"}-${index}`,
-          sku: v.sku,
-          color: v.color,
-          size: v.size,
-          price: PricingEngine.validatePrice(variantPrice)
-            ? variantPrice
-            : sourcePrice,
-          currency: v.currency || productData.currency,
-          available: v.available ?? true,
-          stockStatus: v.stockStatus || "unknown",
-          imageUrl: resolvedImageUrl,
-          raw: JSON.stringify({
-            optionValues: v.optionValues,
-            calculatedPrice: v.calculatedPrice,
-            imageUrl: resolvedImageUrl,
-            raw: v.raw,
-          }),
-        };
-      });
-
-      if (existingProduct) {
-        await tx.sourceImage.deleteMany({
-          where: { sourceProductId: existingProduct.id },
-        });
-        await tx.sourceVariant.deleteMany({
-          where: { sourceProductId: existingProduct.id },
-        });
-
-        return tx.sourceProduct.update({
-          where: { id: existingProduct.id },
-          data: {
-            ...productRecord,
-            images: { create: imageRecords },
-            variants: { create: variantRecords },
-          },
-        });
-      }
-
-      return tx.sourceProduct.create({
-        data: {
-          ...productRecord,
-          url: productData.source.url,
-          images: { create: imageRecords },
-          variants: { create: variantRecords },
-        },
-      });
+      pricingRuleId,
+      collections,
     });
 
-    // 2. Queue the Shopify push
-    const job = await QueueService.addTask("PUBLISH_TO_SHOPIFY", {
-      sourceProductId: sourceProduct.id,
-      pricingRuleId: selectedPricingRuleId,
-      collections: collectionIds,
+    res.json({
+      success: true,
+      productId: queued.sourceProductId,
+      jobId: queued.jobId,
     });
-
-    res.json({ success: true, productId: sourceProduct.id, jobId: job.id });
   } catch (error: any) {
     res.status(error.statusCode || 500).json({ error: error.message });
   }
@@ -1938,9 +4255,17 @@ router.delete("/products/:id", async (req, res) => {
 router.get("/manual-review", async (req, res) => {
   const items = await prisma.manualReviewItem.findMany({
     where: { status: "pending" },
-    include: { sourceProduct: true },
+    include: { sourceProduct: { include: { supplier: true } } },
   });
-  res.json(items);
+  const response = items.map((item: any) => {
+    const fromRaw = extractExcelRowNumberFromRaw(item?.sourceProduct?.raw);
+    const fromReason = extractExcelRowNumberFromReason(item?.reason);
+    return {
+      ...item,
+      excelRowNumber: fromRaw ?? fromReason,
+    };
+  });
+  res.json(response);
 });
 
 // Manual Review resolution

@@ -69,6 +69,9 @@ export default function ManualReview() {
                   <AlertTriangle size={12} className="text-amber-500" />
                   Reason: <span className="font-bold text-slate-700">{item.reason}</span>
                 </p>
+                <p className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                  Sheet Row: {item.excelRowNumber ? item.excelRowNumber : '-'}
+                </p>
               </div>
 
               <div className="flex gap-3 shrink-0">
@@ -102,4 +105,3 @@ export default function ManualReview() {
     </div>
   );
 }
-

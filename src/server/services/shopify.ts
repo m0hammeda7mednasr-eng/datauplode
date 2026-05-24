@@ -14,10 +14,12 @@ export interface ShopifyConfig {
 export class ShopifyGraphqlClient {
   private config: ShopifyConfig;
   private endpoint: string;
+  private restBaseEndpoint: string;
 
   constructor(config: ShopifyConfig) {
     this.config = config;
     this.endpoint = `https://${config.shopDomain}/admin/api/${config.apiVersion}/graphql.json`;
+    this.restBaseEndpoint = `https://${config.shopDomain}/admin/api/${config.apiVersion}`;
   }
 
   async request<T = any>(query: string, variables: any = {}): Promise<T> {
@@ -61,6 +63,34 @@ export class ShopifyGraphqlClient {
       throw error;
     }
   }
+
+  async restDelete(path: string): Promise<void> {
+    if (!this.config.accessToken || !this.config.shopDomain) {
+      throw new Error('Shopify credentials not configured');
+    }
+
+    const cleanPath = String(path || '').replace(/^\/+/, '');
+    if (!cleanPath) throw new Error('Shopify REST delete path is required');
+
+    try {
+      const response = await axios.delete(`${this.restBaseEndpoint}/${cleanPath}`, {
+        timeout: 30000,
+        headers: {
+          'X-Shopify-Access-Token': this.config.accessToken,
+          'Content-Type': 'application/json',
+        },
+        validateStatus: (status) => status < 500,
+      });
+      if (response.status >= 400) {
+        throw new Error(`Shopify REST delete failed with HTTP ${response.status}`);
+      }
+    } catch (error: any) {
+      if (error.response?.status === 429) {
+        throw new Error('Shopify rate limit exceeded. Please wait.');
+      }
+      throw error;
+    }
+  }
 }
 
 // Global client for legacy support (if any)
@@ -72,6 +102,13 @@ export const shopifyClient = new ShopifyGraphqlClient({
 
 // Helper for mutations
 export class ShopifyService {
+  private static parseNumericIdFromGid(value: string) {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const match = text.match(/(\d+)(?:\D*)$/);
+    return match ? match[1] : null;
+  }
+
   static async getClientFromDb(prisma: any) {
     const connection = await prisma.shopifyConnection.findFirst({
       where: { isConnected: true }
@@ -223,6 +260,42 @@ export class ShopifyService {
     });
   }
 
+  static async updateProductDetails(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    details: {
+      title?: string;
+      descriptionHtml?: string | null;
+      vendor?: string | null;
+      status?: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
+      tags?: string[];
+      metafields?: any[];
+    },
+  ) {
+    const mutation = `
+      mutation productUpdateDetails($product: ProductUpdateInput!) {
+        productUpdate(product: $product) {
+          product {
+            id
+            handle
+            title
+            status
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    return client.request(mutation, {
+      product: {
+        id: productId,
+        ...details,
+      },
+    });
+  }
+
   static async getInventoryLocation(client: ShopifyGraphqlClient) {
     const query = `
       query {
@@ -349,6 +422,7 @@ export class ShopifyService {
             nodes {
               id
               title
+              price
               sku
               inventoryItem {
                 id
@@ -408,6 +482,61 @@ export class ShopifyService {
                 preview {
                   status
                 }
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    return client.request(mutation, {
+      productId,
+      variants,
+      media,
+      allowPartialUpdates: true,
+    });
+  }
+
+  static async updateVariantsBulk(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    variants: any[],
+    media: any[] = [],
+  ) {
+    if (variants.length === 0) {
+      return { productVariantsBulkUpdate: { productVariants: [], userErrors: [] } };
+    }
+
+    const mutation = `
+      mutation productVariantsBulkUpdate(
+        $productId: ID!
+        $variants: [ProductVariantsBulkInput!]!
+        $media: [CreateMediaInput!]
+        $allowPartialUpdates: Boolean
+      ) {
+        productVariantsBulkUpdate(
+          productId: $productId
+          variants: $variants
+          media: $media
+          allowPartialUpdates: $allowPartialUpdates
+        ) {
+          productVariants {
+            id
+            price
+            inventoryItem {
+              id
+              sku
+              tracked
+            }
+            media(first: 10) {
+              nodes {
+                id
+                alt
+                mediaContentType
               }
             }
           }
@@ -511,5 +640,34 @@ export class ShopifyService {
       }
     `;
     return client.request(mutation, { id: collectionId, productIds: [productId] });
+  }
+
+  static async deleteProduct(client: ShopifyGraphqlClient, productId: string) {
+    const numericId = this.parseNumericIdFromGid(productId);
+    if (numericId) {
+      await client.restDelete(`products/${numericId}.json`);
+      return { deletedProductId: productId, method: 'rest' };
+    }
+
+    const mutation = `
+      mutation deleteProduct($id: ID!) {
+        productDelete(id: $id) {
+          deletedProductId
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    const data = await client.request(mutation, { id: productId });
+    const userErrors = data.productDelete?.userErrors || [];
+    if (userErrors.length > 0) {
+      throw new Error(`Shopify Delete Error: ${userErrors[0].message}`);
+    }
+    return {
+      deletedProductId: data.productDelete?.deletedProductId || productId,
+      method: 'graphql',
+    };
   }
 }

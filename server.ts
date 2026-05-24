@@ -137,7 +137,7 @@ async function startServer() {
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
 
-  app.use(express.json({ limit: "2mb" }));
+  app.use(express.json({ limit: "10mb" }));
 
   app.get(["/health", "/api/health"], async (_req, res) => {
     try {
@@ -225,6 +225,7 @@ async function startServer() {
     console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
     void seedDefaultPricingRules();
+    void QueueService.recoverInterruptedJobs();
     QueueService.startInventoryMonitor();
   });
 }
