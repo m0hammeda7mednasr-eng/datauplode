@@ -511,6 +511,20 @@ function getInventoryQuantityForStatus(stockStatus: string) {
   return getFallbackInventoryQuantity({ available: true, stockStatus });
 }
 
+function isProductionRuntime() {
+  return String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+}
+
+function hasShopifySyncRuntimeConfig() {
+  if (!isProductionRuntime()) return true;
+  return Boolean(String(process.env.ENCRYPTION_KEY || '').trim());
+}
+
+function isShopifyRuntimeConfigError(error: any) {
+  const message = String(error?.message || error || '');
+  return /ENCRYPTION_KEY is required in production|Shopify connection needs to be reconnected|No active Shopify connection found/i.test(message);
+}
+
 function toPositiveNumber(value: any): number | null {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
@@ -946,6 +960,10 @@ export class QueueService {
     if (this.inventoryMonitorStarted) return;
     if (process.env.SYNC_INVENTORY_AUTOSTART === 'false') {
       console.log('Inventory monitor disabled by SYNC_INVENTORY_AUTOSTART=false');
+      return;
+    }
+    if (!hasShopifySyncRuntimeConfig()) {
+      console.warn('Inventory monitor disabled: ENCRYPTION_KEY is missing in production.');
       return;
     }
 
@@ -1874,7 +1892,11 @@ export class QueueService {
 
         try {
           const payload = JSON.parse(job.payload || '{}');
-          if ((job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY' || job.type === 'REPUBLISH_TO_SHOPIFY') && payload.sourceProductId) {
+          if (
+            (job.type === 'SYNC_PRODUCT' || job.type === 'PUBLISH_TO_SHOPIFY' || job.type === 'REPUBLISH_TO_SHOPIFY') &&
+            payload.sourceProductId &&
+            !isShopifyRuntimeConfigError(error)
+          ) {
             await prisma.sourceProduct.updateMany({
               where: { id: payload.sourceProductId },
               data: { syncStatus: 'error' },
