@@ -879,6 +879,10 @@ export class QueueService {
       console.log('Sync job recovery disabled by SYNC_JOB_RECOVERY_ENABLED=false');
       return { recovered: 0 };
     }
+    if (!hasShopifySyncRuntimeConfig()) {
+      console.warn('Sync job recovery disabled: ENCRYPTION_KEY is missing in production.');
+      return { recovered: 0 };
+    }
 
     const staleMinutes =
       Number.isFinite(SYNC_JOB_STALE_RUNNING_MINUTES) && SYNC_JOB_STALE_RUNNING_MINUTES > 0
