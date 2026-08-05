@@ -1,7 +1,9 @@
 using Dabdoob.Sync.Application.Abstractions;
+using Dabdoob.Sync.Infrastructure.Google;
 using Dabdoob.Sync.Infrastructure.Jobs;
 using Dabdoob.Sync.Infrastructure.Persistence;
 using Dabdoob.Sync.Worker;
+using Dabdoob.Sync.Worker.Handlers;
 using Microsoft.EntityFrameworkCore;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -12,6 +14,9 @@ var connectionString = builder.Configuration.GetConnectionString("Postgres")
 builder.Services.AddPooledDbContextFactory<SyncDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure()));
 builder.Services.AddSingleton<ISyncJobQueue, PostgresSyncJobQueue>();
+builder.Services.AddSingleton<ISheetReader, GoogleSheetsReader>();
+builder.Services.AddSingleton<ISyncJobHandler, ScanGoogleSheetJobHandler>();
+builder.Services.AddSingleton<ISyncJobHandler, ReconcileShopifyOrderJobHandler>();
 builder.Services.AddHostedService<SyncWorker>();
 
 var host = builder.Build();
