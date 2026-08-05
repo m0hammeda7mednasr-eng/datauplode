@@ -13,6 +13,7 @@ import {
   validateRuntimeEnv,
 } from "./src/server/config/env.js";
 import apiRouter from "./src/server/api.js";
+import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
 import cors from "cors";
@@ -167,6 +168,7 @@ async function startServer() {
   });
 
   // API routes
+  app.use("/api", catalogAuditRouter);
   app.use("/api", apiRouter);
 
   console.log("✅ API routes mounted");
