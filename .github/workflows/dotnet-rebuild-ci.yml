@@ -1,0 +1,58 @@
+name: .NET Rebuild CI
+
+on:
+  push:
+    branches:
+      - dotnet-rebuild-v1
+    paths:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-rebuild-ci.yml"
+  pull_request:
+    paths:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-rebuild-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dotnet-rebuild-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore API
+        working-directory: dotnet
+        run: dotnet restore src/Dabdoob.Sync.Api/Dabdoob.Sync.Api.csproj
+
+      - name: Build API
+        working-directory: dotnet
+        run: dotnet build src/Dabdoob.Sync.Api/Dabdoob.Sync.Api.csproj --configuration Release --no-restore
+
+      - name: Restore Worker
+        working-directory: dotnet
+        run: dotnet restore src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj
+
+      - name: Build Worker
+        working-directory: dotnet
+        run: dotnet build src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj --configuration Release --no-restore
+
+      - name: Build API image
+        working-directory: dotnet
+        run: docker build --file Dockerfile.api --tag dabdoob-sync-api:ci .
+
+      - name: Build Worker image
+        working-directory: dotnet
+        run: docker build --file Dockerfile.worker --tag dabdoob-sync-worker:ci .
