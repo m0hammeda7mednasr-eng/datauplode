@@ -43,8 +43,10 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
                 exception);
         }
 
-        var credential = GoogleCredential
-            .FromJson(credentialJson)
+        var serviceAccountCredential =
+            CredentialFactory.FromJson<ServiceAccountCredential>(credentialJson);
+        var credential = serviceAccountCredential
+            .ToGoogleCredential()
             .CreateScoped(SheetsService.Scope.SpreadsheetsReadonly);
 
         _service = new SheetsService(new BaseClientService.Initializer
@@ -78,8 +80,6 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
         request.Ranges = sheetNames
             .Select(name => $"'{name.Replace("'", "''", StringComparison.Ordinal)}'!A2:D{_maximumRow}")
             .ToList();
-        request.MajorDimension = SpreadsheetsResource.ValuesResource.BatchGetRequest.MajorDimensionEnum.Rows;
-        request.ValueRenderOption = SpreadsheetsResource.ValuesResource.BatchGetRequest.ValueRenderOptionEnum.Unformattedvalue;
 
         var response = await request.ExecuteAsync(cancellationToken);
         var rows = new List<SheetProductRow>();
