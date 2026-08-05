@@ -7,9 +7,14 @@ using Google.Apis.Sheets.v4;
 
 namespace Dabdoob.Sync.Infrastructure.Google;
 
+public sealed record GoogleSheetsReaderOptions(
+    string ServiceAccountJsonBase64,
+    IReadOnlyList<string> SheetNames,
+    int MaximumRow);
+
 public sealed class GoogleSheetsReader : ISheetReader, IDisposable
 {
-    private static readonly string[] DefaultSheetNames =
+    public static readonly string[] DefaultSheetNames =
     [
         "الورقة1", "الورقة2", "الورقة15", "الورقة10", "الورقة6", "الورقة7",
         "الورقة8", "الورقة20", "الورقة9", "الورقة11", "الورقة12", "الورقة13",
@@ -20,23 +25,21 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
     private readonly IReadOnlyList<string> _configuredSheetNames;
     private readonly int _maximumRow;
 
-    public GoogleSheetsReader(IConfiguration configuration)
+    public GoogleSheetsReader(GoogleSheetsReaderOptions options)
     {
-        var encodedCredentials = configuration["Google:ServiceAccountJsonBase64"];
-        if (string.IsNullOrWhiteSpace(encodedCredentials))
-        {
-            throw new InvalidOperationException("Google:ServiceAccountJsonBase64 is required.");
-        }
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentException.ThrowIfNullOrWhiteSpace(options.ServiceAccountJsonBase64);
 
         string credentialJson;
         try
         {
-            credentialJson = Encoding.UTF8.GetString(Convert.FromBase64String(encodedCredentials));
+            credentialJson = Encoding.UTF8.GetString(
+                Convert.FromBase64String(options.ServiceAccountJsonBase64));
         }
         catch (FormatException exception)
         {
             throw new InvalidOperationException(
-                "Google:ServiceAccountJsonBase64 is not valid base64.",
+                "Google service-account credentials are not valid base64.",
                 exception);
         }
 
@@ -50,8 +53,14 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
             ApplicationName = "Dabdoob Product Sync"
         });
 
-        _configuredSheetNames = ParseSheetNames(configuration["Google:SheetNames"]);
-        _maximumRow = Math.Max(configuration.GetValue("Google:MaximumRow", 10000), 2);
+        _configuredSheetNames = options.SheetNames.Count == 0
+            ? DefaultSheetNames
+            : options.SheetNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        _maximumRow = Math.Max(options.MaximumRow, 2);
     }
 
     public async Task<IReadOnlyList<SheetProductRow>> ReadChangedRowsAsync(
@@ -110,21 +119,6 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
     }
 
     public void Dispose() => _service.Dispose();
-
-    private static IReadOnlyList<string> ParseSheetNames(string? configuredValue)
-    {
-        if (string.IsNullOrWhiteSpace(configuredValue))
-        {
-            return DefaultSheetNames;
-        }
-
-        var names = configuredValue
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-
-        return names.Length == 0 ? DefaultSheetNames : names;
-    }
 
     private static string ResolveSheetName(string? range)
     {
