@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Dabdoob.Sync.Api</RootNamespace>
+    <AssemblyName>Dabdoob.Sync.Api</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Dabdoob.Sync.Application/Dabdoob.Sync.Application.csproj" />
+    <ProjectReference Include="../Dabdoob.Sync.Infrastructure/Dabdoob.Sync.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>
