@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY Directory.Build.props Directory.Packages.props ./
+COPY src/Dabdoob.Sync.Domain/Dabdoob.Sync.Domain.csproj src/Dabdoob.Sync.Domain/
+COPY src/Dabdoob.Sync.Application/Dabdoob.Sync.Application.csproj src/Dabdoob.Sync.Application/
+COPY src/Dabdoob.Sync.Infrastructure/Dabdoob.Sync.Infrastructure.csproj src/Dabdoob.Sync.Infrastructure/
+COPY src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj src/Dabdoob.Sync.Worker/
+RUN dotnet restore src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj
+
+COPY . .
+RUN dotnet publish src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj \
+    --configuration Release \
+    --no-restore \
+    --output /app/publish
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "Dabdoob.Sync.Worker.dll"]
