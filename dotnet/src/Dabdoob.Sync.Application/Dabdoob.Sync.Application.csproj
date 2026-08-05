@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Dabdoob.Sync.Application</RootNamespace>
+    <AssemblyName>Dabdoob.Sync.Application</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Dabdoob.Sync.Domain/Dabdoob.Sync.Domain.csproj" />
+  </ItemGroup>
+</Project>
