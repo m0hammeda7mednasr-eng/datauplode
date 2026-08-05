@@ -14,6 +14,7 @@ import {
 } from "./src/server/config/env.js";
 import apiRouter from "./src/server/api.js";
 import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
+import readinessRouter from "./src/server/routes/readiness.routes.js";
 import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
@@ -168,6 +169,7 @@ async function startServer() {
     }
   });
 
+  app.use("/api", readinessRouter);
   app.use("/api", catalogAuditSafety);
   app.use("/api", catalogAuditRouter);
   app.use("/api", apiRouter);
@@ -216,6 +218,7 @@ async function startServer() {
           service: "Syncly API",
           frontend: envString("FRONTEND_URL", "https://datauplode.vercel.app"),
           health: "/health",
+          readiness: "/api/ready",
         });
       });
     }
