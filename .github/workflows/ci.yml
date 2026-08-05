@@ -52,6 +52,9 @@ jobs:
           LOCAL_BRIDGE_ENABLED: "false"
           SCRAPER_BYPASS_MODE: never
 
+      - name: Enforce production safety contract
+        run: npm run safety:production
+
       - name: TypeScript check
         run: npm run lint
 
