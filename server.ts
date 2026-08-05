@@ -14,6 +14,7 @@ import {
 } from "./src/server/config/env.js";
 import apiRouter from "./src/server/api.js";
 import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
+import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
@@ -122,7 +123,6 @@ async function startServer() {
 
   const corsOptions: cors.CorsOptions = {
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
       if (allowedOrigins.has(origin)) {
         callback(null, true);
@@ -133,7 +133,7 @@ async function startServer() {
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Catalog-Audit-Write-Token"],
   };
 
   app.use(cors(corsOptions));
@@ -168,13 +168,12 @@ async function startServer() {
     }
   });
 
-  // API routes
+  app.use("/api", catalogAuditSafety);
   app.use("/api", catalogAuditRouter);
   app.use("/api", apiRouter);
 
   console.log("✅ API routes mounted");
 
-  // Vite middleware for development
   if (!isProduction()) {
     const vite = await createViteServer({
       server: {
@@ -186,7 +185,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
 
-    // Serve index.html as a fallback
     app.use("*", async (req, res, next) => {
       const url = req.originalUrl;
       if (url.startsWith("/api")) return next();
