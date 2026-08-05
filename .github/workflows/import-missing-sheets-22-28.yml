@@ -8,6 +8,9 @@ on:
     paths:
       - .github/workflows/import-missing-sheets-22-28.yml
 
+permissions:
+  contents: write
+
 concurrency:
   group: import-missing-sheets-22-28
   cancel-in-progress: false
@@ -18,23 +21,80 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Check backend health
-        env:
-          BASE_URL: https://datauplode-production.up.railway.app
-        run: |
-          set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            --connect-timeout 20 --max-time 60 \
-            --retry 5 --retry-delay 5 --retry-all-errors \
-            "$BASE_URL/api/health"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
 
-      - name: Queue missing products from Google Sheets
+      - name: Queue missing products and report progress
         env:
           BASE_URL: https://datauplode-production.up.railway.app
           SPREADSHEET_ID: 1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w
         shell: bash
         run: |
           set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          write_status() {
+            local status="$1"
+            local stage="$2"
+            local sheet="${3:-}"
+            local batch="${4:-}"
+            local message="${5:-}"
+
+            mkdir -p .import-status
+            STATUS="$status" STAGE="$stage" SHEET="$sheet" BATCH="$batch" MESSAGE="$message" \
+              python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+
+payload = {
+    "status": os.environ["STATUS"],
+    "stage": os.environ["STAGE"],
+    "sheet": os.environ.get("SHEET") or None,
+    "batch": os.environ.get("BATCH") or None,
+    "message": os.environ.get("MESSAGE") or None,
+    "updatedAt": datetime.now(timezone.utc).isoformat(),
+    "runId": os.environ.get("GITHUB_RUN_ID"),
+    "commit": os.environ.get("GITHUB_SHA"),
+}
+with open(".import-status/sheets-22-28.json", "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+
+            git add .import-status/sheets-22-28.json
+            if git diff --cached --quiet; then
+              return
+            fi
+            git commit -m "Update sheets 22-28 import status [skip ci]"
+            git push origin HEAD:main
+          }
+
+          fail() {
+            local sheet="${1:-}"
+            local batch="${2:-}"
+            local message="${3:-Unknown import failure}"
+            write_status "failed" "import" "$sheet" "$batch" "$message"
+            echo "$message" >&2
+            exit 1
+          }
+
+          write_status "running" "health_check" "" "" "Checking Railway backend"
+
+          if ! health_output=$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 20 --max-time 60 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "$BASE_URL/api/health" 2>&1); then
+            write_status "failed" "health_check" "" "" "$health_output"
+            echo "$health_output" >&2
+            exit 1
+          fi
+
+          write_status "running" "backend_healthy" "" "" "$health_output"
 
           sheets=(
             "الورقة22:282692873"
@@ -51,11 +111,12 @@ jobs:
             gid="${sheet##*:}"
             sheet_url="https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit?gid=${gid}"
 
-            echo "Starting ${name} (${gid})"
+            write_status "running" "sheet_started" "$name" "" "Queueing sheet batches"
 
             for start in $(seq 1 50 1000); do
               end=$((start + 49))
               if [ "$end" -gt 1000 ]; then end=1000; fi
+              batch="${start}-${end}"
 
               payload=$(python3 - "$sheet_url" "$start" "$end" <<'PY'
 import json
@@ -75,7 +136,6 @@ print(json.dumps({
 PY
               )
 
-              echo "Queueing ${name} rows ${start}-${end}"
               response_file=$(mktemp)
               http_code=$(curl --silent --show-error \
                 --connect-timeout 20 --max-time 180 \
@@ -83,20 +143,20 @@ PY
                 -o "$response_file" -w "%{http_code}" \
                 -X POST "$BASE_URL/api/imports/excel/process-sheet-link" \
                 -H "Content-Type: application/json" \
-                --data "$payload")
+                --data "$payload") || fail "$name" "$batch" "Could not reach import endpoint"
 
-              cat "$response_file"
-              echo
+              response_text=$(cat "$response_file")
+              rm -f "$response_file"
 
               if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-                echo "Import request failed for ${name} rows ${start}-${end} with HTTP ${http_code}" >&2
-                rm -f "$response_file"
-                exit 1
+                fail "$name" "$batch" "HTTP ${http_code}: ${response_text}"
               fi
 
-              rm -f "$response_file"
+              echo "Queued ${name} rows ${batch}: ${response_text}"
               sleep 2
             done
+
+            write_status "running" "sheet_queued" "$name" "1-1000" "All batches queued"
           done
 
-          echo "All sheet batches were queued successfully."
+          write_status "completed" "all_batches_queued" "الورقة22-الورقة28" "1-1000" "All missing-product batches were queued"
