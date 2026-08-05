@@ -22,6 +22,7 @@ public sealed class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbC
         catalog.Property(x => x.SheetName).HasMaxLength(256);
         catalog.Property(x => x.CollectionName).HasMaxLength(512);
         catalog.Property(x => x.ExpectedSku).HasMaxLength(256);
+        catalog.Property(x => x.RowFingerprint).HasMaxLength(128);
         catalog.Property(x => x.ShopifyProductId).HasMaxLength(256);
         catalog.Property(x => x.ShopifyVariantId).HasMaxLength(256);
         catalog.Property(x => x.SourceFingerprint).HasMaxLength(256);
@@ -30,6 +31,7 @@ public sealed class SyncDbContext(DbContextOptions<SyncDbContext> options) : DbC
         catalog.HasIndex(x => new { x.SpreadsheetId, x.SheetName, x.SheetRow }).IsUnique();
         catalog.HasIndex(x => x.CanonicalSourceKey);
         catalog.HasIndex(x => x.ExpectedSku);
+        catalog.HasIndex(x => x.RowFingerprint);
         catalog.HasIndex(x => x.NextCheckAt);
 
         var orders = modelBuilder.Entity<ShopifyOrder>();
