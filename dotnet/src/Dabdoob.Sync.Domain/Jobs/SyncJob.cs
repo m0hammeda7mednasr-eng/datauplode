@@ -6,7 +6,12 @@ public enum SyncJobType
     ReconcileCatalogItem = 1,
     RefreshSource = 2,
     ApplyShopifyMutation = 3,
-    RenewGoogleDriveWatch = 4
+    RenewGoogleDriveWatch = 4,
+    ReconcileShopifyOrder = 5,
+    BackfillShopifyOrders = 6,
+    BackfillShopifyProducts = 7,
+    ReconcileShopifyProduct = 8,
+    ScanGoogleSheet = 9
 }
 
 public enum SyncJobStatus
