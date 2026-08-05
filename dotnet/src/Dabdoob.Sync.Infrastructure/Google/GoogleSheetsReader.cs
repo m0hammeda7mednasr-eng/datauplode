@@ -69,8 +69,8 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
         request.Ranges = sheetNames
             .Select(name => $"'{name.Replace("'", "''", StringComparison.Ordinal)}'!A2:D{_maximumRow}")
             .ToList();
-        request.MajorDimension = SpreadsheetsResource.ValuesResource.BatchGetRequest.MajorDimensionEnum.ROWS;
-        request.ValueRenderOption = SpreadsheetsResource.ValuesResource.BatchGetRequest.ValueRenderOptionEnum.UNFORMATTEDVALUE;
+        request.MajorDimension = SpreadsheetsResource.ValuesResource.BatchGetRequest.MajorDimensionEnum.Rows;
+        request.ValueRenderOption = SpreadsheetsResource.ValuesResource.BatchGetRequest.ValueRenderOptionEnum.Unformattedvalue;
 
         var response = await request.ExecuteAsync(cancellationToken);
         var rows = new List<SheetProductRow>();
@@ -158,8 +158,8 @@ public sealed class GoogleSheetsReader : ISheetReader, IDisposable
         return row[index] switch
         {
             decimal value => value,
-            double value => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
-            float value => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            double value => (decimal)value,
+            float value => (decimal)value,
             long value => value,
             int value => value,
             _ when decimal.TryParse(
