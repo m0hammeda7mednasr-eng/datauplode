@@ -3,8 +3,14 @@ name: Production Build Check
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-rebuild-ci.yml"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "dotnet/**"
+      - ".github/workflows/dotnet-rebuild-ci.yml"
   workflow_dispatch:
 
 jobs:
