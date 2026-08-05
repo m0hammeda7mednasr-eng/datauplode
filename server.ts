@@ -16,6 +16,7 @@ import apiRouter from "./src/server/api.js";
 import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
+import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -229,6 +230,7 @@ async function startServer() {
     void seedDefaultPricingRules();
     void QueueService.recoverInterruptedJobs();
     QueueService.startInventoryMonitor();
+    startOneTimeSheetImport(PORT);
   });
 }
 
