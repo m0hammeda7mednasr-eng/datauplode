@@ -10,11 +10,20 @@ var builder = Host.CreateApplicationBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("Postgres")
     ?? throw new InvalidOperationException("ConnectionStrings:Postgres is required.");
+var googleCredentials = builder.Configuration["Google:ServiceAccountJsonBase64"]
+    ?? throw new InvalidOperationException("Google:ServiceAccountJsonBase64 is required.");
+var configuredSheetNames = (builder.Configuration["Google:SheetNames"] ?? string.Empty)
+    .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+var maximumSheetRow = builder.Configuration.GetValue("Google:MaximumRow", 10000);
 
 builder.Services.AddPooledDbContextFactory<SyncDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure()));
 builder.Services.AddSingleton<ISyncJobQueue, PostgresSyncJobQueue>();
-builder.Services.AddSingleton<ISheetReader, GoogleSheetsReader>();
+builder.Services.AddSingleton<ISheetReader>(_ => new GoogleSheetsReader(
+    new GoogleSheetsReaderOptions(
+        googleCredentials,
+        configuredSheetNames,
+        maximumSheetRow)));
 builder.Services.AddSingleton<ISyncJobHandler, ScanGoogleSheetJobHandler>();
 builder.Services.AddSingleton<ISyncJobHandler, ReconcileShopifyOrderJobHandler>();
 builder.Services.AddHostedService<SyncWorker>();
