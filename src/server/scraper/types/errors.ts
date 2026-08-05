@@ -5,6 +5,7 @@ export type ScraperErrorCode =
   | "PERMISSION_REQUIRED"
   | "NETWORK_ERROR"
   | "TIMEOUT"
+  | "RATE_LIMITED"
   | "JS_RENDER_REQUIRED"
   | "NO_PRODUCT_DATA_FOUND"
   | "PRICE_PARSE_FAILED"
@@ -21,12 +22,14 @@ export class ScraperError extends Error {
     this.code = code;
     this.details = details;
     this.status =
-      code === "INVALID_URL" || code === "INVALID_PRODUCT_DATA"
-        ? 400
-        : code === "ROBOTS_DISALLOWED" ||
-            code === "SOURCE_RESTRICTED" ||
-            code === "PERMISSION_REQUIRED"
-          ? 422
-          : 500;
+      code === "RATE_LIMITED"
+        ? 429
+        : code === "INVALID_URL" || code === "INVALID_PRODUCT_DATA"
+          ? 400
+          : code === "ROBOTS_DISALLOWED" ||
+              code === "SOURCE_RESTRICTED" ||
+              code === "PERMISSION_REQUIRED"
+            ? 422
+            : 500;
   }
 }
