@@ -38,6 +38,11 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
           configured("GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64"))),
     catalogWriteGateEnabled: enabled("CATALOG_AUDIT_WRITE_ENABLED"),
     catalogWriteTokenConfigured: configured("CATALOG_AUDIT_WRITE_TOKEN"),
+    catalogSheetWriteGateEnabled: enabled("CATALOG_AUDIT_SHEET_WRITE_ENABLED"),
+    catalogCanaryMaxRows: Math.max(
+      1,
+      Math.min(5, Number(process.env.CATALOG_AUDIT_CANARY_MAX_ROWS || 1) || 1),
+    ),
     runtimeWriteGateEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),
     inventoryAutostartEnabled: enabled("SYNC_INVENTORY_AUTOSTART"),
     jobRecoveryEnabled:
