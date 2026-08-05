@@ -71,6 +71,10 @@ function getListenHost() {
   return configuredHost;
 }
 
+function runtimeWritesEnabled() {
+  return envString("SYNC_RUNTIME_WRITE_ENABLED", "false").toLowerCase() === "true";
+}
+
 function isDatabaseUnavailableError(error: any) {
   const message = String(error?.message || "");
   return (
@@ -229,9 +233,17 @@ async function startServer() {
     console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
     void seedDefaultPricingRules();
-    void QueueService.recoverInterruptedJobs();
-    QueueService.startInventoryMonitor();
-    startOneTimeSheetImport(PORT);
+
+    if (runtimeWritesEnabled()) {
+      console.warn("Runtime sync writes ENABLED by SYNC_RUNTIME_WRITE_ENABLED=true");
+      void QueueService.recoverInterruptedJobs();
+      QueueService.startInventoryMonitor();
+      startOneTimeSheetImport(PORT);
+    } else {
+      console.log(
+        "Runtime sync writes disabled (safe mode). Set SYNC_RUNTIME_WRITE_ENABLED=true only after live dry run, canary, and read-back succeed.",
+      );
+    }
   });
 }
 
