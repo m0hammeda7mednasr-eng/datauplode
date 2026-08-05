@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Dabdoob.Sync.Domain</RootNamespace>
+    <AssemblyName>Dabdoob.Sync.Domain</AssemblyName>
+  </PropertyGroup>
+</Project>
