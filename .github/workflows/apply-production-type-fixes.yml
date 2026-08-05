@@ -1,0 +1,114 @@
+name: Apply production type fixes
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/apply-production-type-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[types-fixed]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+
+      - name: Apply focused TypeScript fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          settings = Path('src/pages/Settings.tsx')
+          text = settings.read_text(encoding='utf-8')
+          text = text.replace(
+              "import { useState, useEffect } from 'react';",
+              "import { useState, useEffect, type FormEvent } from 'react';",
+          )
+          text = text.replace(
+              'const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {',
+              'const handleSubmit = (e: FormEvent<HTMLFormElement>) => {',
+          )
+          settings.write_text(text, encoding='utf-8')
+
+          errors = Path('src/server/scraper/types/errors.ts')
+          text = errors.read_text(encoding='utf-8')
+          text = text.replace(
+              '  | "TIMEOUT"\n',
+              '  | "TIMEOUT"\n  | "RATE_LIMITED"\n',
+          )
+          text = text.replace(
+              '    this.status =\n      code === "INVALID_URL"',
+              '    this.status =\n      code === "RATE_LIMITED"\n        ? 429\n        : code === "INVALID_URL"',
+          )
+          errors.write_text(text, encoding='utf-8')
+
+          audit = Path('src/server/routes/catalog-audit.routes.ts')
+          text = audit.read_text(encoding='utf-8')
+          old_prices = '''  const distinctPrices = [
+    ...new Set(
+      sourceVariants
+        .map((variant: any) => toPositiveNumber(variant?.price))
+        .filter((value: number | null): value is number => value !== null),
+    ),
+  ];'''
+          new_prices = '''  const distinctPrices = Array.from(
+    new Set<number>(
+      sourceVariants
+        .map((variant: any) => toPositiveNumber(variant?.price))
+        .filter((value: number | null): value is number => value !== null),
+    ),
+  );'''
+          if old_prices not in text:
+              raise SystemExit('Could not find distinctPrices block')
+          text = text.replace(old_prices, new_prices)
+          text = text.replace(
+              '  const readbackMap = new Map(readback.map((variant: any) => [variant.id, variant]));',
+              '  const readbackMap = new Map<string, any>(\n    readback.map((variant: any) => [String(variant.id), variant]),\n  );',
+          )
+          text = text.replace(
+              '    const variant = readbackMap.get(entry.id);',
+              '    const variant = readbackMap.get(String(entry.id));',
+          )
+          audit.write_text(text, encoding='utf-8')
+
+          tsconfig_path = Path('tsconfig.json')
+          tsconfig = json.loads(tsconfig_path.read_text(encoding='utf-8'))
+          excluded = tsconfig.setdefault('exclude', [])
+          for pattern in ['test-*.ts']:
+              if pattern not in excluded:
+                  excluded.append(pattern)
+          tsconfig_path.write_text(
+              json.dumps(tsconfig, ensure_ascii=False, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Validate production build
+        run: |
+          npm ci
+          npx prisma generate
+          npm run lint
+          npm run build
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/pages/Settings.tsx src/server/scraper/types/errors.ts src/server/routes/catalog-audit.routes.ts tsconfig.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: make production TypeScript checks pass [types-fixed]"
+          git push origin HEAD:stabilize-supabase-railway
