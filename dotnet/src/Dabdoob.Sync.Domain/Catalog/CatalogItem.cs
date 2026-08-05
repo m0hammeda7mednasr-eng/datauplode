@@ -26,6 +26,7 @@ public sealed class CatalogItem
     public decimal PriceMultiplier { get; private set; }
     public string CollectionName { get; private set; } = string.Empty;
     public string ExpectedSku { get; private set; } = string.Empty;
+    public string RowFingerprint { get; private set; } = string.Empty;
     public string? ShopifyProductId { get; private set; }
     public string? ShopifyVariantId { get; private set; }
     public string? SourceFingerprint { get; private set; }
@@ -45,12 +46,14 @@ public sealed class CatalogItem
         string canonicalSourceKey,
         decimal priceMultiplier,
         string collectionName,
-        string expectedSku)
+        string expectedSku,
+        string rowFingerprint)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(spreadsheetId);
         ArgumentException.ThrowIfNullOrWhiteSpace(sheetName);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceUrl);
         ArgumentException.ThrowIfNullOrWhiteSpace(canonicalSourceKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowFingerprint);
         ArgumentOutOfRangeException.ThrowIfLessThan(sheetRow, 2);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(priceMultiplier);
 
@@ -63,8 +66,41 @@ public sealed class CatalogItem
             CanonicalSourceKey = canonicalSourceKey.Trim(),
             PriceMultiplier = priceMultiplier,
             CollectionName = collectionName.Trim(),
-            ExpectedSku = expectedSku.Trim()
+            ExpectedSku = expectedSku.Trim(),
+            RowFingerprint = rowFingerprint.Trim()
         };
+    }
+
+    public bool ApplySheetRow(
+        string sourceUrl,
+        string canonicalSourceKey,
+        decimal priceMultiplier,
+        string collectionName,
+        string expectedSku,
+        string rowFingerprint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceUrl);
+        ArgumentException.ThrowIfNullOrWhiteSpace(canonicalSourceKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowFingerprint);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(priceMultiplier);
+
+        if (string.Equals(RowFingerprint, rowFingerprint, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        SourceUrl = sourceUrl.Trim();
+        CanonicalSourceKey = canonicalSourceKey.Trim();
+        PriceMultiplier = priceMultiplier;
+        CollectionName = collectionName.Trim();
+        ExpectedSku = expectedSku.Trim();
+        RowFingerprint = rowFingerprint.Trim();
+        Status = CatalogSyncStatus.Pending;
+        LastErrorCode = null;
+        LastErrorMessage = null;
+        NextCheckAt = DateTimeOffset.UtcNow;
+        Touch();
+        return true;
     }
 
     public void MarkProcessing()
