@@ -1,0 +1,22 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY Directory.Build.props Directory.Packages.props ./
+COPY src/Dabdoob.Sync.Domain/Dabdoob.Sync.Domain.csproj src/Dabdoob.Sync.Domain/
+COPY src/Dabdoob.Sync.Application/Dabdoob.Sync.Application.csproj src/Dabdoob.Sync.Application/
+COPY src/Dabdoob.Sync.Infrastructure/Dabdoob.Sync.Infrastructure.csproj src/Dabdoob.Sync.Infrastructure/
+COPY src/Dabdoob.Sync.Api/Dabdoob.Sync.Api.csproj src/Dabdoob.Sync.Api/
+RUN dotnet restore src/Dabdoob.Sync.Api/Dabdoob.Sync.Api.csproj
+
+COPY . .
+RUN dotnet publish src/Dabdoob.Sync.Api/Dabdoob.Sync.Api.csproj \
+    --configuration Release \
+    --no-restore \
+    --output /app/publish
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+EXPOSE 8080
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "Dabdoob.Sync.Api.dll"]
