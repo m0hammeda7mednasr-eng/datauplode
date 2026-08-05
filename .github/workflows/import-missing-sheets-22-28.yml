@@ -1,0 +1,102 @@
+name: Import missing products from sheets 22-28
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/import-missing-sheets-22-28.yml
+
+concurrency:
+  group: import-missing-sheets-22-28
+  cancel-in-progress: false
+
+jobs:
+  import-products:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check backend health
+        env:
+          BASE_URL: https://datauplode-production.up.railway.app
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 20 --max-time 60 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            "$BASE_URL/api/health"
+
+      - name: Queue missing products from Google Sheets
+        env:
+          BASE_URL: https://datauplode-production.up.railway.app
+          SPREADSHEET_ID: 1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sheets=(
+            "الورقة22:282692873"
+            "الورقة23:770232216"
+            "الورقة24:1210585516"
+            "الورقة25:307824540"
+            "الورقة26:1459453928"
+            "الورقة27:4356284"
+            "الورقة28:422632561"
+          )
+
+          for sheet in "${sheets[@]}"; do
+            name="${sheet%%:*}"
+            gid="${sheet##*:}"
+            sheet_url="https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit?gid=${gid}"
+
+            echo "Starting ${name} (${gid})"
+
+            for start in $(seq 1 50 1000); do
+              end=$((start + 49))
+              if [ "$end" -gt 1000 ]; then end=1000; fi
+
+              payload=$(python3 - "$sheet_url" "$start" "$end" <<'PY'
+import json
+import sys
+
+sheet_url = sys.argv[1]
+start = int(sys.argv[2])
+end = int(sys.argv[3])
+
+print(json.dumps({
+    "sheetUrl": sheet_url,
+    "rowNumbers": list(range(start, end + 1)),
+    "createManualReview": True,
+    "processOnlyNewRows": False,
+    "waitForPublishCompletion": False,
+}, ensure_ascii=False))
+PY
+              )
+
+              echo "Queueing ${name} rows ${start}-${end}"
+              response_file=$(mktemp)
+              http_code=$(curl --silent --show-error \
+                --connect-timeout 20 --max-time 180 \
+                --retry 4 --retry-delay 5 --retry-all-errors \
+                -o "$response_file" -w "%{http_code}" \
+                -X POST "$BASE_URL/api/imports/excel/process-sheet-link" \
+                -H "Content-Type: application/json" \
+                --data "$payload")
+
+              cat "$response_file"
+              echo
+
+              if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+                echo "Import request failed for ${name} rows ${start}-${end} with HTTP ${http_code}" >&2
+                rm -f "$response_file"
+                exit 1
+              fi
+
+              rm -f "$response_file"
+              sleep 2
+            done
+          done
+
+          echo "All sheet batches were queued successfully."
