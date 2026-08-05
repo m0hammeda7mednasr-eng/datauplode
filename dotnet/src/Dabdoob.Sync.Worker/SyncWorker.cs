@@ -1,10 +1,12 @@
 using Dabdoob.Sync.Application.Abstractions;
 using Dabdoob.Sync.Domain.Jobs;
+using Dabdoob.Sync.Worker.Handlers;
 
 namespace Dabdoob.Sync.Worker;
 
 public sealed class SyncWorker(
     ISyncJobQueue queue,
+    IEnumerable<ISyncJobHandler> handlers,
     ILogger<SyncWorker> logger,
     IConfiguration configuration) : BackgroundService
 {
@@ -13,6 +15,11 @@ public sealed class SyncWorker(
         configuration.GetValue("Worker:LeaseMinutes", 10));
     private readonly TimeSpan _idleDelay = TimeSpan.FromSeconds(
         configuration.GetValue("Worker:IdleDelaySeconds", 5));
+    private readonly IReadOnlyDictionary<SyncJobType, ISyncJobHandler> _handlers = handlers
+        .GroupBy(handler => handler.JobType)
+        .ToDictionary(
+            group => group.Key,
+            group => group.Single());
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -73,20 +80,14 @@ public sealed class SyncWorker(
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        return job.Type switch
+        if (!_handlers.TryGetValue(job.Type, out var handler))
         {
-            SyncJobType.ReconcileSheetRow => ThrowHandlerNotConfigured(job),
-            SyncJobType.ReconcileCatalogItem => ThrowHandlerNotConfigured(job),
-            SyncJobType.RefreshSource => ThrowHandlerNotConfigured(job),
-            SyncJobType.ApplyShopifyMutation => ThrowHandlerNotConfigured(job),
-            SyncJobType.RenewGoogleDriveWatch => ThrowHandlerNotConfigured(job),
-            _ => throw new ArgumentOutOfRangeException(nameof(job.Type), job.Type, "Unknown job type.")
-        };
-    }
+            throw new InvalidOperationException(
+                $"Handler for {job.Type} has not been registered yet. Job remains retryable and auditable.");
+        }
 
-    private static Task ThrowHandlerNotConfigured(SyncJob job) =>
-        throw new InvalidOperationException(
-            $"Handler for {job.Type} has not been registered yet. Job remains retryable and auditable.");
+        return handler.HandleAsync(job, cancellationToken);
+    }
 
     private static TimeSpan CalculateRetryDelay(int attemptCount)
     {
