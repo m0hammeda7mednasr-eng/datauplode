@@ -13,6 +13,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "env:check": "tsx scripts/check-env.ts",
+    "smoke:production": "tsx scripts/production-smoke.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "postinstall": "prisma generate",
