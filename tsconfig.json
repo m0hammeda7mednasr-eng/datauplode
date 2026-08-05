@@ -25,6 +25,6 @@
   },
   "exclude": [
     "probe-*.ts",
-    "test-user-urls.ts"
+    "test-*.ts"
   ]
 }
