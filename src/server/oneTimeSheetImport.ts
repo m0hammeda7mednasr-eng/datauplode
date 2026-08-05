@@ -2,7 +2,7 @@ import { envString, isProduction } from "./config/env.js";
 import { prisma } from "./db.js";
 
 const SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
-const IMPORT_RUN_KEY = "2026-08-05-sheets-23-28-v1";
+const IMPORT_RUN_KEY = "2026-08-05-sheets-22-28-v2";
 const ROWS_PER_BATCH = 50;
 const MAX_SHEET_ROW = 1000;
 const START_DELAY_MS = 15_000;
@@ -10,6 +10,7 @@ const BETWEEN_BATCHES_MS = 1_500;
 const RECENT_RUNNING_MS = 45 * 60 * 1000;
 
 const SHEETS = [
+  { name: "الورقة22", gid: "282692873" },
   { name: "الورقة23", gid: "770232216" },
   { name: "الورقة24", gid: "1210585516" },
   { name: "الورقة25", gid: "307824540" },
