@@ -49,6 +49,10 @@ jobs:
         working-directory: dotnet
         run: dotnet build src/Dabdoob.Sync.Worker/Dabdoob.Sync.Worker.csproj --configuration Release --no-restore
 
+      - name: Run core tests
+        working-directory: dotnet
+        run: dotnet test tests/Dabdoob.Sync.Tests/Dabdoob.Sync.Tests.csproj --configuration Release --verbosity normal
+
       - name: Build API image
         working-directory: dotnet
         run: docker build --file Dockerfile.api --tag dabdoob-sync-api:ci .
