@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: dabdoob_sync
+      POSTGRES_USER: dabdoob
+      POSTGRES_PASSWORD: dabdoob_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - dabdoob_sync_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dabdoob -d dabdoob_sync"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=dabdoob_sync;Username=dabdoob;Password=dabdoob_local
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=dabdoob_sync;Username=dabdoob;Password=dabdoob_local
+      Worker__LeaseMinutes: 10
+      Worker__IdleDelaySeconds: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  dabdoob_sync_postgres:
