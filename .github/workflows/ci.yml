@@ -31,7 +31,7 @@ jobs:
         run: npm ci --include=dev
 
       - name: Verify build toolchain
-        run: npm ls @vitejs/plugin-react vite typescript --depth=0
+        run: npm ls vite typescript @tailwindcss/vite --depth=0
 
       - name: Generate Prisma client
         run: npx prisma generate
