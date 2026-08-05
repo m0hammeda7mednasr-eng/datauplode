@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,6 +30,22 @@ jobs:
 
       - name: Generate Prisma client
         run: npx prisma generate
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?sslmode=require
+
+      - name: Validate production environment contract
+        run: npm run env:check
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?sslmode=require
+          ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+          APP_URL: https://ci.example.test
+          FRONTEND_URL: https://ci.example.test
+          LOCAL_BRIDGE_ENABLED: "false"
+          SCRAPER_BYPASS_MODE: never
 
       - name: TypeScript check
         run: npm run lint
