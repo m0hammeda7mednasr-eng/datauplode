@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <RootNamespace>Dabdoob.Sync.Worker</RootNamespace>
+    <AssemblyName>Dabdoob.Sync.Worker</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Dabdoob.Sync.Application/Dabdoob.Sync.Application.csproj" />
+    <ProjectReference Include="../Dabdoob.Sync.Infrastructure/Dabdoob.Sync.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>
