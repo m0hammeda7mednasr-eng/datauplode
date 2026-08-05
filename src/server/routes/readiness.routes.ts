@@ -8,6 +8,10 @@ function configured(name: string) {
   return Boolean(value && !/^(replace|your_|my_)/i.test(value));
 }
 
+function enabled(name: string) {
+  return String(process.env[name] || "").trim().toLowerCase() === "true";
+}
+
 function databaseTarget() {
   const value = String(process.env.DATABASE_URL || "").trim();
   if (!value) return "missing";
@@ -32,10 +36,18 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       (configured("GOOGLE_SERVICE_ACCOUNT_EMAIL") &&
         (configured("GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY") ||
           configured("GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64"))),
-    writeGateEnabled:
-      String(process.env.CATALOG_AUDIT_WRITE_ENABLED || "").toLowerCase() === "true",
-    writeTokenConfigured: configured("CATALOG_AUDIT_WRITE_TOKEN"),
+    catalogWriteGateEnabled: enabled("CATALOG_AUDIT_WRITE_ENABLED"),
+    catalogWriteTokenConfigured: configured("CATALOG_AUDIT_WRITE_TOKEN"),
+    runtimeWriteGateEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),
+    inventoryAutostartEnabled: enabled("SYNC_INVENTORY_AUTOSTART"),
+    jobRecoveryEnabled:
+      String(process.env.SYNC_JOB_RECOVERY_ENABLED || "true").toLowerCase() !== "false",
   };
+
+  const safeMode =
+    !configuration.runtimeWriteGateEnabled ||
+    !configuration.catalogWriteGateEnabled ||
+    !configuration.catalogWriteTokenConfigured;
 
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -67,8 +79,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       },
       configuration: {
         ...configuration,
-        safeMode:
-          !configuration.writeGateEnabled || !configuration.writeTokenConfigured,
+        safeMode,
       },
       jobs: {
         pending: pendingJobs,
@@ -88,8 +99,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       },
       configuration: {
         ...configuration,
-        safeMode:
-          !configuration.writeGateEnabled || !configuration.writeTokenConfigured,
+        safeMode,
       },
       error: String(error?.message || "Database readiness check failed"),
       checkedAt: new Date().toISOString(),
