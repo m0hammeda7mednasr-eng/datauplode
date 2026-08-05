@@ -1,0 +1,12 @@
+**/bin
+**/obj
+**/.vs
+**/.idea
+**/.vscode
+.git
+.github
+node_modules
+npm-debug.log
+.env
+*.user
+*.suo
