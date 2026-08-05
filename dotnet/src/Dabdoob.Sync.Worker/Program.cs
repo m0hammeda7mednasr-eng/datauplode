@@ -26,6 +26,7 @@ builder.Services.AddSingleton<ISheetReader>(_ => new GoogleSheetsReader(
         maximumSheetRow)));
 builder.Services.AddSingleton<ISyncJobHandler, ScanGoogleSheetJobHandler>();
 builder.Services.AddSingleton<ISyncJobHandler, ReconcileShopifyOrderJobHandler>();
+builder.Services.AddHostedService<SyncScheduler>();
 builder.Services.AddHostedService<SyncWorker>();
 
 var host = builder.Build();
