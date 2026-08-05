@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Dabdoob.Sync.Api.Endpoints;
+using Dabdoob.Sync.Api.Security;
 using Dabdoob.Sync.Application.Abstractions;
 using Dabdoob.Sync.Domain.Jobs;
 using Dabdoob.Sync.Infrastructure.Jobs;
@@ -13,6 +15,7 @@ var connectionString = builder.Configuration.GetConnectionString("Postgres")
 builder.Services.AddDbContextFactory<SyncDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure()));
 builder.Services.AddScoped<ISyncJobQueue, PostgresSyncJobQueue>();
+builder.Services.AddSingleton<ShopifyWebhookVerifier>();
 
 var app = builder.Build();
 
@@ -70,6 +73,7 @@ app.MapPost("/api/sync/jobs", async (
 
 app.MapGet("/api/sync/status", async (
     IDbContextFactory<SyncDbContext> dbFactory,
+    IConfiguration configuration,
     CancellationToken cancellationToken) =>
 {
     await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -84,26 +88,53 @@ app.MapGet("/api/sync/status", async (
         .Select(group => new { status = group.Key.ToString(), count = group.Count() })
         .ToListAsync(cancellationToken);
 
-    return Results.Ok(new { jobs, catalog, checkedAt = DateTimeOffset.UtcNow });
+    var orders = new
+    {
+        total = await db.ShopifyOrders.CountAsync(cancellationToken),
+        cancelled = await db.ShopifyOrders.CountAsync(x => x.IsCancelled, cancellationToken),
+        latestShopifyUpdate = await db.ShopifyOrders
+            .OrderByDescending(x => x.ShopifyUpdatedAt)
+            .Select(x => (DateTimeOffset?)x.ShopifyUpdatedAt)
+            .FirstOrDefaultAsync(cancellationToken),
+        latestSync = await db.ShopifyOrders
+            .OrderByDescending(x => x.LastSyncedAt)
+            .Select(x => (DateTimeOffset?)x.LastSyncedAt)
+            .FirstOrDefaultAsync(cancellationToken)
+    };
+
+    return Results.Ok(new
+    {
+        dryRun = configuration.GetValue("Sync:DryRun", true),
+        jobs,
+        catalog,
+        orders,
+        checkedAt = DateTimeOffset.UtcNow
+    });
 });
 
 app.MapPost("/webhooks/google-drive", async (
     HttpRequest request,
     ISyncJobQueue queue,
+    IConfiguration configuration,
     CancellationToken cancellationToken) =>
 {
     var channelId = request.Headers["X-Goog-Channel-ID"].ToString();
     var messageNumber = request.Headers["X-Goog-Message-Number"].ToString();
     var resourceState = request.Headers["X-Goog-Resource-State"].ToString();
+    var suppliedToken = request.Headers["X-Goog-Channel-Token"].ToString();
+    var expectedToken = configuration["Google:DriveWebhookToken"];
 
-    if (string.IsNullOrWhiteSpace(channelId) || string.IsNullOrWhiteSpace(messageNumber))
+    if (string.IsNullOrWhiteSpace(channelId)
+        || string.IsNullOrWhiteSpace(messageNumber)
+        || string.IsNullOrWhiteSpace(expectedToken)
+        || !string.Equals(suppliedToken, expectedToken, StringComparison.Ordinal))
     {
-        return Results.BadRequest();
+        return Results.Unauthorized();
     }
 
     var payload = JsonSerializer.Serialize(new { channelId, messageNumber, resourceState });
     await queue.EnqueueAsync(
-        SyncJobType.ReconcileSheetRow,
+        SyncJobType.ScanGoogleSheet,
         $"google-drive:{channelId}:{messageNumber}",
         payload,
         null,
@@ -111,6 +142,8 @@ app.MapPost("/webhooks/google-drive", async (
 
     return Results.NoContent();
 });
+
+app.MapShopifyWebhooks();
 
 app.Run();
 
