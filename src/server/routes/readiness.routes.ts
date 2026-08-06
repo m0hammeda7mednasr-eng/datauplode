@@ -24,6 +24,12 @@ function staleRunningJobMinutes() {
   return Math.max(5, Math.min(1440, Math.trunc(parsed)));
 }
 
+function recentFailedJobMinutes() {
+  const parsed = Number(process.env.SYNC_JOB_RECENT_FAILURE_MINUTES || 60);
+  if (!Number.isFinite(parsed)) return 60;
+  return Math.max(5, Math.min(10080, Math.trunc(parsed)));
+}
+
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
@@ -78,7 +84,9 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
   const databaseTimeoutMs = readinessTimeoutMs();
   const staleJobThresholdMinutes = staleRunningJobMinutes();
+  const recentFailureThresholdMinutes = recentFailedJobMinutes();
   const staleJobCutoff = new Date(Date.now() - staleJobThresholdMinutes * 60_000);
+  const recentFailureCutoff = new Date(Date.now() - recentFailureThresholdMinutes * 60_000);
 
   const configuration = {
     database: configured("DATABASE_URL"),
@@ -116,11 +124,20 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const startedAt = Date.now();
 
   try {
-    const [pendingJobs, runningJobs, failedJobs, staleRunningJobs, latestAudit] = await withTimeout(
+    const [pendingJobs, runningJobs, failedJobs, recentFailedJobs, staleRunningJobs, latestAudit] = await withTimeout(
       Promise.all([
         prisma.$queryRaw`SELECT 1`.then(() => prisma.syncJob.count({ where: { status: "pending" } })),
         prisma.syncJob.count({ where: { status: "running" } }),
         prisma.syncJob.count({ where: { status: "failed" } }),
+        prisma.syncJob.count({
+          where: {
+            status: "failed",
+            OR: [
+              { completedAt: { gte: recentFailureCutoff } },
+              { completedAt: null, createdAt: { gte: recentFailureCutoff } },
+            ],
+          },
+        }),
         prisma.syncJob.count({
           where: {
             status: "running",
@@ -161,6 +178,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         pending: pendingJobs,
         running: runningJobs,
         failed: failedJobs,
+        recentFailed: recentFailedJobs,
+        recentFailureThresholdMinutes,
         staleRunning: staleRunningJobs,
         staleThresholdMinutes: staleJobThresholdMinutes,
       },
