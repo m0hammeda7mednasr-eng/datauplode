@@ -81,7 +81,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/cors": "^4.17.21",
+    "@types/cors": "^2.8.19",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",
