@@ -55,6 +55,9 @@ jobs:
       - name: Enforce production safety contract
         run: npm run safety:production
 
+      - name: Enforce existing-product audit safety contract
+        run: npx tsx scripts/existing-product-audit-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
