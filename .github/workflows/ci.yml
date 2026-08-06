@@ -64,6 +64,9 @@ jobs:
       - name: Enforce runtime autostart safety contract
         run: npx tsx scripts/runtime-autostart-safety-contract.ts
 
+      - name: Enforce pre-canary queue safety contract
+        run: npx tsx scripts/pre-canary-queue-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
