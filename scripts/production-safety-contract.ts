@@ -46,7 +46,8 @@ const assertions: Array<[string, boolean]> = [
   ["403 is classified as blocked source", /HTTP 403/.test(scraper) && /SOURCE_BLOCKED/.test(scraper)],
   [
     "canary read-back only targets exact myshopify hostnames",
-    /\.myshopify\\\.com/.test(canaryReadBack) && /exact \*\.myshopify\.com hostname/.test(canaryReadBack),
+    canaryReadBack.includes("\\.myshopify\\.com$") &&
+      canaryReadBack.includes("SHOPIFY_SHOP_DOMAIN must be an exact *.myshopify.com hostname"),
   ],
   [
     "canary read-back disables redirects",
