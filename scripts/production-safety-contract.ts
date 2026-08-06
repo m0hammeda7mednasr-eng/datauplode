@@ -7,6 +7,7 @@ const safetyMiddleware = read("src/server/middleware/catalogAuditSafety.ts");
 const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
 const readiness = read("src/server/routes/readiness.routes.ts");
+const databasePreflight = read("scripts/database-preflight.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
 
@@ -24,6 +25,29 @@ const assertions: Array<[string, boolean]> = [
   [
     "readiness database timeout is documented",
     /READINESS_DATABASE_TIMEOUT_MS=5000/.test(envExample),
+  ],
+  [
+    "Supabase example uses bounded session pool settings",
+    /:5432\/postgres\?sslmode=require&connection_limit=10&pool_timeout=20/.test(envExample),
+  ],
+  [
+    "database preflight requires Supabase TLS and session pooler",
+    /target\.sslMode !== "require"/.test(databasePreflight) &&
+      /target\.port !== "5432"/.test(databasePreflight) &&
+      /transaction pooler port 6543 is not approved/.test(databasePreflight),
+  ],
+  [
+    "database preflight requires bounded pool configuration",
+    /connection_limit between 1 and 20/.test(databasePreflight) &&
+      /pool_timeout between 1 and 60 seconds/.test(databasePreflight) &&
+      /boundedInteger\(url\.searchParams\.get\("connection_limit"\), 1, 20\)/.test(databasePreflight) &&
+      /boundedInteger\(url\.searchParams\.get\("pool_timeout"\), 1, 60\)/.test(databasePreflight),
+  ],
+  [
+    "database preflight does not print database hostname or name",
+    /target: isSupabase \? "supabase" : "configured"/.test(databasePreflight) &&
+      !/host:\s*url\.hostname/.test(databasePreflight) &&
+      !/database:\s*url\.pathname/.test(databasePreflight),
   ],
   [
     "readiness database work is bounded",
