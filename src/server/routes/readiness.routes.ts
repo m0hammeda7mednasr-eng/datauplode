@@ -25,6 +25,11 @@ function databaseTarget() {
 }
 
 router.get(["/ready", "/sync/readiness"], async (_req, res) => {
+  const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
+  const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
+  const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
+  const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
+
   const configuration = {
     database: configured("DATABASE_URL"),
     encryptionKey: configured("ENCRYPTION_KEY"),
@@ -43,10 +48,14 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       1,
       Math.min(5, Number(process.env.CATALOG_AUDIT_CANARY_MAX_ROWS || 1) || 1),
     ),
-    runtimeWriteGateEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),
-    inventoryAutostartEnabled: enabled("SYNC_INVENTORY_AUTOSTART"),
-    jobRecoveryEnabled:
-      String(process.env.SYNC_JOB_RECOVERY_ENABLED || "true").toLowerCase() !== "false",
+    runtimeWriteGateEnabled,
+    inventoryAutostartConfigured,
+    inventoryAutostartEnabled: runtimeWriteGateEnabled && inventoryAutostartConfigured,
+    jobRecoveryConfigured,
+    jobRecoveryEnabled: runtimeWriteGateEnabled && jobRecoveryConfigured,
+    sheetImportAutostartConfigured,
+    sheetImportAutostartEnabled:
+      runtimeWriteGateEnabled && sheetImportAutostartConfigured,
   };
 
   const safeMode =
