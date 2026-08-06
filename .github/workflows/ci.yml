@@ -58,6 +58,9 @@ jobs:
       - name: Enforce existing-product audit safety contract
         run: npx tsx scripts/existing-product-audit-safety-contract.ts
 
+      - name: Enforce Railway safe-mode deployment contract
+        run: npx tsx scripts/railway-safe-mode-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
