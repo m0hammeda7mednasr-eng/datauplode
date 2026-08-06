@@ -13,17 +13,26 @@ const REQUIRED_TABLES = [
   "ShopifyVariant",
 ] as const;
 
+function boundedInteger(value: string | null, minimum: number, maximum: number) {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : null;
+}
+
 function databaseSummary(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
+    const isSupabase = url.hostname.includes("supabase");
     return {
       protocol: url.protocol.replace(":", ""),
-      host: url.hostname,
+      target: isSupabase ? "supabase" : "configured",
       port: url.port || "5432",
-      database: url.pathname.replace(/^\//, "") || "unknown",
-      supabase: url.hostname.includes("supabase"),
+      supabase: isSupabase,
       sslMode: url.searchParams.get("sslmode") || "unspecified",
-      pgbouncer: url.searchParams.get("pgbouncer") || "unspecified",
+      connectionLimit: boundedInteger(url.searchParams.get("connection_limit"), 1, 20),
+      poolTimeoutSeconds: boundedInteger(url.searchParams.get("pool_timeout"), 1, 60),
     };
   } catch {
     return null;
@@ -41,10 +50,27 @@ async function main() {
     throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.");
   }
 
-  if (target.supabase && target.sslMode !== "require") {
-    throw new Error(
-      "Supabase DATABASE_URL must include sslmode=require before production deployment.",
-    );
+  if (target.supabase) {
+    if (target.sslMode !== "require") {
+      throw new Error(
+        "Supabase DATABASE_URL must include sslmode=require before production deployment.",
+      );
+    }
+    if (target.port !== "5432") {
+      throw new Error(
+        "Railway must use the Supabase Session pooler on port 5432; transaction pooler port 6543 is not approved for this long-running service.",
+      );
+    }
+    if (target.connectionLimit === null) {
+      throw new Error(
+        "Supabase DATABASE_URL must include connection_limit between 1 and 20.",
+      );
+    }
+    if (target.poolTimeoutSeconds === null) {
+      throw new Error(
+        "Supabase DATABASE_URL must include pool_timeout between 1 and 60 seconds.",
+      );
+    }
   }
 
   await prisma.$queryRaw`SELECT 1`;
