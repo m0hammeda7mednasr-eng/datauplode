@@ -24,6 +24,24 @@ function databaseTarget() {
   }
 }
 
+function deploymentMetadata() {
+  const revision = String(
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+      process.env.SOURCE_VERSION ||
+      process.env.GIT_COMMIT_SHA ||
+      "",
+  ).trim();
+  const branch = String(
+    process.env.RAILWAY_GIT_BRANCH || process.env.GIT_BRANCH || "",
+  ).trim();
+
+  return {
+    revision: revision || "unknown",
+    branch: branch || "unknown",
+    revisionVerified: /^[0-9a-f]{7,40}$/i.test(revision),
+  };
+}
+
 router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
@@ -62,6 +80,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     !configuration.runtimeWriteGateEnabled ||
     !configuration.catalogWriteGateEnabled ||
     !configuration.catalogWriteTokenConfigured;
+  const deployment = deploymentMetadata();
 
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -87,6 +106,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     res.status(productionMinimumReady ? 200 : 503).json({
       ok: productionMinimumReady,
       service: "syncly-api",
+      deployment,
       database: {
         ok: true,
         target: databaseTarget(),
@@ -107,6 +127,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     res.status(503).json({
       ok: false,
       service: "syncly-api",
+      deployment,
       database: {
         ok: false,
         target: databaseTarget(),
