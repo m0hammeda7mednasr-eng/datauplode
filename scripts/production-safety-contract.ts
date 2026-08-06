@@ -6,6 +6,7 @@ const envExample = read(".env.railway.example");
 const safetyMiddleware = read("src/server/middleware/catalogAuditSafety.ts");
 const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
+const readiness = read("src/server/routes/readiness.routes.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
 
@@ -20,6 +21,32 @@ const assertions: Array<[string, boolean]> = [
   ["catalog writes default off", /CATALOG_AUDIT_WRITE_ENABLED=false/.test(envExample)],
   ["sheet writes default off", /CATALOG_AUDIT_SHEET_WRITE_ENABLED=false/.test(envExample)],
   ["canary defaults to one row", /CATALOG_AUDIT_CANARY_MAX_ROWS=1/.test(envExample)],
+  [
+    "readiness database timeout is documented",
+    /READINESS_DATABASE_TIMEOUT_MS=5000/.test(envExample),
+  ],
+  [
+    "readiness database work is bounded",
+    /function readinessTimeoutMs\(\)/.test(readiness) &&
+      /Math\.max\(1000, Math\.min\(15000/.test(readiness) &&
+      /await withTimeout\(/.test(readiness),
+  ],
+  [
+    "readiness does not expose database hostnames",
+    /return "configured";/.test(readiness) &&
+      !/return url\.hostname \|\| "configured"/.test(readiness),
+  ],
+  [
+    "readiness does not expose raw database errors",
+    /error: "Database readiness check failed"/.test(readiness) &&
+      !/error: String\(error\?\.message/.test(readiness),
+  ],
+  [
+    "readiness reports latency and stable failure codes",
+    /latencyMs: Date\.now\(\) - startedAt/.test(readiness) &&
+      /DATABASE_TIMEOUT/.test(readiness) &&
+      /DATABASE_UNAVAILABLE/.test(readiness),
+  ],
   ["catalog write requires token header", /x-catalog-audit-write-token/i.test(safetyMiddleware)],
   ["dry run forces sheet writes off", /writeSheet\s*=\s*false|writeSheet:\s*false/.test(safetyMiddleware)],
   [
