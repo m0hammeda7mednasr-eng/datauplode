@@ -158,8 +158,20 @@ async function main() {
 
   const jobs = asRecord(readiness.body.jobs);
   const runningJobs = Number(jobs.running ?? 0);
+  const staleRunningJobs = Number(jobs.staleRunning ?? Number.NaN);
+  const staleThresholdMinutes = Number(jobs.staleThresholdMinutes ?? Number.NaN);
   if (requireSafeMode && (!Number.isFinite(runningJobs) || runningJobs !== 0)) {
     throw new Error(`Production smoke requires zero running jobs in safe mode, received ${String(jobs.running)}`);
+  }
+  if (!Number.isFinite(staleRunningJobs) || staleRunningJobs !== 0) {
+    throw new Error(
+      `Production smoke requires jobs.staleRunning=0, received ${String(jobs.staleRunning)}. Recover or inspect stuck jobs before canary.`,
+    );
+  }
+  if (!Number.isFinite(staleThresholdMinutes) || staleThresholdMinutes < 5 || staleThresholdMinutes > 1440) {
+    throw new Error(
+      `Readiness returned an invalid stale job threshold: ${String(jobs.staleThresholdMinutes)}`,
+    );
   }
 
   const report: JsonRecord = {
@@ -183,6 +195,8 @@ async function main() {
     jobs: {
       pending: jobs.pending ?? 0,
       running: jobs.running ?? 0,
+      staleRunning: jobs.staleRunning ?? "unknown",
+      staleThresholdMinutes: jobs.staleThresholdMinutes ?? "unknown",
       failed: jobs.failed ?? 0,
     },
     sourceClassificationSafety: "not-checked",
