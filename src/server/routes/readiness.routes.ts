@@ -12,13 +12,36 @@ function enabled(name: string) {
   return String(process.env[name] || "").trim().toLowerCase() === "true";
 }
 
+function readinessTimeoutMs() {
+  const parsed = Number(process.env.READINESS_DATABASE_TIMEOUT_MS || 5000);
+  if (!Number.isFinite(parsed)) return 5000;
+  return Math.max(1000, Math.min(15000, Math.trunc(parsed)));
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("READINESS_DATABASE_TIMEOUT")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 function databaseTarget() {
   const value = String(process.env.DATABASE_URL || "").trim();
   if (!value) return "missing";
   try {
     const url = new URL(value);
     if (url.hostname.includes("supabase")) return "supabase";
-    return url.hostname || "configured";
+    return "configured";
   } catch {
     return "invalid";
   }
@@ -47,6 +70,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
+  const databaseTimeoutMs = readinessTimeoutMs();
 
   const configuration = {
     database: configured("DATABASE_URL"),
@@ -81,20 +105,22 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     !configuration.catalogWriteGateEnabled ||
     !configuration.catalogWriteTokenConfigured;
   const deployment = deploymentMetadata();
+  const startedAt = Date.now();
 
   try {
-    await prisma.$queryRaw`SELECT 1`;
-
-    const [pendingJobs, runningJobs, failedJobs, latestAudit] = await Promise.all([
-      prisma.syncJob.count({ where: { status: "pending" } }),
-      prisma.syncJob.count({ where: { status: "running" } }),
-      prisma.syncJob.count({ where: { status: "failed" } }),
-      prisma.importBatch.findFirst({
-        where: { target: "catalog_audit" },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, status: true, createdAt: true, updatedAt: true },
-      }),
-    ]);
+    const [pendingJobs, runningJobs, failedJobs, latestAudit] = await withTimeout(
+      Promise.all([
+        prisma.$queryRaw`SELECT 1`.then(() => prisma.syncJob.count({ where: { status: "pending" } })),
+        prisma.syncJob.count({ where: { status: "running" } }),
+        prisma.syncJob.count({ where: { status: "failed" } }),
+        prisma.importBatch.findFirst({
+          where: { target: "catalog_audit" },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, status: true, createdAt: true, updatedAt: true },
+        }),
+      ]),
+      databaseTimeoutMs,
+    );
 
     const productionMinimumReady =
       configuration.database &&
@@ -110,6 +136,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       database: {
         ok: true,
         target: databaseTarget(),
+        latencyMs: Date.now() - startedAt,
+        timeoutMs: databaseTimeoutMs,
       },
       configuration: {
         ...configuration,
@@ -124,6 +152,15 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       checkedAt: new Date().toISOString(),
     });
   } catch (error: any) {
+    const failureCode =
+      String(error?.message || "") === "READINESS_DATABASE_TIMEOUT"
+        ? "DATABASE_TIMEOUT"
+        : "DATABASE_UNAVAILABLE";
+    console.error("Readiness database check failed", {
+      failureCode,
+      latencyMs: Date.now() - startedAt,
+    });
+
     res.status(503).json({
       ok: false,
       service: "syncly-api",
@@ -131,12 +168,15 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       database: {
         ok: false,
         target: databaseTarget(),
+        latencyMs: Date.now() - startedAt,
+        timeoutMs: databaseTimeoutMs,
+        failureCode,
       },
       configuration: {
         ...configuration,
         safeMode,
       },
-      error: String(error?.message || "Database readiness check failed"),
+      error: "Database readiness check failed",
       checkedAt: new Date().toISOString(),
     });
   }
