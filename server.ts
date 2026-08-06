@@ -71,8 +71,25 @@ function getListenHost() {
   return configuredHost;
 }
 
+function envFlag(name: string, defaultValue = false) {
+  const fallback = defaultValue ? "true" : "false";
+  return envString(name, fallback).trim().toLowerCase() === "true";
+}
+
 function runtimeWritesEnabled() {
-  return envString("SYNC_RUNTIME_WRITE_ENABLED", "false").toLowerCase() === "true";
+  return envFlag("SYNC_RUNTIME_WRITE_ENABLED");
+}
+
+function jobRecoveryEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_JOB_RECOVERY_ENABLED");
+}
+
+function inventoryAutostartEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_INVENTORY_AUTOSTART");
+}
+
+function sheetImportAutostartEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
 }
 
 function isDatabaseUnavailableError(error: any) {
@@ -234,14 +251,35 @@ async function startServer() {
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
     void seedDefaultPricingRules();
 
-    if (runtimeWritesEnabled()) {
-      console.warn("Runtime sync writes ENABLED by SYNC_RUNTIME_WRITE_ENABLED=true");
+    if (!runtimeWritesEnabled()) {
+      console.log(
+        "Runtime sync writes disabled (safe mode). Set SYNC_RUNTIME_WRITE_ENABLED=true only after live dry run, canary, and read-back succeed.",
+      );
+      return;
+    }
+
+    console.warn("Runtime sync writes ENABLED by SYNC_RUNTIME_WRITE_ENABLED=true");
+
+    if (jobRecoveryEnabled()) {
+      console.warn("Interrupted-job recovery ENABLED");
       void QueueService.recoverInterruptedJobs();
+    } else {
+      console.log("Interrupted-job recovery disabled by SYNC_JOB_RECOVERY_ENABLED=false");
+    }
+
+    if (inventoryAutostartEnabled()) {
+      console.warn("Inventory monitor autostart ENABLED");
       QueueService.startInventoryMonitor();
+    } else {
+      console.log("Inventory monitor autostart disabled by SYNC_INVENTORY_AUTOSTART=false");
+    }
+
+    if (sheetImportAutostartEnabled()) {
+      console.warn("One-time Google Sheet import autostart ENABLED");
       startOneTimeSheetImport(PORT);
     } else {
       console.log(
-        "Runtime sync writes disabled (safe mode). Set SYNC_RUNTIME_WRITE_ENABLED=true only after live dry run, canary, and read-back succeed.",
+        "One-time Google Sheet import autostart disabled by SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false",
       );
     }
   });
