@@ -7,6 +7,7 @@ const safetyMiddleware = read("src/server/middleware/catalogAuditSafety.ts");
 const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
+const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
@@ -49,18 +50,12 @@ const assertions: Array<[string, boolean]> = [
     canaryReadBack.includes("\\.myshopify\\.com$") &&
       canaryReadBack.includes("SHOPIFY_SHOP_DOMAIN must be an exact *.myshopify.com hostname"),
   ],
-  [
-    "canary read-back disables redirects",
-    /maxRedirects:\s*0/.test(canaryReadBack),
-  ],
+  ["canary read-back disables redirects", /maxRedirects:\s*0/.test(canaryReadBack)],
   [
     "canary read-back uses a GraphQL query and no mutation",
     /query CanaryReadBack/.test(canaryReadBack) && !/\bmutation\b/i.test(canaryReadBack),
   ],
-  [
-    "canary read-back requires exact product identity",
-    /product\.id !== productId/.test(canaryReadBack),
-  ],
+  ["canary read-back requires exact product identity", /product\.id !== productId/.test(canaryReadBack)],
   [
     "canary read-back verifies SKU and price",
     /SKU mismatch/.test(canaryReadBack) && /Price mismatch/.test(canaryReadBack),
@@ -69,9 +64,37 @@ const assertions: Array<[string, boolean]> = [
     "canary read-back rejects HTTP 403 as blocked, not stock state",
     /HTTP 403; this is not an out-of-stock result/.test(canaryReadBack),
   ],
+  ["canary read-back reports read-only status", /readOnly:\s*true/.test(canaryReadBack)],
   [
-    "canary read-back reports read-only status",
-    /readOnly:\s*true/.test(canaryReadBack),
+    "canary workflow is manual-only",
+    /on:\s*\n\s*workflow_dispatch:/.test(canaryReadBackWorkflow) &&
+      !/^\s*(push|pull_request|schedule):/m.test(canaryReadBackWorkflow),
+  ],
+  [
+    "canary workflow has read-only repository permissions",
+    /permissions:\s*\n\s*contents:\s*read/.test(canaryReadBackWorkflow) &&
+      !/contents:\s*write/.test(canaryReadBackWorkflow),
+  ],
+  [
+    "canary workflow supplies no catalog or runtime write gates",
+    !/(CATALOG_AUDIT_WRITE_TOKEN|CATALOG_AUDIT_WRITE_ENABLED|SYNC_RUNTIME_WRITE_ENABLED)/.test(
+      canaryReadBackWorkflow,
+    ),
+  ],
+  [
+    "canary workflow runs only the read-back command",
+    /run:\s*npm run canary:readback/.test(canaryReadBackWorkflow) &&
+      !/npm run (sync|import|inventory|catalog)/.test(canaryReadBackWorkflow),
+  ],
+  [
+    "canary workflow validates direct Shopify hostname",
+    /myshopify\\\.com\$/.test(canaryReadBackWorkflow) &&
+      /direct \*\.myshopify\.com hostname/.test(canaryReadBackWorkflow),
+  ],
+  [
+    "canary workflow documents zero mutations and blocked 403",
+    /Shopify mutations:\s*\\`0\\`/.test(canaryReadBackWorkflow) &&
+      /HTTP 403 classification: blocked, never out-of-stock/.test(canaryReadBackWorkflow),
   ],
 ];
 
