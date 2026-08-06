@@ -67,6 +67,9 @@ jobs:
       - name: Enforce pre-canary queue safety contract
         run: npx tsx scripts/pre-canary-queue-safety-contract.ts
 
+      - name: Enforce database preflight schema drift contract
+        run: npx tsx scripts/database-preflight-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
