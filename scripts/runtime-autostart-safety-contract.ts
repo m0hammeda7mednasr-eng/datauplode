@@ -4,11 +4,24 @@ import path from 'node:path';
 const root = process.cwd();
 const serverPath = path.join(root, 'server.ts');
 const queuePath = path.join(root, 'src/server/services/queue.ts');
-const envExamplePath = path.join(root, '.env.railway.example');
+const railwayEnvExamplePath = path.join(root, '.env.railway.example');
+const productionEnvExamplePath = path.join(root, '.env.production.example');
 
 const server = fs.readFileSync(serverPath, 'utf8');
 const queue = fs.readFileSync(queuePath, 'utf8');
-const envExample = fs.readFileSync(envExamplePath, 'utf8');
+const railwayEnvExample = fs.readFileSync(railwayEnvExamplePath, 'utf8');
+const productionEnvExample = fs.readFileSync(productionEnvExamplePath, 'utf8');
+
+function hasClosedProductionGates(envExample: string): boolean {
+  return [
+    'SYNC_RUNTIME_WRITE_ENABLED=false',
+    'SYNC_INVENTORY_AUTOSTART=false',
+    'SYNC_JOB_RECOVERY_ENABLED=false',
+    'SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false',
+    'CATALOG_AUDIT_WRITE_ENABLED=false',
+    'CATALOG_AUDIT_SHEET_WRITE_ENABLED=false',
+  ].every(line => envExample.split(/\r?\n/).includes(line));
+}
 
 const checks: Array<[string, boolean]> = [
   ['runtime write gate defaults closed', /function runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_RUNTIME_WRITE_ENABLED"\)/.test(server)],
@@ -19,14 +32,15 @@ const checks: Array<[string, boolean]> = [
   ['recovery call is guarded', /if \(jobRecoveryEnabled\(\)\)[\s\S]*QueueService\.recoverInterruptedJobs\(\)/.test(server)],
   ['inventory monitor call is guarded', /if \(inventoryAutostartEnabled\(\)\)[\s\S]*QueueService\.startInventoryMonitor\(\)/.test(server)],
   ['sheet import call is guarded', /if \(sheetImportAutostartEnabled\(\)\)[\s\S]*startOneTimeSheetImport\(PORT\)/.test(server)],
-  ['runtime gate is closed in Railway example', /^SYNC_RUNTIME_WRITE_ENABLED=false$/m.test(envExample)],
-  ['inventory autostart is closed in Railway example', /^SYNC_INVENTORY_AUTOSTART=false$/m.test(envExample)],
-  ['job recovery is closed in Railway example', /^SYNC_JOB_RECOVERY_ENABLED=false$/m.test(envExample)],
-  ['sheet import autostart is closed in Railway example', /^SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false$/m.test(envExample)],
-  ['catalog write is closed in Railway example', /^CATALOG_AUDIT_WRITE_ENABLED=false$/m.test(envExample)],
-  ['catalog sheet write is closed in Railway example', /^CATALOG_AUDIT_SHEET_WRITE_ENABLED=false$/m.test(envExample)],
-  ['catalog dry run remains enabled', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(envExample)],
-  ['canary remains limited to one row', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(envExample)],
+  ['all write gates are closed in Railway example', hasClosedProductionGates(railwayEnvExample)],
+  ['catalog dry run remains enabled in Railway example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(railwayEnvExample)],
+  ['canary remains limited to one row in Railway example', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(railwayEnvExample)],
+  ['all write gates are closed in production example', hasClosedProductionGates(productionEnvExample)],
+  ['production example uses Supabase session pooler port 5432', /^DATABASE_URL=.*pooler\.supabase\.com:5432\//m.test(productionEnvExample)],
+  ['production example requires sslmode=require', /^DATABASE_URL=.*[?&]sslmode=require(?:&|$)/m.test(productionEnvExample)],
+  ['production example does not use transaction pooler port 6543', !/^DATABASE_URL=.*:6543\//m.test(productionEnvExample)],
+  ['catalog dry run remains enabled in production example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(productionEnvExample)],
+  ['canary remains limited to one row in production example', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(productionEnvExample)],
   ['queue recovery does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(queue)],
   ['queue inventory monitor has an explicit disable path', /SYNC_INVENTORY_AUTOSTART === 'false'/.test(queue)],
   ['safe-mode message requires dry run, canary, and read-back', /only after live dry run, canary, and read-back succeed/i.test(server)],
