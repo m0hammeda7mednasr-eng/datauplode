@@ -160,6 +160,8 @@ async function main() {
   const runningJobs = Number(jobs.running ?? 0);
   const staleRunningJobs = Number(jobs.staleRunning ?? Number.NaN);
   const staleThresholdMinutes = Number(jobs.staleThresholdMinutes ?? Number.NaN);
+  const recentFailedJobs = Number(jobs.recentFailed ?? Number.NaN);
+  const recentFailureThresholdMinutes = Number(jobs.recentFailureThresholdMinutes ?? Number.NaN);
   if (requireSafeMode && (!Number.isFinite(runningJobs) || runningJobs !== 0)) {
     throw new Error(`Production smoke requires zero running jobs in safe mode, received ${String(jobs.running)}`);
   }
@@ -171,6 +173,20 @@ async function main() {
   if (!Number.isFinite(staleThresholdMinutes) || staleThresholdMinutes < 5 || staleThresholdMinutes > 1440) {
     throw new Error(
       `Readiness returned an invalid stale job threshold: ${String(jobs.staleThresholdMinutes)}`,
+    );
+  }
+  if (!Number.isFinite(recentFailedJobs) || recentFailedJobs !== 0) {
+    throw new Error(
+      `Production smoke requires jobs.recentFailed=0, received ${String(jobs.recentFailed)}. Inspect failed jobs before canary.`,
+    );
+  }
+  if (
+    !Number.isFinite(recentFailureThresholdMinutes) ||
+    recentFailureThresholdMinutes < 5 ||
+    recentFailureThresholdMinutes > 10080
+  ) {
+    throw new Error(
+      `Readiness returned an invalid recent failure threshold: ${String(jobs.recentFailureThresholdMinutes)}`,
     );
   }
 
@@ -198,6 +214,8 @@ async function main() {
       staleRunning: jobs.staleRunning ?? "unknown",
       staleThresholdMinutes: jobs.staleThresholdMinutes ?? "unknown",
       failed: jobs.failed ?? 0,
+      recentFailed: jobs.recentFailed ?? "unknown",
+      recentFailureThresholdMinutes: jobs.recentFailureThresholdMinutes ?? "unknown",
     },
     sourceClassificationSafety: "not-checked",
     catalogDryRun: "skipped",
