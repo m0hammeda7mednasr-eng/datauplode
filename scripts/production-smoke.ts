@@ -6,6 +6,7 @@ const baseUrl = String(process.env.SMOKE_BASE_URL || process.argv[2] || "")
 const timeoutMs = Number(process.env.SMOKE_TIMEOUT_MS || 30_000);
 const runCatalogDryRun = process.env.SMOKE_SKIP_CATALOG_DRY_RUN !== "true";
 const requireSafeMode = process.env.SMOKE_REQUIRE_SAFE_MODE !== "false";
+const expectedRevision = String(process.env.SMOKE_EXPECTED_REVISION || "").trim();
 
 if (!baseUrl || !/^https:\/\//i.test(baseUrl)) {
   console.error("Usage: SMOKE_BASE_URL=https://your-service.up.railway.app npm run smoke:production");
@@ -83,6 +84,35 @@ function assertBlockedSourcesAreNotOutOfStock(value: unknown, path = "response")
   }
 }
 
+function verifyDeploymentRevision(readiness: JsonRecord) {
+  const deployment = asRecord(readiness.deployment);
+  const deployedRevision = String(deployment.revision || "").trim();
+
+  if (!expectedRevision) {
+    return deployedRevision || "unknown";
+  }
+
+  if (!/^[0-9a-f]{7,40}$/i.test(expectedRevision)) {
+    throw new Error(`SMOKE_EXPECTED_REVISION is not a valid Git SHA: ${expectedRevision}`);
+  }
+  if (deployment.revisionVerified !== true || !/^[0-9a-f]{7,40}$/i.test(deployedRevision)) {
+    throw new Error(
+      `Railway readiness did not expose a verified deployment revision; expected ${expectedRevision}`,
+    );
+  }
+
+  const matches =
+    deployedRevision.toLowerCase().startsWith(expectedRevision.toLowerCase()) ||
+    expectedRevision.toLowerCase().startsWith(deployedRevision.toLowerCase());
+  if (!matches) {
+    throw new Error(
+      `Stale or wrong Railway deployment: expected revision ${expectedRevision}, received ${deployedRevision}`,
+    );
+  }
+
+  return deployedRevision;
+}
+
 async function main() {
   const startedAt = Date.now();
 
@@ -98,6 +128,7 @@ async function main() {
     throw new Error(`readiness did not report ok=true: ${JSON.stringify(readiness.body).slice(0, 1000)}`);
   }
 
+  const deployedRevision = verifyDeploymentRevision(readiness.body);
   const readinessDatabase = asRecord(readiness.body.database);
   if (readinessDatabase.ok !== true) {
     throw new Error(`readiness database did not report ok=true: ${JSON.stringify(readinessDatabase)}`);
@@ -133,6 +164,8 @@ async function main() {
 
   const report: JsonRecord = {
     baseUrl,
+    expectedRevision: expectedRevision || "not-enforced",
+    deployedRevision,
     healthStatus: health.response.status,
     readinessStatus: readiness.response.status,
     database: health.body.database,
