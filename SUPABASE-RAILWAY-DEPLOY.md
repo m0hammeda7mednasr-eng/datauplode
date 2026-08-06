@@ -1,44 +1,40 @@
 # Fast Production Path: Existing App + Supabase + Railway
 
-This is the supported fast path for the existing Node/React/Prisma application. The .NET rebuild is not required for this deployment.
+This is the supported production path for the existing Node/React/Prisma application. The closed .NET rebuild is not part of this deployment.
 
 ## Architecture
 
 - Frontend: existing Vercel app
-- API + background sync jobs: existing Node/Express application on Railway
+- API and controlled background jobs: Node/Express on Railway
 - Database: a dedicated Supabase Postgres project
-- ORM/schema: existing Prisma schema
+- ORM/schema: Prisma
 - Shopify: existing Shopify Admin integration
-- Google Sheet: service-account access to `dap_data`
+- Google Sheet: service-account access to the Dabdoob catalog sheet
 
 ## 1. Supabase
 
-Create a dedicated project named `dabdoob-product-sync` in an EU region.
+Create a dedicated project for Dabdoob. Do not reuse another application's database.
 
-Open **Connect** and copy the **Supavisor Session pooler** connection string. Use port `5432` for the long-running Railway server.
-
-Set it as `DATABASE_URL` in Railway and append:
+Use the Supavisor **Session pooler** connection string on port `5432` for the long-running Railway service. The Railway `DATABASE_URL` must include TLS and bounded pool settings, for example:
 
 ```text
 ?sslmode=require&connection_limit=10&pool_timeout=20
 ```
-
-Do not use a different existing project's database.
 
 ## 2. Railway service
 
 Create one Railway service from:
 
 - Repository: `m0hammeda7mednasr-eng/datauplode`
-- Branch during testing: `stabilize-supabase-railway`
-- Builder: Dockerfile (auto-detected by `railway.json`)
-- Pre-deploy: `npx prisma db push`
-- Start: Docker `CMD`, which runs `npm start`
-- Healthcheck: `/health`
+- Test branch: `stabilize-supabase-railway`
+- Builder: Dockerfile, selected by `railway.json`
+- Pre-deploy command: `npm run db:deploy:verified`
+- Start command: Docker `CMD`, which runs `npm start`
+- Healthcheck: `/api/ready`
 
-Generate a public domain after the first successful deployment.
+The verified pre-deploy command applies the Prisma schema and then performs a database preflight. A deployment must fail before traffic is accepted when PostgreSQL is unreachable or required tables are missing.
 
-Paste the variables from `.env.railway.example` into Railway's Variables editor and replace placeholders.
+Paste `.env.railway.example` into Railway Variables and replace every placeholder. Keep all write gates disabled for the first deployment.
 
 ## 3. Required credentials
 
@@ -51,32 +47,65 @@ Store secrets in Railway only:
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
 - `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64`
 
-Share the Google Sheet with the service-account email as Editor.
+Share the Google Sheet with the service-account email. Do not enable Sheet writes during the first smoke test.
 
-## 4. Safe activation
+## 4. Initial safe deployment
 
-Start with:
+Keep these values disabled:
 
-```text
+```env
+SYNC_RUNTIME_WRITE_ENABLED=false
+SYNC_INVENTORY_AUTOSTART=false
+SYNC_JOB_RECOVERY_ENABLED=false
+SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false
 CATALOG_AUDIT_DRY_RUN=true
+CATALOG_AUDIT_WRITE_ENABLED=false
+CATALOG_AUDIT_CANARY_MAX_ROWS=1
+CATALOG_AUDIT_SHEET_WRITE_ENABLED=false
 ```
 
-Verify:
+Verify in this order:
 
-1. `/health` returns HTTP 200 and `database: ok`.
-2. The UI can reach the Railway API without a CORS error.
-3. The Sheet importer reads rows and creates jobs.
-4. Shopify lookup resolves exact existing ACTIVE products/variants.
-5. A canary report shows intended price/SKU/inventory changes without applying them.
+1. `GET /health` returns HTTP 200 with `database: "ok"`.
+2. `GET /api/ready` returns HTTP 200, `database.ok=true`, and `configuration.safeMode=true`.
+3. The frontend reaches the Railway API without a CORS error.
+4. Run the production smoke workflow. It forces `dryRun=true`, `writeSheet=false`, and `maxRows=1` and supplies no write token.
+5. Review the one-product audit result. HTTP 403, CAPTCHA, timeout, or blocked-source responses must remain blocked/unknown and must never be converted to out-of-stock.
 
-Only after the canary is correct, set:
+Do not start recovery, inventory monitoring, or automatic Sheet import during this phase.
 
-```text
-CATALOG_AUDIT_DRY_RUN=false
-```
+## 5. One-product Shopify canary
 
-Deploy the staged Railway variable change, run a five-product canary, and verify Shopify read-back before widening the batch.
+Only after CI, live readiness, and the one-product dry run succeed:
 
-## 5. Rollback
+1. Keep runtime jobs and Sheet writes disabled.
+2. Set `CATALOG_AUDIT_WRITE_ENABLED=true`.
+3. Configure a long random `CATALOG_AUDIT_WRITE_TOKEN`.
+4. Keep `CATALOG_AUDIT_CANARY_MAX_ROWS=1`.
+5. Submit one request with `dryRun:false`, `maxRows:1`, `writeSheet:false`, and the correct `x-catalog-audit-write-token` header.
+6. Read the product and variants back from Shopify and compare the persisted values with the intended canary result.
+7. Immediately close `CATALOG_AUDIT_WRITE_ENABLED` if the request or read-back is not exact.
 
-If a deployment fails its healthcheck, Railway keeps the previous deployment active. If a canary fails, immediately restore `CATALOG_AUDIT_DRY_RUN=true` and redeploy the variable change.
+A successful request without successful Shopify read-back is not a successful canary.
+
+## 6. Gradual activation
+
+After the one-product canary and read-back succeed, enable only one additional capability at a time:
+
+1. Optional Sheet result write.
+2. Job recovery.
+3. Inventory monitor.
+4. Automatic Sheet import.
+
+Each startup capability requires both `SYNC_RUNTIME_WRITE_ENABLED=true` and its own specific gate. Do not enable all startup gates in one deployment.
+
+## 7. Rollback
+
+For any unexpected write, failed read-back, source-block classification regression, or rising failed-job count:
+
+1. Set all write gates to `false`.
+2. Redeploy the variable-only rollback.
+3. Confirm `/api/ready` reports `configuration.safeMode=true`.
+4. Inspect failed and running jobs before retrying.
+
+Do not merge the PR into `main` until Railway deployment, dry run, one-product canary, and Shopify read-back have all been directly verified.
