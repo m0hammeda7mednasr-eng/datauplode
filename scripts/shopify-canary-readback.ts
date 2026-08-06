@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { type AxiosResponse } from "axios";
 
 type ExpectedVariant = {
   id?: string;
@@ -13,10 +13,22 @@ type ShopifyVariant = {
   inventoryItem?: { sku?: string | null } | null;
 };
 
+type ReadBackResponse = AxiosResponse<any>;
+
 function required(name: string) {
   const value = String(process.env[name] || "").trim();
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
   return value;
+}
+
+function boundedInteger(name: string, fallback: number, min: number, max: number) {
+  const raw = String(process.env[name] || "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
 }
 
 function normalizeShopDomain(value: string) {
@@ -25,6 +37,14 @@ function normalizeShopDomain(value: string) {
     throw new Error("SHOPIFY_SHOP_DOMAIN must be an exact *.myshopify.com hostname");
   }
   return raw;
+}
+
+function normalizeApiVersion(value: string) {
+  const version = value.trim();
+  if (!/^20\d{2}-(01|04|07|10)$/.test(version)) {
+    throw new Error("SHOPIFY_API_VERSION must use Shopify's YYYY-MM quarterly format");
+  }
+  return version;
 }
 
 function normalizeProductId(value: string) {
@@ -46,6 +66,12 @@ function parseExpectedVariants(): ExpectedVariant[] {
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("CANARY_EXPECTED_VARIANTS_JSON must be a non-empty array");
   }
+  if (parsed.length > 250) {
+    throw new Error("CANARY_EXPECTED_VARIANTS_JSON cannot contain more than 250 variants");
+  }
+
+  const ids = new Set<string>();
+  const skus = new Set<string>();
 
   return parsed.map((entry, index) => {
     const sku = String((entry as any)?.sku || "").trim();
@@ -55,9 +81,16 @@ function parseExpectedVariants(): ExpectedVariant[] {
     if (price === undefined || price === null || String(price).trim() === "") {
       throw new Error(`Expected variant ${index + 1} is missing price`);
     }
-    if (!Number.isFinite(Number(price))) {
+    if (!Number.isFinite(Number(price)) || Number(price) < 0) {
       throw new Error(`Expected variant ${index + 1} has an invalid price`);
     }
+    if (id && !/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(id)) {
+      throw new Error(`Expected variant ${index + 1} has an invalid Shopify variant GID`);
+    }
+    if (skus.has(sku)) throw new Error(`Duplicate expected SKU: ${sku}`);
+    if (id && ids.has(id)) throw new Error(`Duplicate expected variant ID: ${id}`);
+    skus.add(sku);
+    if (id) ids.add(id);
     return { id, sku, price };
   });
 }
@@ -68,12 +101,69 @@ function money(value: string | number) {
   return numeric.toFixed(2);
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(response: ReadBackResponse, attempt: number) {
+  const retryAfter = Number(response.headers?.["retry-after"]);
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+    return Math.min(retryAfter * 1000, 10000);
+  }
+  return Math.min(500 * 2 ** attempt, 5000);
+}
+
+async function fetchReadBack(
+  endpoint: string,
+  accessToken: string,
+  query: string,
+  productId: string,
+  timeoutMs: number,
+  retries: number,
+) {
+  let response: ReadBackResponse | undefined;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    response = await axios.post(
+      endpoint,
+      { query, variables: { id: productId } },
+      {
+        timeout: timeoutMs,
+        maxRedirects: 0,
+        validateStatus: () => true,
+        headers: {
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      },
+    );
+
+    if (response.status === 200) return { response, attempts: attempt + 1 };
+
+    if (response.status === 401) {
+      throw new Error("Shopify read-back authentication failed with HTTP 401");
+    }
+    if (response.status === 403) {
+      throw new Error("Shopify read-back was blocked with HTTP 403; this is not an out-of-stock result");
+    }
+
+    const retryable = response.status === 429 || response.status >= 500;
+    if (!retryable || attempt === retries) break;
+    await sleep(retryDelayMs(response, attempt));
+  }
+
+  throw new Error(`Shopify read-back failed with HTTP ${response?.status ?? "unknown"}`);
+}
+
 async function main() {
   const shopDomain = normalizeShopDomain(required("SHOPIFY_SHOP_DOMAIN"));
   const accessToken = required("SHOPIFY_ACCESS_TOKEN");
-  const apiVersion = String(process.env.SHOPIFY_API_VERSION || "2026-04").trim();
+  const apiVersion = normalizeApiVersion(String(process.env.SHOPIFY_API_VERSION || "2026-04"));
   const productId = normalizeProductId(required("CANARY_SHOPIFY_PRODUCT_ID"));
   const expected = parseExpectedVariants();
+  const timeoutMs = boundedInteger("CANARY_READBACK_TIMEOUT_MS", 30000, 1000, 120000);
+  const retries = boundedInteger("CANARY_READBACK_RETRIES", 2, 0, 5);
 
   const query = `
     query CanaryReadBack($id: ID!) {
@@ -95,23 +185,15 @@ async function main() {
   `;
 
   const endpoint = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
-  const response = await axios.post(
+  const { response, attempts } = await fetchReadBack(
     endpoint,
-    { query, variables: { id: productId } },
-    {
-      timeout: Number(process.env.CANARY_READBACK_TIMEOUT_MS || 30000),
-      maxRedirects: 0,
-      validateStatus: () => true,
-      headers: {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      },
-    },
+    accessToken,
+    query,
+    productId,
+    timeoutMs,
+    retries,
   );
 
-  if (response.status !== 200) {
-    throw new Error(`Shopify read-back failed with HTTP ${response.status}`);
-  }
   if (Array.isArray(response.data?.errors) && response.data.errors.length > 0) {
     throw new Error(`Shopify GraphQL read-back failed: ${response.data.errors[0]?.message || "unknown error"}`);
   }
@@ -151,6 +233,7 @@ async function main() {
   const report = {
     ok: failures.length === 0,
     readOnly: true,
+    attempts,
     shopDomain,
     product: {
       id: product.id,
