@@ -57,6 +57,32 @@ function requireDisabled(configuration: JsonRecord, key: string) {
   }
 }
 
+function assertBlockedSourcesAreNotOutOfStock(value: unknown, path = "response") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertBlockedSourcesAreNotOutOfStock(item, `${path}[${index}]`));
+    return;
+  }
+
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  const record = value as JsonRecord;
+  const normalized = JSON.stringify(record).toLowerCase();
+  const contains403 = /(?:http|status|code)[^}]{0,40}403|\b403\b/.test(normalized);
+  const claimsOutOfStock = /out[-_ ]?of[-_ ]?stock|sold[-_ ]?out/.test(normalized);
+
+  if (contains403 && claimsOutOfStock) {
+    throw new Error(
+      `Unsafe source classification at ${path}: HTTP 403 must remain blocked/unknown, never out-of-stock.`,
+    );
+  }
+
+  for (const [key, child] of Object.entries(record)) {
+    assertBlockedSourcesAreNotOutOfStock(child, `${path}.${key}`);
+  }
+}
+
 async function main() {
   const startedAt = Date.now();
 
@@ -126,6 +152,7 @@ async function main() {
       running: jobs.running ?? 0,
       failed: jobs.failed ?? 0,
     },
+    sourceClassificationSafety: "not-checked",
     catalogDryRun: "skipped",
   };
 
@@ -153,6 +180,8 @@ async function main() {
       throw new Error(`Dry run exceeded the one-product smoke limit: ${processed}`);
     }
 
+    assertBlockedSourcesAreNotOutOfStock(dryRun.body, "catalogDryRun");
+    report.sourceClassificationSafety = "verified";
     report.catalogDryRun = {
       status: dryRun.response.status,
       uniqueProductsProcessed: processed,
