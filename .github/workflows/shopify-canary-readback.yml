@@ -1,0 +1,81 @@
+name: Shopify Canary Read-back
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: "Exact Shopify product GID written by the one-product canary"
+        required: true
+        type: string
+      expected_variants_json:
+        description: "Expected variants JSON: [{\"id\":\"gid://shopify/ProductVariant/...\",\"sku\":\"...\",\"price\":\"0.00\"}]"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-shopify-canary-readback
+  cancel-in-progress: false
+
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+      SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+      SHOPIFY_API_VERSION: "2026-04"
+      CANARY_SHOPIFY_PRODUCT_ID: ${{ inputs.product_id }}
+      CANARY_EXPECTED_VARIANTS_JSON: ${{ inputs.expected_variants_json }}
+      CANARY_READBACK_TIMEOUT_MS: "30000"
+      CANARY_READBACK_MAX_RETRIES: "2"
+
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SHOPIFY_SHOP_DOMAIN}" ]]; then
+            echo "Missing SHOPIFY_SHOP_DOMAIN repository secret." >&2
+            exit 2
+          fi
+          if [[ -z "${SHOPIFY_ACCESS_TOKEN}" ]]; then
+            echo "Missing SHOPIFY_ACCESS_TOKEN repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${SHOPIFY_SHOP_DOMAIN}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$ ]]; then
+            echo "SHOPIFY_SHOP_DOMAIN must be a direct *.myshopify.com hostname." >&2
+            exit 2
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Run read-only canary verification
+        run: npm run canary:readback
+
+      - name: Publish verification summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Shopify canary read-back"
+            echo
+            echo "- Revision: \`${GITHUB_SHA}\`"
+            echo "- Product: \`${CANARY_SHOPIFY_PRODUCT_ID}\`"
+            echo "- Mode: read-only GraphQL query"
+            echo "- Shopify mutations: \`0\`"
+            echo "- Redirect following: disabled by verifier"
+            echo "- HTTP 403 classification: blocked, never out-of-stock"
+          } >> "$GITHUB_STEP_SUMMARY"
