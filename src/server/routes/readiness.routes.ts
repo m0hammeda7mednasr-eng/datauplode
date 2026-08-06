@@ -18,6 +18,12 @@ function readinessTimeoutMs() {
   return Math.max(1000, Math.min(15000, Math.trunc(parsed)));
 }
 
+function staleRunningJobMinutes() {
+  const parsed = Number(process.env.SYNC_JOB_STALE_RUNNING_MINUTES || 10);
+  if (!Number.isFinite(parsed)) return 10;
+  return Math.max(5, Math.min(1440, Math.trunc(parsed)));
+}
+
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
@@ -71,6 +77,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
   const databaseTimeoutMs = readinessTimeoutMs();
+  const staleJobThresholdMinutes = staleRunningJobMinutes();
+  const staleJobCutoff = new Date(Date.now() - staleJobThresholdMinutes * 60_000);
 
   const configuration = {
     database: configured("DATABASE_URL"),
@@ -108,11 +116,17 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const startedAt = Date.now();
 
   try {
-    const [pendingJobs, runningJobs, failedJobs, latestAudit] = await withTimeout(
+    const [pendingJobs, runningJobs, failedJobs, staleRunningJobs, latestAudit] = await withTimeout(
       Promise.all([
         prisma.$queryRaw`SELECT 1`.then(() => prisma.syncJob.count({ where: { status: "pending" } })),
         prisma.syncJob.count({ where: { status: "running" } }),
         prisma.syncJob.count({ where: { status: "failed" } }),
+        prisma.syncJob.count({
+          where: {
+            status: "running",
+            OR: [{ startedAt: null }, { startedAt: { lt: staleJobCutoff } }],
+          },
+        }),
         prisma.importBatch.findFirst({
           where: { target: "catalog_audit" },
           orderBy: { createdAt: "desc" },
@@ -147,6 +161,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         pending: pendingJobs,
         running: runningJobs,
         failed: failedJobs,
+        staleRunning: staleRunningJobs,
+        staleThresholdMinutes: staleJobThresholdMinutes,
       },
       latestCatalogAudit: latestAudit,
       checkedAt: new Date().toISOString(),
