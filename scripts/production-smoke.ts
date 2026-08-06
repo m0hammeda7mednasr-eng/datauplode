@@ -157,11 +157,17 @@ async function main() {
   }
 
   const jobs = asRecord(readiness.body.jobs);
+  const pendingJobs = Number(jobs.pending ?? Number.NaN);
   const runningJobs = Number(jobs.running ?? 0);
   const staleRunningJobs = Number(jobs.staleRunning ?? Number.NaN);
   const staleThresholdMinutes = Number(jobs.staleThresholdMinutes ?? Number.NaN);
   const recentFailedJobs = Number(jobs.recentFailed ?? Number.NaN);
   const recentFailureThresholdMinutes = Number(jobs.recentFailureThresholdMinutes ?? Number.NaN);
+  if (requireSafeMode && (!Number.isFinite(pendingJobs) || pendingJobs !== 0)) {
+    throw new Error(
+      `Production smoke requires jobs.pending=0 in safe mode, received ${String(jobs.pending)}. Clear or explicitly reconcile queued jobs before canary so they cannot execute when runtime writes are opened.`,
+    );
+  }
   if (requireSafeMode && (!Number.isFinite(runningJobs) || runningJobs !== 0)) {
     throw new Error(`Production smoke requires zero running jobs in safe mode, received ${String(jobs.running)}`);
   }
@@ -209,7 +215,7 @@ async function main() {
       canaryMaxRows: configuration.catalogCanaryMaxRows ?? "unknown",
     },
     jobs: {
-      pending: jobs.pending ?? 0,
+      pending: jobs.pending ?? "unknown",
       running: jobs.running ?? 0,
       staleRunning: jobs.staleRunning ?? "unknown",
       staleThresholdMinutes: jobs.staleThresholdMinutes ?? "unknown",
