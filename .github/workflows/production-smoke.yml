@@ -28,6 +28,7 @@ jobs:
       SMOKE_BASE_URL: ${{ inputs.base_url || secrets.RAILWAY_SMOKE_BASE_URL }}
       SMOKE_SKIP_CATALOG_DRY_RUN: ${{ inputs.skip_catalog_dry_run }}
       SMOKE_TIMEOUT_MS: "60000"
+      SMOKE_EXPECTED_REVISION: ${{ github.sha }}
 
     steps:
       - name: Checkout requested revision
@@ -46,6 +47,7 @@ jobs:
             exit 2
           fi
           echo "Target host: $(node -e 'console.log(new URL(process.env.SMOKE_BASE_URL).host)')"
+          echo "Expected deployed revision: ${SMOKE_EXPECTED_REVISION}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -66,8 +68,9 @@ jobs:
           {
             echo "## Dabdoob production smoke"
             echo
-            echo "- Revision: \`${GITHUB_SHA}\`"
+            echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
             echo "- Catalog dry run skipped: \`${SMOKE_SKIP_CATALOG_DRY_RUN}\`"
             echo "- No Shopify write token is supplied by this workflow."
             echo "- The smoke script forces \`dryRun=true\`, \`writeSheet=false\`, and \`maxRows=1\`."
+            echo "- The run fails when Railway reports a stale or different Git revision."
           } >> "$GITHUB_STEP_SUMMARY"
