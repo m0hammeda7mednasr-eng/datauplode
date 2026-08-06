@@ -61,6 +61,9 @@ jobs:
       - name: Enforce Railway safe-mode deployment contract
         run: npx tsx scripts/railway-safe-mode-safety-contract.ts
 
+      - name: Enforce runtime autostart safety contract
+        run: npx tsx scripts/runtime-autostart-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
