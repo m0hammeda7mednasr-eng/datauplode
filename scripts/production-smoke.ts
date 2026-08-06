@@ -143,8 +143,11 @@ async function main() {
     }
 
     requireDisabled(configuration, "runtimeWriteGateEnabled");
+    requireDisabled(configuration, "inventoryAutostartConfigured");
     requireDisabled(configuration, "inventoryAutostartEnabled");
+    requireDisabled(configuration, "jobRecoveryConfigured");
     requireDisabled(configuration, "jobRecoveryEnabled");
+    requireDisabled(configuration, "sheetImportAutostartConfigured");
     requireDisabled(configuration, "sheetImportAutostartEnabled");
     requireDisabled(configuration, "catalogWriteGateEnabled");
     requireDisabled(configuration, "catalogSheetWriteGateEnabled");
@@ -158,7 +161,7 @@ async function main() {
 
   const jobs = asRecord(readiness.body.jobs);
   const pendingJobs = Number(jobs.pending ?? Number.NaN);
-  const runningJobs = Number(jobs.running ?? 0);
+  const runningJobs = Number(jobs.running ?? Number.NaN);
   const staleRunningJobs = Number(jobs.staleRunning ?? Number.NaN);
   const staleThresholdMinutes = Number(jobs.staleThresholdMinutes ?? Number.NaN);
   const recentFailedJobs = Number(jobs.recentFailed ?? Number.NaN);
@@ -209,14 +212,17 @@ async function main() {
       runtime: configuration.runtimeWriteGateEnabled ?? "unknown",
       catalog: configuration.catalogWriteGateEnabled ?? "unknown",
       sheet: configuration.catalogSheetWriteGateEnabled ?? "unknown",
+      inventoryAutostartConfigured: configuration.inventoryAutostartConfigured ?? "unknown",
       inventoryAutostart: configuration.inventoryAutostartEnabled ?? "unknown",
+      jobRecoveryConfigured: configuration.jobRecoveryConfigured ?? "unknown",
       jobRecovery: configuration.jobRecoveryEnabled ?? "unknown",
+      sheetImportAutostartConfigured: configuration.sheetImportAutostartConfigured ?? "unknown",
       sheetImportAutostart: configuration.sheetImportAutostartEnabled ?? "unknown",
       canaryMaxRows: configuration.catalogCanaryMaxRows ?? "unknown",
     },
     jobs: {
       pending: jobs.pending ?? "unknown",
-      running: jobs.running ?? 0,
+      running: jobs.running ?? "unknown",
       staleRunning: jobs.staleRunning ?? "unknown",
       staleThresholdMinutes: jobs.staleThresholdMinutes ?? "unknown",
       failed: jobs.failed ?? 0,
