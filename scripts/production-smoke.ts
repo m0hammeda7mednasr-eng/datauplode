@@ -51,6 +51,12 @@ function asRecord(value: unknown): JsonRecord {
     : {};
 }
 
+function requireDisabled(configuration: JsonRecord, key: string) {
+  if (configuration[key] !== false) {
+    throw new Error(`Production smoke requires configuration.${key}=false, received ${String(configuration[key])}`);
+  }
+}
+
 async function main() {
   const startedAt = Date.now();
 
@@ -72,13 +78,33 @@ async function main() {
   }
 
   const configuration = asRecord(readiness.body.configuration);
-  if (requireSafeMode && configuration.safeMode !== true) {
-    throw new Error(
-      "Production smoke requires safeMode=true before canary. Set SMOKE_REQUIRE_SAFE_MODE=false only for an explicitly approved canary check.",
-    );
+  if (requireSafeMode) {
+    if (configuration.safeMode !== true) {
+      throw new Error(
+        "Production smoke requires safeMode=true before canary. Set SMOKE_REQUIRE_SAFE_MODE=false only for an explicitly approved canary check.",
+      );
+    }
+
+    requireDisabled(configuration, "runtimeWriteGateEnabled");
+    requireDisabled(configuration, "inventoryAutostartEnabled");
+    requireDisabled(configuration, "jobRecoveryEnabled");
+    requireDisabled(configuration, "sheetImportAutostartEnabled");
+    requireDisabled(configuration, "catalogWriteGateEnabled");
+    requireDisabled(configuration, "catalogSheetWriteGateEnabled");
+
+    if (Number(configuration.catalogCanaryMaxRows) !== 1) {
+      throw new Error(
+        `Production smoke requires catalogCanaryMaxRows=1, received ${String(configuration.catalogCanaryMaxRows)}`,
+      );
+    }
   }
 
   const jobs = asRecord(readiness.body.jobs);
+  const runningJobs = Number(jobs.running ?? 0);
+  if (requireSafeMode && (!Number.isFinite(runningJobs) || runningJobs !== 0)) {
+    throw new Error(`Production smoke requires zero running jobs in safe mode, received ${String(jobs.running)}`);
+  }
+
   const report: JsonRecord = {
     baseUrl,
     healthStatus: health.response.status,
@@ -86,6 +112,15 @@ async function main() {
     database: health.body.database,
     databaseTarget: readinessDatabase.target ?? "unknown",
     safeMode: configuration.safeMode ?? "unknown",
+    writeGates: {
+      runtime: configuration.runtimeWriteGateEnabled ?? "unknown",
+      catalog: configuration.catalogWriteGateEnabled ?? "unknown",
+      sheet: configuration.catalogSheetWriteGateEnabled ?? "unknown",
+      inventoryAutostart: configuration.inventoryAutostartEnabled ?? "unknown",
+      jobRecovery: configuration.jobRecoveryEnabled ?? "unknown",
+      sheetImportAutostart: configuration.sheetImportAutostartEnabled ?? "unknown",
+      canaryMaxRows: configuration.catalogCanaryMaxRows ?? "unknown",
+    },
     jobs: {
       pending: jobs.pending ?? 0,
       running: jobs.running ?? 0,
