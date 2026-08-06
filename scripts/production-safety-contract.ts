@@ -6,6 +6,7 @@ const envExample = read(".env.railway.example");
 const safetyMiddleware = read("src/server/middleware/catalogAuditSafety.ts");
 const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
+const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
@@ -43,6 +44,34 @@ const assertions: Array<[string, boolean]> = [
     /if \(!runtimeWritesEnabled\(\)\)[\s\S]*?return;[\s\S]*?jobRecoveryEnabled\(\)/.test(server),
   ],
   ["403 is classified as blocked source", /HTTP 403/.test(scraper) && /SOURCE_BLOCKED/.test(scraper)],
+  [
+    "canary read-back only targets exact myshopify hostnames",
+    /\.myshopify\\\.com/.test(canaryReadBack) && /exact \*\.myshopify\.com hostname/.test(canaryReadBack),
+  ],
+  [
+    "canary read-back disables redirects",
+    /maxRedirects:\s*0/.test(canaryReadBack),
+  ],
+  [
+    "canary read-back uses a GraphQL query and no mutation",
+    /query CanaryReadBack/.test(canaryReadBack) && !/\bmutation\b/i.test(canaryReadBack),
+  ],
+  [
+    "canary read-back requires exact product identity",
+    /product\.id !== productId/.test(canaryReadBack),
+  ],
+  [
+    "canary read-back verifies SKU and price",
+    /SKU mismatch/.test(canaryReadBack) && /Price mismatch/.test(canaryReadBack),
+  ],
+  [
+    "canary read-back rejects HTTP 403 as blocked, not stock state",
+    /HTTP 403; this is not an out-of-stock result/.test(canaryReadBack),
+  ],
+  [
+    "canary read-back reports read-only status",
+    /readOnly:\s*true/.test(canaryReadBack),
+  ],
 ];
 
 const failed = assertions.filter(([, ok]) => !ok);
