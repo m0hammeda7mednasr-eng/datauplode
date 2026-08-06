@@ -25,6 +25,10 @@ const assertions: Array<[string, boolean]> = [
     /const pendingJobs = Number\(jobs\.pending \?\? Number\.NaN\)/.test(smoke),
   ],
   [
+    "production smoke parses running jobs as a required numeric field",
+    /const runningJobs = Number\(jobs\.running \?\? Number\.NaN\)/.test(smoke),
+  ],
+  [
     "production smoke blocks pending jobs while safe mode is required",
     /requireSafeMode[\s\S]{0,120}pendingJobs[\s\S]{0,120}pendingJobs !== 0/.test(smoke),
   ],
@@ -45,8 +49,24 @@ const assertions: Array<[string, boolean]> = [
     /recentFailedJobs !== 0/.test(smoke),
   ],
   [
+    "production smoke blocks configured inventory autostart drift",
+    /requireDisabled\(configuration, ["']inventoryAutostartConfigured["']\)/.test(smoke),
+  ],
+  [
+    "production smoke blocks configured recovery drift",
+    /requireDisabled\(configuration, ["']jobRecoveryConfigured["']\)/.test(smoke),
+  ],
+  [
+    "production smoke blocks configured sheet-import autostart drift",
+    /requireDisabled\(configuration, ["']sheetImportAutostartConfigured["']\)/.test(smoke),
+  ],
+  [
     "production smoke preserves pending count in its report",
     /pending:\s*jobs\.pending \?\? ["']unknown["']/.test(smoke),
+  ],
+  [
+    "production smoke preserves configured autostart state in its report",
+    /inventoryAutostartConfigured:[\s\S]{0,300}jobRecoveryConfigured:[\s\S]{0,300}sheetImportAutostartConfigured:/.test(smoke),
   ],
   [
     "production smoke still forces a one-product dry run",
