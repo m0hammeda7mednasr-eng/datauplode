@@ -252,9 +252,30 @@ async function main() {
       );
     }
 
-    const processed = Number(summary.uniqueProductsProcessed ?? 0);
-    if (!Number.isFinite(processed) || processed < 0 || processed > 1) {
-      throw new Error(`Dry run exceeded the one-product smoke limit: ${processed}`);
+    const processed = Number(summary.uniqueProductsProcessed ?? Number.NaN);
+    const verified = Number(summary.verified ?? Number.NaN);
+    const missing = Number(summary.missing ?? Number.NaN);
+    const ambiguous = Number(summary.ambiguous ?? Number.NaN);
+    const errors = Number(summary.errors ?? Number.NaN);
+    const counters = { processed, verified, missing, ambiguous, errors };
+
+    if (Object.values(counters).some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      throw new Error(`Catalog dry run returned missing or invalid counters: ${JSON.stringify(summary)}`);
+    }
+    if (processed !== 1) {
+      throw new Error(
+        `Production smoke requires exactly one product to be audited before canary, received ${processed}`,
+      );
+    }
+    if (ambiguous !== 0 || errors !== 0) {
+      throw new Error(
+        `Catalog dry run is not canary-ready: ambiguous=${ambiguous}, errors=${errors}. Resolve source matching or fetch failures first.`,
+      );
+    }
+    if (verified + missing !== processed) {
+      throw new Error(
+        `Catalog dry run counters are inconsistent: verified(${verified}) + missing(${missing}) must equal processed(${processed}) when ambiguous/errors are zero.`,
+      );
     }
 
     assertBlockedSourcesAreNotOutOfStock(dryRun.body, "catalogDryRun");
@@ -262,10 +283,10 @@ async function main() {
     report.catalogDryRun = {
       status: dryRun.response.status,
       uniqueProductsProcessed: processed,
-      verified: summary.verified ?? 0,
-      missing: summary.missing ?? 0,
-      ambiguous: summary.ambiguous ?? 0,
-      errors: summary.errors ?? 0,
+      verified,
+      missing,
+      ambiguous,
+      errors,
       dryRun: summary.dryRun,
       writeSheet: summary.writeSheet,
     };
