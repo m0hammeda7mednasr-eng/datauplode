@@ -35,7 +35,7 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "readiness reports platform ready state",
-    source.includes("ready: productionPlatformReady"),
+    source.includes("ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady)"),
   ],
   [
     "database target is computed once for consistent reporting",
@@ -72,6 +72,32 @@ const checks: Array<[string, boolean]> = [
   [
     "readiness forbids substring-only Supabase hostname detection",
     !source.includes('hostname.includes("supabase")'),
+  ],
+  [
+    "production readiness requires write safety",
+    source.includes("(!productionEnvironment || productionWriteSafetyReady)"),
+  ],
+  [
+    "production write safety requires catalog dry run",
+    source.includes("catalogAuditDryRunConfigured;") &&
+      source.includes('enabled("CATALOG_AUDIT_DRY_RUN")'),
+  ],
+  [
+    "production write safety requires all broad write and autostart gates closed",
+    source.includes("!runtimeWriteGateEnabled") &&
+      source.includes("!inventoryAutostartConfigured") &&
+      source.includes("!jobRecoveryConfigured") &&
+      source.includes("!sheetImportAutostartConfigured") &&
+      source.includes("!configuration.catalogWriteGateEnabled") &&
+      source.includes("!configuration.catalogSheetWriteGateEnabled"),
+  ],
+  [
+    "readiness exposes write safety state for monitoring",
+    source.includes("writeSafetyReady: productionWriteSafetyReady"),
+  ],
+  [
+    "readiness declares safe mode mandatory in production",
+    source.includes("safeModeRequired: productionEnvironment"),
   ],
 ];
 
