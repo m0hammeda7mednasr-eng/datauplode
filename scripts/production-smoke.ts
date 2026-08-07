@@ -92,21 +92,18 @@ function verifyDeploymentRevision(readiness: JsonRecord) {
     return deployedRevision || "unknown";
   }
 
-  if (!/^[0-9a-f]{7,40}$/i.test(expectedRevision)) {
-    throw new Error(`SMOKE_EXPECTED_REVISION is not a valid Git SHA: ${expectedRevision}`);
+  if (!/^[0-9a-f]{40}$/i.test(expectedRevision)) {
+    throw new Error(`SMOKE_EXPECTED_REVISION must be a full 40-character Git SHA: ${expectedRevision}`);
   }
-  if (deployment.revisionVerified !== true || !/^[0-9a-f]{7,40}$/i.test(deployedRevision)) {
+  if (deployment.revisionVerified !== true || !/^[0-9a-f]{40}$/i.test(deployedRevision)) {
     throw new Error(
-      `Railway readiness did not expose a verified deployment revision; expected ${expectedRevision}`,
+      `Railway readiness did not expose a verified full deployment revision; expected ${expectedRevision}`,
     );
   }
 
-  const matches =
-    deployedRevision.toLowerCase().startsWith(expectedRevision.toLowerCase()) ||
-    expectedRevision.toLowerCase().startsWith(deployedRevision.toLowerCase());
-  if (!matches) {
+  if (deployedRevision.toLowerCase() !== expectedRevision.toLowerCase()) {
     throw new Error(
-      `Stale or wrong Railway deployment: expected revision ${expectedRevision}, received ${deployedRevision}`,
+      `Stale or wrong Railway deployment: expected exact revision ${expectedRevision}, received ${deployedRevision}`,
     );
   }
 
