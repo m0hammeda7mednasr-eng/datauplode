@@ -27,6 +27,20 @@ const assertions: Array<[string, boolean]> = [
       /counts\.duplicate === 0 && counts\.product_mismatch === 0/.test(audit),
   ],
   [
+    "existing-product audit requests Shopify pagination state",
+    /productVariants\(first:\s*250,\s*query:\s*\$query\)/.test(audit) &&
+      /pageInfo\s*\{\s*hasNextPage\s*\}/s.test(audit),
+  ],
+  [
+    "existing-product audit fails closed on truncated Shopify results",
+    /pageInfo\?\.hasNextPage === true/.test(audit) &&
+      /uniqueness cannot be verified safely/.test(audit),
+  ],
+  [
+    "existing-product audit declares complete result sets mandatory",
+    /completeSearchResultsRequired:\s*true/.test(audit),
+  ],
+  [
     "existing-product audit classifies HTTP 403 as blocked",
     /HTTP 403; this is blocked access, not an out-of-stock result/.test(audit) &&
       /blocked_not_out_of_stock/.test(audit),
