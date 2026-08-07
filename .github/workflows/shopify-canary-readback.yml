@@ -3,6 +3,10 @@ name: Shopify Canary Read-back
 on:
   workflow_dispatch:
     inputs:
+      canary_revision:
+        description: "Exact 40-character Git SHA deployed when the one-product canary was executed"
+        required: true
+        type: string
       product_id:
         description: "Exact Shopify product GID written by the one-product canary"
         required: true
@@ -27,6 +31,7 @@ jobs:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       SHOPIFY_API_VERSION: "2026-04"
+      CANARY_EXPECTED_REVISION: ${{ inputs.canary_revision }}
       CANARY_SHOPIFY_PRODUCT_ID: ${{ inputs.product_id }}
       CANARY_EXPECTED_VARIANTS_JSON: ${{ inputs.expected_variants_json }}
       CANARY_READBACK_TIMEOUT_MS: "30000"
@@ -35,6 +40,23 @@ jobs:
     steps:
       - name: Checkout requested revision
         uses: actions/checkout@v4
+
+      - name: Verify canary revision provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "canary_revision must be an exact 40-character Git SHA." >&2
+            exit 2
+          fi
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Read-back revision mismatch: checked out ${actual}, but canary_revision is ${expected}." >&2
+            echo "Dispatch this workflow from the exact revision that executed the canary." >&2
+            exit 2
+          fi
+          echo "Verified canary/read-back revision: ${actual}"
 
       - name: Validate required secrets
         shell: bash
@@ -72,7 +94,9 @@ jobs:
           {
             echo "## Shopify canary read-back"
             echo
-            echo "- Revision: \`${GITHUB_SHA}\`"
+            echo "- Checked-out revision: \`${GITHUB_SHA}\`"
+            echo "- Canary revision: \`${CANARY_EXPECTED_REVISION}\`"
+            echo "- Revision equality required before Shopify read-back: \`true\`"
             echo "- Product: \`${CANARY_SHOPIFY_PRODUCT_ID}\`"
             echo "- Mode: read-only GraphQL query"
             echo "- Shopify mutations: \`0\`"
