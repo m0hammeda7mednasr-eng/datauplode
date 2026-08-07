@@ -2,11 +2,6 @@ name: Production Smoke Check
 
 on:
   workflow_dispatch:
-    inputs:
-      base_url:
-        description: "Railway service base URL (optional; falls back to RAILWAY_SMOKE_BASE_URL secret)"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -20,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      SMOKE_BASE_URL: ${{ inputs.base_url || secrets.RAILWAY_SMOKE_BASE_URL }}
+      SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
       SMOKE_SKIP_CATALOG_DRY_RUN: "false"
       SMOKE_TIMEOUT_MS: "60000"
       SMOKE_EXPECTED_REVISION: ${{ github.sha }}
@@ -51,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${SMOKE_BASE_URL}" ]]; then
-            echo "Missing target URL. Provide workflow input base_url or configure RAILWAY_SMOKE_BASE_URL." >&2
+            echo "Missing Railway target URL. Configure the RAILWAY_SMOKE_BASE_URL repository secret." >&2
             exit 2
           fi
           if [[ ! "${SMOKE_BASE_URL}" =~ ^https:// ]]; then
@@ -80,6 +75,7 @@ jobs:
           {
             echo "## Dabdoob production smoke"
             echo
+            echo "- Target source locked to repository secret \`RAILWAY_SMOKE_BASE_URL\`; workflow URL overrides are disabled."
             echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
             echo "- Checkout pinned and verified against the expected full Git SHA: \`true\`"
             echo "- Catalog dry run required: \`true\`"
