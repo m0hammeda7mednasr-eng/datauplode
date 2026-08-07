@@ -70,6 +70,9 @@ jobs:
       - name: Enforce database preflight schema drift contract
         run: npx tsx scripts/database-preflight-safety-contract.ts
 
+      - name: Enforce production readiness platform contract
+        run: npx tsx scripts/readiness-platform-safety-contract.ts
+
       - name: Enforce Shopify canary read-back safety contract
         run: npx tsx scripts/shopify-canary-readback-safety-contract.ts
 
