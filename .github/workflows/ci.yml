@@ -67,6 +67,9 @@ jobs:
       - name: Enforce pre-canary queue safety contract
         run: npx tsx scripts/pre-canary-queue-safety-contract.ts
 
+      - name: Enforce production smoke target safety contract
+        run: npx tsx scripts/production-smoke-target-safety-contract.ts
+
       - name: Enforce database preflight schema drift contract
         run: npx tsx scripts/database-preflight-safety-contract.ts
 
