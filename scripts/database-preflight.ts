@@ -77,10 +77,15 @@ function boundedInteger(value: string | null, minimum: number, maximum: number) 
     : null;
 }
 
+function isSupabaseHost(hostname: string) {
+  const normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
+  return normalized.endsWith(".supabase.com") || normalized.endsWith(".supabase.co");
+}
+
 function databaseSummary(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
-    const isSupabase = url.hostname.includes("supabase");
+    const isSupabase = isSupabaseHost(url.hostname);
     return {
       protocol: url.protocol.replace(":", ""),
       target: isSupabase ? "supabase" : "configured",
@@ -104,6 +109,13 @@ async function main() {
   const target = databaseSummary(databaseUrl);
   if (!target || !["postgres", "postgresql"].includes(target.protocol)) {
     throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.");
+  }
+
+  const production = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+  if (production && !target.supabase) {
+    throw new Error(
+      "Production database preflight requires an official Supabase host (*.supabase.com or *.supabase.co).",
+    );
   }
 
   if (target.supabase) {
