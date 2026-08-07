@@ -61,6 +61,14 @@ const checks: Array<[string, boolean]> = [
     "readiness does not advertise a configurable wider canary",
     !source.includes("process.env.CATALOG_AUDIT_CANARY_MAX_ROWS || 1"),
   ],
+  [
+    "readiness only trusts official Supabase hostname suffixes",
+    source.includes('endsWith(".supabase.com")') && source.includes('endsWith(".supabase.co")'),
+  ],
+  [
+    "readiness forbids substring-only Supabase hostname detection",
+    !source.includes('hostname.includes("supabase")'),
+  ],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
