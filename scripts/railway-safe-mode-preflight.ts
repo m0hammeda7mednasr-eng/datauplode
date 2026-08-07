@@ -14,6 +14,11 @@ function normalize(value: string | undefined): string {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function isSupabaseHost(host: string): boolean {
+  const normalizedHost = host.trim().toLowerCase().replace(/\.$/, '');
+  return normalizedHost.endsWith('.supabase.com') || normalizedHost.endsWith('.supabase.co');
+}
+
 function validateSupabaseDatabaseUrl(raw: string | undefined) {
   const value = String(raw ?? '').trim();
   if (!value) {
@@ -32,8 +37,8 @@ function validateSupabaseDatabaseUrl(raw: string | undefined) {
     if (!['postgres', 'postgresql'].includes(protocol)) {
       return { ok: false, reason: 'DATABASE_URL must use PostgreSQL', target: 'invalid' } as const;
     }
-    if (!host.includes('supabase')) {
-      return { ok: false, reason: 'Production DATABASE_URL must target Supabase', target: 'non-supabase' } as const;
+    if (!isSupabaseHost(host)) {
+      return { ok: false, reason: 'Production DATABASE_URL must target an official Supabase hostname', target: 'non-supabase' } as const;
     }
     if (port !== '5432') {
       return { ok: false, reason: 'Supabase Session pooler must use port 5432', target: 'supabase' } as const;
