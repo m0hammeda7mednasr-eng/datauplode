@@ -53,6 +53,14 @@ const checks: Array<[string, boolean]> = [
     "deployment revision still validates Git SHA format",
     source.includes("revisionVerified: /^[0-9a-f]{7,40}$/i.test(revision)"),
   ],
+  [
+    "readiness reports the hard one-product canary limit",
+    source.includes("catalogCanaryMaxRows: 1"),
+  ],
+  [
+    "readiness does not advertise a configurable wider canary",
+    !source.includes("process.env.CATALOG_AUDIT_CANARY_MAX_ROWS || 1"),
+  ],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
