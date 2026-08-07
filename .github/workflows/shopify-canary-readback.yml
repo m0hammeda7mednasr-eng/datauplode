@@ -38,8 +38,21 @@ jobs:
       CANARY_READBACK_RETRIES: "2"
 
     steps:
-      - name: Checkout requested revision
+      - name: Validate requested canary revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "canary_revision must be an exact 40-character Git SHA." >&2
+            exit 2
+          fi
+          echo "Requested canary revision: ${expected}"
+
+      - name: Checkout exact canary revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.canary_revision }}
 
       - name: Verify canary revision provenance
         shell: bash
@@ -47,13 +60,8 @@ jobs:
           set -euo pipefail
           expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
           actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
-          if [[ ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "canary_revision must be an exact 40-character Git SHA." >&2
-            exit 2
-          fi
           if [[ "${actual}" != "${expected}" ]]; then
             echo "Read-back revision mismatch: checked out ${actual}, but canary_revision is ${expected}." >&2
-            echo "Dispatch this workflow from the exact revision that executed the canary." >&2
             exit 2
           fi
           echo "Verified canary/read-back revision: ${actual}"
@@ -94,8 +102,9 @@ jobs:
           {
             echo "## Shopify canary read-back"
             echo
-            echo "- Checked-out revision: \`${GITHUB_SHA}\`"
+            echo "- Checked-out revision: \`$(git rev-parse HEAD 2>/dev/null || echo unavailable)\`"
             echo "- Canary revision: \`${CANARY_EXPECTED_REVISION}\`"
+            echo "- Checkout pinned to canary revision: \`true\`"
             echo "- Revision equality required before Shopify read-back: \`true\`"
             echo "- Product: \`${CANARY_SHOPIFY_PRODUCT_ID}\`"
             echo "- Mode: read-only GraphQL query"
