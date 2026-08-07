@@ -113,6 +113,28 @@ function verifyDeploymentRevision(readiness: JsonRecord) {
   return deployedRevision;
 }
 
+function verifyProductionPlatform(readiness: JsonRecord, database: JsonRecord) {
+  const platform = asRecord(readiness.platform);
+
+  if (platform.productionEnvironment !== true) {
+    throw new Error(
+      `Production smoke refuses non-production targets: platform.productionEnvironment=${String(platform.productionEnvironment)}`,
+    );
+  }
+  if (platform.supabaseRequired !== true || database.target !== "supabase") {
+    throw new Error(
+      `Production smoke requires the live database target to be Supabase: target=${String(database.target)}`,
+    );
+  }
+  if (platform.railwayRevisionRequired !== true || platform.ready !== true) {
+    throw new Error(
+      `Production smoke requires Railway platform readiness before dry run: platform.ready=${String(platform.ready)}`,
+    );
+  }
+
+  return platform;
+}
+
 async function main() {
   const startedAt = Date.now();
 
@@ -133,6 +155,7 @@ async function main() {
   if (readinessDatabase.ok !== true) {
     throw new Error(`readiness database did not report ok=true: ${JSON.stringify(readinessDatabase)}`);
   }
+  const platform = verifyProductionPlatform(readiness.body, readinessDatabase);
 
   const configuration = asRecord(readiness.body.configuration);
   if (requireSafeMode) {
@@ -207,6 +230,12 @@ async function main() {
     readinessStatus: readiness.response.status,
     database: health.body.database,
     databaseTarget: readinessDatabase.target ?? "unknown",
+    platform: {
+      productionEnvironment: platform.productionEnvironment ?? "unknown",
+      supabaseRequired: platform.supabaseRequired ?? "unknown",
+      railwayRevisionRequired: platform.railwayRevisionRequired ?? "unknown",
+      ready: platform.ready ?? "unknown",
+    },
     safeMode: configuration.safeMode ?? "unknown",
     writeGates: {
       runtime: configuration.runtimeWriteGateEnabled ?? "unknown",
