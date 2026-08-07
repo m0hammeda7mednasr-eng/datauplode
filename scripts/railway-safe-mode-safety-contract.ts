@@ -72,7 +72,9 @@ for (const gate of requiredClosedGates) {
 }
 assert(preflightSource.includes("canaryMaxRows !== 1"), 'canary must remain limited to exactly one row');
 assert(preflightSource.includes('CATALOG_AUDIT_DRY_RUN'), 'catalog audit dry-run must be mandatory');
-assert(preflightSource.includes("host.includes('supabase')"), 'production database target must be Supabase');
+assert(preflightSource.includes("endsWith('.supabase.com')"), 'Supabase .com host suffix must be allowlisted');
+assert(preflightSource.includes("endsWith('.supabase.co')"), 'Supabase .co host suffix must be allowlisted');
+assert(!preflightSource.includes("host.includes('supabase')"), 'substring-only Supabase hostname checks must remain forbidden');
 assert(preflightSource.includes("port !== '5432'"), 'Supabase Session pooler must use port 5432');
 assert(preflightSource.includes("sslMode !== 'require'"), 'Supabase database URL must require TLS');
 assert(preflightSource.includes('connectionLimit < 1 || connectionLimit > 20'), 'connection_limit must remain bounded');
@@ -108,6 +110,11 @@ const nonSupabase = runPreflight({
 });
 assert(nonSupabase.status !== 0, 'non-Supabase production database must block deployment');
 
+const spoofedSupabaseSubstring = runPreflight({
+  DATABASE_URL: 'postgresql://user:pass@supabase.attacker.example.com:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
+});
+assert(spoofedSupabaseSubstring.status !== 0, 'hostname containing supabase outside an official suffix must block deployment');
+
 const transactionPooler = runPreflight({
   DATABASE_URL: 'postgresql://prisma.project:password@region.pooler.supabase.com:6543/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
 });
@@ -140,8 +147,8 @@ console.log(JSON.stringify({
   assertions,
   testedClosedGates: requiredClosedGates.length,
   safeModePassCases: 1,
-  blockedDeploymentCases: requiredClosedGates.length * 2 + 9,
-  supabaseDeploymentGuards: 6,
+  blockedDeploymentCases: requiredClosedGates.length * 2 + 10,
+  supabaseDeploymentGuards: 7,
   shopifyMutationsPerformed: 0,
   googleSheetWritesPerformed: 0,
 }, null, 2));
