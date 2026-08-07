@@ -40,6 +40,24 @@ const assertions: Array<[string, boolean]> = [
     /platform:\s*\{[\s\S]{0,400}productionEnvironment:[\s\S]{0,200}supabaseRequired:[\s\S]{0,200}railwayRevisionRequired:[\s\S]{0,200}ready:/.test(smoke),
   ],
   [
+    "production smoke requires a full expected revision SHA",
+    /\^\[0-9a-f\]\{40\}\$/i.test(smoke) && /full 40-character Git SHA/.test(smoke),
+  ],
+  [
+    "production smoke requires a full deployed revision SHA",
+    /deployment\.revisionVerified !== true \|\| !\/\^\[0-9a-f\]\{40\}\$\/i\.test\(deployedRevision\)/.test(smoke),
+  ],
+  [
+    "production smoke requires exact deployed revision equality",
+    /deployedRevision\.toLowerCase\(\) !== expectedRevision\.toLowerCase\(\)/.test(smoke) &&
+      /expected exact revision/.test(smoke),
+  ],
+  [
+    "production smoke forbids prefix revision matching",
+    !/startsWith\(expectedRevision\.toLowerCase\(\)\)/.test(smoke) &&
+      !/startsWith\(deployedRevision\.toLowerCase\(\)\)/.test(smoke),
+  ],
+  [
     "production smoke parses pending jobs as a required numeric field",
     /const pendingJobs = Number\(jobs\.pending \?\? Number\.NaN\)/.test(smoke),
   ],
