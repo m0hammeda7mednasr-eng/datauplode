@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 const readiness = readFileSync("src/server/routes/readiness.routes.ts", "utf8");
 const smoke = readFileSync("scripts/production-smoke.ts", "utf8");
+const smokeWorkflow = readFileSync(".github/workflows/production-smoke.yml", "utf8");
 
 const assertions: Array<[string, boolean]> = [
   [
@@ -71,6 +72,14 @@ const assertions: Array<[string, boolean]> = [
   [
     "production smoke still forces a one-product dry run",
     /dryRun:\s*true/.test(smoke) && /writeSheet:\s*false/.test(smoke) && /maxRows:\s*1/.test(smoke),
+  ],
+  [
+    "production smoke workflow cannot expose a dry-run skip input",
+    !/skip_catalog_dry_run\s*:/.test(smokeWorkflow),
+  ],
+  [
+    "production smoke workflow explicitly requires the catalog dry run",
+    /SMOKE_SKIP_CATALOG_DRY_RUN:\s*["']false["']/.test(smokeWorkflow),
   ],
   [
     "dry-run counters are mandatory rather than defaulting to zero",
