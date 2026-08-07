@@ -173,6 +173,7 @@ async function main() {
         status
         updatedAt
         variants(first: 250) {
+          pageInfo { hasNextPage }
           nodes {
             id
             sku
@@ -203,10 +204,14 @@ async function main() {
   if (product.id !== productId) throw new Error(`Read-back product mismatch: expected ${productId}, received ${product.id}`);
 
   const actual: ShopifyVariant[] = product.variants?.nodes || [];
+  const hasNextVariantPage = product.variants?.pageInfo?.hasNextPage === true;
   const failures: string[] = [];
   const matchedIds = new Set<string>();
   const actualIds = new Set(actual.map((variant) => variant.id));
 
+  if (hasNextVariantPage) {
+    failures.push("Variant read-back was truncated after 250 variants; exact variant-set verification is impossible");
+  }
   if (actual.length !== expected.length) {
     failures.push(`Variant count mismatch: expected exactly ${expected.length}, received ${actual.length}`);
   }
@@ -242,6 +247,7 @@ async function main() {
     ok: failures.length === 0,
     readOnly: true,
     exactVariantSetRequired: true,
+    completeVariantSetObserved: !hasNextVariantPage,
     attempts,
     shopDomain,
     product: {
