@@ -28,6 +28,23 @@ jobs:
     steps:
       - name: Checkout requested revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${SMOKE_EXPECTED_REVISION}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Expected revision must be a full 40-character Git SHA, received: ${SMOKE_EXPECTED_REVISION}" >&2
+            exit 2
+          fi
+          CHECKED_OUT_REVISION="$(git rev-parse HEAD)"
+          if [[ "${CHECKED_OUT_REVISION,,}" != "${SMOKE_EXPECTED_REVISION,,}" ]]; then
+            echo "Checked-out revision ${CHECKED_OUT_REVISION} does not match expected revision ${SMOKE_EXPECTED_REVISION}." >&2
+            exit 2
+          fi
+          echo "Checked-out revision verified: ${CHECKED_OUT_REVISION}"
 
       - name: Validate target URL
         shell: bash
@@ -64,6 +81,7 @@ jobs:
             echo "## Dabdoob production smoke"
             echo
             echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
+            echo "- Checkout pinned and verified against the expected full Git SHA: \`true\`"
             echo "- Catalog dry run required: \`true\`"
             echo "- No Shopify write token is supplied by this workflow."
             echo "- The smoke script forces \`dryRun=true\`, \`writeSheet=false\`, and \`maxRows=1\`."
