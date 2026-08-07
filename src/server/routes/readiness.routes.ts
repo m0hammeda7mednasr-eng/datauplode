@@ -121,6 +121,12 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     !configuration.catalogWriteGateEnabled ||
     !configuration.catalogWriteTokenConfigured;
   const deployment = deploymentMetadata();
+  const databaseTargetValue = databaseTarget();
+  const productionEnvironment =
+    String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+  const productionPlatformReady =
+    !productionEnvironment ||
+    (databaseTargetValue === "supabase" && deployment.revisionVerified === true);
   const startedAt = Date.now();
 
   try {
@@ -158,7 +164,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       configuration.encryptionKey &&
       configuration.shopifyDomain &&
       configuration.shopifyToken &&
-      configuration.googleSheet;
+      configuration.googleSheet &&
+      productionPlatformReady;
 
     res.status(productionMinimumReady ? 200 : 503).json({
       ok: productionMinimumReady,
@@ -166,9 +173,15 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       deployment,
       database: {
         ok: true,
-        target: databaseTarget(),
+        target: databaseTargetValue,
         latencyMs: Date.now() - startedAt,
         timeoutMs: databaseTimeoutMs,
+      },
+      platform: {
+        productionEnvironment,
+        supabaseRequired: productionEnvironment,
+        railwayRevisionRequired: productionEnvironment,
+        ready: productionPlatformReady,
       },
       configuration: {
         ...configuration,
@@ -202,10 +215,16 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       deployment,
       database: {
         ok: false,
-        target: databaseTarget(),
+        target: databaseTargetValue,
         latencyMs: Date.now() - startedAt,
         timeoutMs: databaseTimeoutMs,
         failureCode,
+      },
+      platform: {
+        productionEnvironment,
+        supabaseRequired: productionEnvironment,
+        railwayRevisionRequired: productionEnvironment,
+        ready: false,
       },
       configuration: {
         ...configuration,
