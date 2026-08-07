@@ -22,6 +22,24 @@ const assertions: Array<[string, boolean]> = [
     /recentFailed:\s*recentFailedJobs/.test(readiness) && /recentFailureThresholdMinutes/.test(readiness),
   ],
   [
+    "production smoke independently rejects non-production targets",
+    /platform\.productionEnvironment !== true/.test(smoke) && /refuses non-production targets/.test(smoke),
+  ],
+  [
+    "production smoke independently requires a Supabase database target",
+    /platform\.supabaseRequired !== true \|\| database\.target !== ["']supabase["']/.test(smoke) &&
+      /requires the live database target to be Supabase/.test(smoke),
+  ],
+  [
+    "production smoke independently requires Railway platform readiness",
+    /platform\.railwayRevisionRequired !== true \|\| platform\.ready !== true/.test(smoke) &&
+      /requires Railway platform readiness before dry run/.test(smoke),
+  ],
+  [
+    "production smoke reports verified platform state",
+    /platform:\s*\{[\s\S]{0,400}productionEnvironment:[\s\S]{0,200}supabaseRequired:[\s\S]{0,200}railwayRevisionRequired:[\s\S]{0,200}ready:/.test(smoke),
+  ],
+  [
     "production smoke parses pending jobs as a required numeric field",
     /const pendingJobs = Number\(jobs\.pending \?\? Number\.NaN\)/.test(smoke),
   ],
