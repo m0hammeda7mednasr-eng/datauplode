@@ -205,6 +205,14 @@ async function main() {
   const actual: ShopifyVariant[] = product.variants?.nodes || [];
   const failures: string[] = [];
   const matchedIds = new Set<string>();
+  const actualIds = new Set(actual.map((variant) => variant.id));
+
+  if (actual.length !== expected.length) {
+    failures.push(`Variant count mismatch: expected exactly ${expected.length}, received ${actual.length}`);
+  }
+  if (actualIds.size !== actual.length) {
+    failures.push(`Shopify read-back returned duplicate variant IDs: ${actual.length - actualIds.size} duplicate(s)`);
+  }
 
   for (const expectedVariant of expected) {
     const match = expectedVariant.id
@@ -233,6 +241,7 @@ async function main() {
   const report = {
     ok: failures.length === 0,
     readOnly: true,
+    exactVariantSetRequired: true,
     attempts,
     shopDomain,
     product: {
@@ -252,6 +261,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, readOnly: true, error: error instanceof Error ? error.message : String(error) }, null, 2));
+  console.error(JSON.stringify({ ok: false, readOnly: true, exactVariantSetRequired: true, error: error instanceof Error ? error.message : String(error) }, null, 2));
   process.exitCode = 1;
 });
