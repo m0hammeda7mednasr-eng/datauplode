@@ -7,11 +7,6 @@ on:
         description: "Railway service base URL (optional; falls back to RAILWAY_SMOKE_BASE_URL secret)"
         required: false
         type: string
-      skip_catalog_dry_run:
-        description: "Skip the one-product catalog dry run"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -26,7 +21,7 @@ jobs:
     timeout-minutes: 10
     env:
       SMOKE_BASE_URL: ${{ inputs.base_url || secrets.RAILWAY_SMOKE_BASE_URL }}
-      SMOKE_SKIP_CATALOG_DRY_RUN: ${{ inputs.skip_catalog_dry_run }}
+      SMOKE_SKIP_CATALOG_DRY_RUN: "false"
       SMOKE_TIMEOUT_MS: "60000"
       SMOKE_EXPECTED_REVISION: ${{ github.sha }}
 
@@ -69,7 +64,7 @@ jobs:
             echo "## Dabdoob production smoke"
             echo
             echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
-            echo "- Catalog dry run skipped: \`${SMOKE_SKIP_CATALOG_DRY_RUN}\`"
+            echo "- Catalog dry run required: \`true\`"
             echo "- No Shopify write token is supplied by this workflow."
             echo "- The smoke script forces \`dryRun=true\`, \`writeSheet=false\`, and \`maxRows=1\`."
             echo "- The run fails when Railway reports a stale or different Git revision."
