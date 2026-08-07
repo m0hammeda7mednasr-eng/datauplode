@@ -51,10 +51,10 @@ export function catalogAuditSafety(req: Request, res: Response, next: NextFuncti
     }
   }
 
-  // Google Sheet writes are an independent side effect. A Shopify canary must not
-  // alter the sheet unless this second gate is explicitly enabled.
-  const sheetWriteEnabled = enabled(process.env.CATALOG_AUDIT_SHEET_WRITE_ENABLED);
-  const writeSheet = sheetWriteEnabled && req.body?.writeSheet === true;
+  // The first Shopify canary must be isolated from Google Sheet writes. Sheet mutation
+  // is a separate rollout stage and remains unavailable from this endpoint until the
+  // canary and Shopify read-back have succeeded and a dedicated rollout gate exists.
+  const writeSheet = false;
 
   req.body = {
     ...req.body,
@@ -64,6 +64,6 @@ export function catalogAuditSafety(req: Request, res: Response, next: NextFuncti
   };
   res.setHeader("X-Catalog-Audit-Mode", "canary-write");
   res.setHeader("X-Catalog-Audit-Max-Rows", "1");
-  res.setHeader("X-Catalog-Audit-Sheet-Write", writeSheet ? "enabled" : "disabled");
+  res.setHeader("X-Catalog-Audit-Sheet-Write", "disabled");
   return next();
 }
