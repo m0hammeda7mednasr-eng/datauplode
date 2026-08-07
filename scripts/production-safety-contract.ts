@@ -74,6 +74,18 @@ const assertions: Array<[string, boolean]> = [
   ["catalog write requires token header", /x-catalog-audit-write-token/i.test(safetyMiddleware)],
   ["dry run forces sheet writes off", /writeSheet\s*=\s*false|writeSheet:\s*false/.test(safetyMiddleware)],
   [
+    "Shopify canary is hard-locked to one product",
+    /code:\s*"CATALOG_AUDIT_CANARY_REQUIRES_ONE_PRODUCT"/.test(safetyMiddleware) &&
+      /numericMaxRows !== 1/.test(safetyMiddleware) &&
+      /maxRows:\s*1/.test(safetyMiddleware) &&
+      !/process\.env\.CATALOG_AUDIT_CANARY_MAX_ROWS/.test(safetyMiddleware),
+  ],
+  [
+    "broad catalog writes have no configurable canary row override",
+    !/boundedInteger\([\s\S]*CATALOG_AUDIT_CANARY_MAX_ROWS/.test(safetyMiddleware) &&
+      /Shopify canary write mode requires maxRows=1 exactly/.test(safetyMiddleware),
+  ],
+  [
     "job recovery requires runtime and recovery gates",
     /function jobRecoveryEnabled\(\)[\s\S]*?runtimeWritesEnabled\(\)\s*&&\s*envFlag\("SYNC_JOB_RECOVERY_ENABLED"\)/.test(
       server,
