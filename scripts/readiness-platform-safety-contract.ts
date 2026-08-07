@@ -50,8 +50,12 @@ const checks: Array<[string, boolean]> = [
     source.includes("ready: false"),
   ],
   [
-    "deployment revision still validates Git SHA format",
-    source.includes("revisionVerified: /^[0-9a-f]{7,40}$/i.test(revision)"),
+    "deployment revision requires a full 40-character Git SHA",
+    source.includes("revisionVerified: /^[0-9a-f]{40}$/i.test(revision)"),
+  ],
+  [
+    "short Git SHA readiness remains forbidden",
+    !source.includes("revisionVerified: /^[0-9a-f]{7,40}$/i.test(revision)"),
   ],
   [
     "readiness reports the hard one-product canary limit",
