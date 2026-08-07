@@ -19,6 +19,9 @@ type GraphQlResponse = {
   data?: {
     productVariants?: {
       nodes?: VariantNode[];
+      pageInfo?: {
+        hasNextPage?: boolean;
+      };
     };
   };
   errors?: Array<{ message?: string }>;
@@ -38,7 +41,7 @@ validateConfiguration();
 const endpoint = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
 const query = `
   query ExistingProductAudit($query: String!) {
-    productVariants(first: 10, query: $query) {
+    productVariants(first: 250, query: $query) {
       nodes {
         id
         sku
@@ -47,6 +50,9 @@ const query = `
           title
           handle
         }
+      }
+      pageInfo {
+        hasNextPage
       }
     }
   }
@@ -65,7 +71,14 @@ let retryCount = 0;
 
 for (const item of expected) {
   const response = await requestWithRetry(item.sku);
-  const exactMatches = (response.data?.productVariants?.nodes || []).filter(
+  const productVariants = response.data?.productVariants;
+  if (productVariants?.pageInfo?.hasNextPage === true) {
+    throw new Error(
+      `Existing-product audit search for SKU ${item.sku} was truncated after 250 variants; uniqueness cannot be verified safely`,
+    );
+  }
+
+  const exactMatches = (productVariants?.nodes || []).filter(
     (variant) => (variant.sku || "").trim() === item.sku,
   );
   const productIds = [...new Set(exactMatches.map((variant) => variant.product.id))];
@@ -103,6 +116,7 @@ const ok = counts.duplicate === 0 && counts.product_mismatch === 0;
 const report = {
   ok,
   readOnly: true,
+  completeSearchResultsRequired: true,
   queriedSkus: expected.length,
   requestCount,
   retryCount,
