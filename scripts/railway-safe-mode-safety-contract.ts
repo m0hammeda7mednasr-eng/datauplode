@@ -16,6 +16,9 @@ const requiredClosedGates = [
   'CATALOG_AUDIT_SHEET_WRITE_ENABLED',
 ] as const;
 
+const validSupabaseUrl =
+  'postgresql://prisma.project:password@region.pooler.supabase.com:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20';
+
 let assertions = 0;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -27,6 +30,7 @@ function runPreflight(overrides: Record<string, string | undefined>) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: 'production',
+    DATABASE_URL: validSupabaseUrl,
     CATALOG_AUDIT_DRY_RUN: 'true',
     CATALOG_AUDIT_CANARY_MAX_ROWS: '1',
   };
@@ -68,6 +72,11 @@ for (const gate of requiredClosedGates) {
 }
 assert(preflightSource.includes("canaryMaxRows !== 1"), 'canary must remain limited to exactly one row');
 assert(preflightSource.includes('CATALOG_AUDIT_DRY_RUN'), 'catalog audit dry-run must be mandatory');
+assert(preflightSource.includes("host.includes('supabase')"), 'production database target must be Supabase');
+assert(preflightSource.includes("port !== '5432'"), 'Supabase Session pooler must use port 5432');
+assert(preflightSource.includes("sslMode !== 'require'"), 'Supabase database URL must require TLS');
+assert(preflightSource.includes('connectionLimit < 1 || connectionLimit > 20'), 'connection_limit must remain bounded');
+assert(preflightSource.includes('poolTimeout < 1 || poolTimeout > 60'), 'pool_timeout must remain bounded');
 assert(preflightSource.includes('shopifyMutationsPerformed: 0'), 'preflight report must declare zero Shopify mutations');
 assert(preflightSource.includes('googleSheetWritesPerformed: 0'), 'preflight report must declare zero Google Sheet writes');
 
@@ -91,6 +100,34 @@ assert(dryRunOff.status !== 0, 'disabled catalog dry-run must block deployment')
 const canaryTooWide = runPreflight({ CATALOG_AUDIT_CANARY_MAX_ROWS: '2' });
 assert(canaryTooWide.status !== 0, 'canary wider than one row must block deployment');
 
+const missingDatabase = runPreflight({ DATABASE_URL: undefined });
+assert(missingDatabase.status !== 0, 'missing DATABASE_URL must block deployment');
+
+const nonSupabase = runPreflight({
+  DATABASE_URL: 'postgresql://user:pass@db.example.com:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
+});
+assert(nonSupabase.status !== 0, 'non-Supabase production database must block deployment');
+
+const transactionPooler = runPreflight({
+  DATABASE_URL: 'postgresql://prisma.project:password@region.pooler.supabase.com:6543/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
+});
+assert(transactionPooler.status !== 0, 'Supabase transaction pooler port 6543 must block deployment');
+
+const missingTls = runPreflight({
+  DATABASE_URL: 'postgresql://prisma.project:password@region.pooler.supabase.com:5432/postgres?connection_limit=10&pool_timeout=20',
+});
+assert(missingTls.status !== 0, 'Supabase database without sslmode=require must block deployment');
+
+const unsafeConnectionLimit = runPreflight({
+  DATABASE_URL: 'postgresql://prisma.project:password@region.pooler.supabase.com:5432/postgres?sslmode=require&connection_limit=50&pool_timeout=20',
+});
+assert(unsafeConnectionLimit.status !== 0, 'unsafe Supabase connection_limit must block deployment');
+
+const unsafePoolTimeout = runPreflight({
+  DATABASE_URL: 'postgresql://prisma.project:password@region.pooler.supabase.com:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=120',
+});
+assert(unsafePoolTimeout.status !== 0, 'unsafe Supabase pool_timeout must block deployment');
+
 const nonProduction = spawnSync(process.execPath, ['--import', 'tsx', preflightPath], {
   env: { ...process.env, NODE_ENV: 'development' },
   encoding: 'utf8',
@@ -103,7 +140,8 @@ console.log(JSON.stringify({
   assertions,
   testedClosedGates: requiredClosedGates.length,
   safeModePassCases: 1,
-  blockedDeploymentCases: requiredClosedGates.length * 2 + 3,
+  blockedDeploymentCases: requiredClosedGates.length * 2 + 9,
+  supabaseDeploymentGuards: 6,
   shopifyMutationsPerformed: 0,
   googleSheetWritesPerformed: 0,
 }, null, 2));
