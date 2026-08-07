@@ -90,6 +90,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
+  const catalogAuditDryRunConfigured = enabled("CATALOG_AUDIT_DRY_RUN");
   const databaseTimeoutMs = readinessTimeoutMs();
   const staleJobThresholdMinutes = staleRunningJobMinutes();
   const recentFailureThresholdMinutes = recentFailedJobMinutes();
@@ -110,6 +111,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     catalogWriteGateEnabled: enabled("CATALOG_AUDIT_WRITE_ENABLED"),
     catalogWriteTokenConfigured: configured("CATALOG_AUDIT_WRITE_TOKEN"),
     catalogSheetWriteGateEnabled: enabled("CATALOG_AUDIT_SHEET_WRITE_ENABLED"),
+    catalogAuditDryRunConfigured,
     catalogCanaryMaxRows: 1,
     runtimeWriteGateEnabled,
     inventoryAutostartConfigured,
@@ -132,6 +134,14 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const productionPlatformReady =
     !productionEnvironment ||
     (databaseTargetValue === "supabase" && deployment.revisionVerified === true);
+  const productionWriteSafetyReady =
+    !runtimeWriteGateEnabled &&
+    !inventoryAutostartConfigured &&
+    !jobRecoveryConfigured &&
+    !sheetImportAutostartConfigured &&
+    !configuration.catalogWriteGateEnabled &&
+    !configuration.catalogSheetWriteGateEnabled &&
+    catalogAuditDryRunConfigured;
   const startedAt = Date.now();
 
   try {
@@ -170,7 +180,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       configuration.shopifyDomain &&
       configuration.shopifyToken &&
       configuration.googleSheet &&
-      productionPlatformReady;
+      productionPlatformReady &&
+      (!productionEnvironment || productionWriteSafetyReady);
 
     res.status(productionMinimumReady ? 200 : 503).json({
       ok: productionMinimumReady,
@@ -186,7 +197,9 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         productionEnvironment,
         supabaseRequired: productionEnvironment,
         railwayRevisionRequired: productionEnvironment,
-        ready: productionPlatformReady,
+        safeModeRequired: productionEnvironment,
+        writeSafetyReady: productionWriteSafetyReady,
+        ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady),
       },
       configuration: {
         ...configuration,
@@ -229,6 +242,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         productionEnvironment,
         supabaseRequired: productionEnvironment,
         railwayRevisionRequired: productionEnvironment,
+        safeModeRequired: productionEnvironment,
+        writeSafetyReady: productionWriteSafetyReady,
         ready: false,
       },
       configuration: {
