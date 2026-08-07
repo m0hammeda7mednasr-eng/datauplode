@@ -78,6 +78,23 @@ assert(
   "Preflight must fail closed when required columns are missing.",
 );
 assert(
+  preflight.includes('normalized.endsWith(".supabase.com")') &&
+    preflight.includes('normalized.endsWith(".supabase.co")'),
+  "Database preflight must recognize only approved Supabase hostname suffixes.",
+);
+assert(
+  !preflight.includes('hostname.includes("supabase")'),
+  "Database preflight must not classify Supabase using a substring match.",
+);
+assert(
+  preflight.includes("production && !target.supabase"),
+  "Production database preflight must fail closed for non-Supabase targets.",
+);
+assert(
+  preflight.includes("Production database preflight requires an official Supabase host"),
+  "Production non-Supabase rejection must remain explicit and auditable.",
+);
+assert(
   preflight.includes('target.sslMode !== "require"'),
   "Supabase preflight must require sslmode=require.",
 );
@@ -104,7 +121,7 @@ console.log(
       requiredColumns: requiredColumnCount,
       missingModels,
       staleColumns,
-      supabaseChecks: 4,
+      supabaseChecks: 8,
       databaseWrites: 0,
       shopifyMutations: 0,
       googleSheetWrites: 0,
