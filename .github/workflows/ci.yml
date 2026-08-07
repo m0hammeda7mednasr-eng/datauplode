@@ -82,6 +82,9 @@ jobs:
       - name: Enforce canary sheet isolation contract
         run: npx tsx scripts/canary-sheet-isolation-safety-contract.ts
 
+      - name: Enforce production catalog source contract
+        run: npx tsx scripts/catalog-audit-production-source-safety-contract.ts
+
       - name: TypeScript check
         run: npm run lint
 
