@@ -81,7 +81,7 @@ function deploymentMetadata() {
   return {
     revision: revision || "unknown",
     branch: branch || "unknown",
-    revisionVerified: /^[0-9a-f]{7,40}$/i.test(revision),
+    revisionVerified: /^[0-9a-f]{40}$/i.test(revision),
   };
 }
 
