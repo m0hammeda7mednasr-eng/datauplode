@@ -20,6 +20,9 @@ const checks: Array<[string, boolean]> = [
   ["read-back validates the product identity", /product\.id !== productId/.test(script)],
   ["read-back compares SKU", /SKU mismatch/.test(script)],
   ["read-back compares price", /Price mismatch/.test(script)],
+  ["read-back requires exact variant count", /Variant count mismatch: expected exactly/.test(script)],
+  ["read-back rejects duplicate Shopify variant IDs", /Shopify read-back returned duplicate variant IDs/.test(script)],
+  ["read-back reports exact variant-set enforcement", /exactVariantSetRequired:\s*true/.test(script)],
   ["read-back requires unique matched variants", /Expected \$\{expected\.length\} unique matched variants/.test(script)],
   ["HTTP 403 remains blocked and never out-of-stock", /HTTP 403; this is not an out-of-stock result/.test(script)],
   ["authentication failure is explicit", /authentication failed with HTTP 401/.test(script)],
@@ -41,6 +44,7 @@ if (failed.length > 0) {
 console.log(JSON.stringify({
   ok: true,
   assertions: checks.length,
+  exactVariantSetRequired: true,
   shopifyMutations: 0,
   googleSheetWrites: 0,
   databaseWrites: 0,
