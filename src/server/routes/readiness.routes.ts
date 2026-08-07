@@ -102,10 +102,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     catalogWriteGateEnabled: enabled("CATALOG_AUDIT_WRITE_ENABLED"),
     catalogWriteTokenConfigured: configured("CATALOG_AUDIT_WRITE_TOKEN"),
     catalogSheetWriteGateEnabled: enabled("CATALOG_AUDIT_SHEET_WRITE_ENABLED"),
-    catalogCanaryMaxRows: Math.max(
-      1,
-      Math.min(5, Number(process.env.CATALOG_AUDIT_CANARY_MAX_ROWS || 1) || 1),
-    ),
+    catalogCanaryMaxRows: 1,
     runtimeWriteGateEnabled,
     inventoryAutostartConfigured,
     inventoryAutostartEnabled: runtimeWriteGateEnabled && inventoryAutostartConfigured,
