@@ -80,6 +80,10 @@ function runtimeWritesEnabled() {
   return envFlag("SYNC_RUNTIME_WRITE_ENABLED");
 }
 
+function pricingRuleSeedEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_PRICING_RULE_SEED_ENABLED");
+}
+
 function jobRecoveryEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_JOB_RECOVERY_ENABLED");
 }
@@ -249,7 +253,6 @@ async function startServer() {
     console.log(`Server running at http://${HOST}:${PORT}`);
     console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
-    void seedDefaultPricingRules();
 
     if (!runtimeWritesEnabled()) {
       console.log(
@@ -259,6 +262,13 @@ async function startServer() {
     }
 
     console.warn("Runtime sync writes ENABLED by SYNC_RUNTIME_WRITE_ENABLED=true");
+
+    if (pricingRuleSeedEnabled()) {
+      console.warn("Default pricing-rule seed ENABLED");
+      void seedDefaultPricingRules();
+    } else {
+      console.log("Default pricing-rule seed disabled by SYNC_PRICING_RULE_SEED_ENABLED=false");
+    }
 
     if (jobRecoveryEnabled()) {
       console.warn("Interrupted-job recovery ENABLED");
