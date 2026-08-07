@@ -298,16 +298,27 @@ async function main() {
         `Catalog dry run is not canary-ready: ambiguous=${ambiguous}, errors=${errors}. Resolve source matching or fetch failures first.`,
       );
     }
+    if (verified !== 1 || missing !== 0) {
+      throw new Error(
+        `Catalog dry run must prove one existing Shopify product before canary: verified=${verified}, missing=${missing}.`,
+      );
+    }
     if (verified + missing !== processed) {
       throw new Error(
         `Catalog dry run counters are inconsistent: verified(${verified}) + missing(${missing}) must equal processed(${processed}) when ambiguous/errors are zero.`,
       );
     }
 
+    const dryRunBatchId = String(dryRun.body.batchId || "").trim();
+    if (!dryRunBatchId) {
+      throw new Error("Catalog dry run did not return a persisted batchId required for canary provenance.");
+    }
+
     assertBlockedSourcesAreNotOutOfStock(dryRun.body, "catalogDryRun");
     report.sourceClassificationSafety = "verified";
     report.catalogDryRun = {
       status: dryRun.response.status,
+      batchId: dryRunBatchId,
       uniqueProductsProcessed: processed,
       verified,
       missing,
@@ -315,6 +326,7 @@ async function main() {
       errors,
       dryRun: summary.dryRun,
       writeSheet: summary.writeSheet,
+      canaryPreconditionHeader: "x-catalog-audit-dry-run-batch-id",
     };
   }
 
