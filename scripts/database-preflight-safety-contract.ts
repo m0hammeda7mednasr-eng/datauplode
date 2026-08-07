@@ -17,7 +17,14 @@ const requiredColumnsMatch = preflight.match(
 assert(requiredColumnsMatch, "REQUIRED_COLUMNS declaration is missing or unreadable.");
 
 const requiredColumnsBody = requiredColumnsMatch[1];
-const tableEntries = [...requiredColumnsBody.matchAll(/\n\s{2}([A-Za-z][A-Za-z0-9_]*)\s*:\s*\[([\s\S]*?)\n\s{2}\],?/g)];
+// Accept both compact one-line arrays and formatted multi-line arrays. The former
+// is used by SyncJob today; requiring a newline before `]` made the parser consume
+// following tables and report false duplicate columns.
+const tableEntries = [
+  ...requiredColumnsBody.matchAll(
+    /(?:^|\n)\s{2}([A-Za-z][A-Za-z0-9_]*)\s*:\s*\[([\s\S]*?)\],/g,
+  ),
+];
 assert(tableEntries.length > 0, "No required table definitions were found.");
 
 const required = new Map<string, string[]>();
@@ -28,6 +35,7 @@ for (const entry of tableEntries) {
   );
   assert(columns.length > 0, `${table} has no required columns.`);
   assert(new Set(columns).size === columns.length, `${table} contains duplicate required columns.`);
+  assert(!required.has(table), `${table} is defined more than once in REQUIRED_COLUMNS.`);
   required.set(table, columns);
 }
 
