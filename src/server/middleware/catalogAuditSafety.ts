@@ -11,12 +11,6 @@ function safeEqual(left: string, right: string) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.max(minimum, Math.min(maximum, Math.floor(numeric)));
-}
-
 export function catalogAuditSafety(req: Request, res: Response, next: NextFunction) {
   if (req.method !== "POST" || req.path !== "/catalog-audit/run") {
     return next();
@@ -42,15 +36,20 @@ export function catalogAuditSafety(req: Request, res: Response, next: NextFuncti
     });
   }
 
-  // Canary mode defaults to exactly one product. It may be raised deliberately,
-  // but remains hard-capped to five products until the live read-back process is proven.
-  const canaryMaxRows = boundedInteger(
-    process.env.CATALOG_AUDIT_CANARY_MAX_ROWS,
-    1,
-    1,
-    5,
-  );
-  const requestedRows = boundedInteger(req.body?.maxRows, 1, 1, canaryMaxRows);
+  // The first live Shopify write is a strict single-product canary. Do not make this
+  // configurable: broad writes remain unavailable until the canary and read-back have
+  // succeeded and a separate, deliberate production rollout mechanism is implemented.
+  const suppliedMaxRows = req.body?.maxRows;
+  if (suppliedMaxRows !== undefined && suppliedMaxRows !== null) {
+    const numericMaxRows = Number(suppliedMaxRows);
+    if (!Number.isSafeInteger(numericMaxRows) || numericMaxRows !== 1) {
+      return res.status(400).json({
+        success: false,
+        code: "CATALOG_AUDIT_CANARY_REQUIRES_ONE_PRODUCT",
+        error: "Shopify canary write mode requires maxRows=1 exactly.",
+      });
+    }
+  }
 
   // Google Sheet writes are an independent side effect. A Shopify canary must not
   // alter the sheet unless this second gate is explicitly enabled.
@@ -61,10 +60,10 @@ export function catalogAuditSafety(req: Request, res: Response, next: NextFuncti
     ...req.body,
     dryRun: false,
     writeSheet,
-    maxRows: requestedRows,
+    maxRows: 1,
   };
   res.setHeader("X-Catalog-Audit-Mode", "canary-write");
-  res.setHeader("X-Catalog-Audit-Max-Rows", String(req.body.maxRows));
+  res.setHeader("X-Catalog-Audit-Max-Rows", "1");
   res.setHeader("X-Catalog-Audit-Sheet-Write", writeSheet ? "enabled" : "disabled");
   return next();
 }
