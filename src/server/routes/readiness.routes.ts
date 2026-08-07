@@ -47,12 +47,20 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
   }
 }
 
+function isSupabaseHost(host: string) {
+  const normalizedHost = host.trim().toLowerCase().replace(/\.$/, "");
+  return (
+    normalizedHost.endsWith(".supabase.com") ||
+    normalizedHost.endsWith(".supabase.co")
+  );
+}
+
 function databaseTarget() {
   const value = String(process.env.DATABASE_URL || "").trim();
   if (!value) return "missing";
   try {
     const url = new URL(value);
-    if (url.hostname.includes("supabase")) return "supabase";
+    if (isSupabaseHost(url.hostname)) return "supabase";
     return "configured";
   } catch {
     return "invalid";
