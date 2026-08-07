@@ -73,6 +73,30 @@ const assertions: Array<[string, boolean]> = [
     /dryRun:\s*true/.test(smoke) && /writeSheet:\s*false/.test(smoke) && /maxRows:\s*1/.test(smoke),
   ],
   [
+    "dry-run counters are mandatory rather than defaulting to zero",
+    /uniqueProductsProcessed \?\? Number\.NaN/.test(smoke) &&
+      /summary\.verified \?\? Number\.NaN/.test(smoke) &&
+      /summary\.missing \?\? Number\.NaN/.test(smoke) &&
+      /summary\.ambiguous \?\? Number\.NaN/.test(smoke) &&
+      /summary\.errors \?\? Number\.NaN/.test(smoke),
+  ],
+  [
+    "production smoke requires exactly one audited product",
+    /processed !== 1/.test(smoke) && /requires exactly one product to be audited before canary/.test(smoke),
+  ],
+  [
+    "production smoke blocks ambiguous and errored audits",
+    /ambiguous !== 0 \|\| errors !== 0/.test(smoke) && /is not canary-ready/.test(smoke),
+  ],
+  [
+    "production smoke validates terminal audit counters",
+    /verified \+ missing !== processed/.test(smoke) && /must equal processed/.test(smoke),
+  ],
+  [
+    "production smoke rejects invalid or negative counters",
+    /Number\.isSafeInteger\(value\)/.test(smoke) && /value < 0/.test(smoke),
+  ],
+  [
     "HTTP 403 remains blocked or unknown rather than out-of-stock",
     /HTTP 403 must remain blocked\/unknown, never out-of-stock/.test(smoke),
   ],
