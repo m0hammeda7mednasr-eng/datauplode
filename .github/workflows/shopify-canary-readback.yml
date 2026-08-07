@@ -30,7 +30,7 @@ jobs:
       CANARY_SHOPIFY_PRODUCT_ID: ${{ inputs.product_id }}
       CANARY_EXPECTED_VARIANTS_JSON: ${{ inputs.expected_variants_json }}
       CANARY_READBACK_TIMEOUT_MS: "30000"
-      CANARY_READBACK_MAX_RETRIES: "2"
+      CANARY_READBACK_RETRIES: "2"
 
     steps:
       - name: Checkout requested revision
