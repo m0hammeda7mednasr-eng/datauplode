@@ -36,7 +36,7 @@ const checks: Array<[string, boolean]> = [
   [
     "canary remains isolated from Google Sheet writes",
     source.includes("const writeSheet = false") &&
-      source.includes('X-Catalog-Audit-Sheet-Write\", \"disabled'),
+      source.includes('X-Catalog-Audit-Sheet-Write", "disabled'),
   ],
   [
     "production canary requires a persisted dry-run batch",
