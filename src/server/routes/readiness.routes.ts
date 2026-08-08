@@ -193,6 +193,9 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
+  const jobRecoveryShopifyWritesConfigured = enabled(
+    "SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED",
+  );
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
   const catalogAuditDryRunConfigured = enabled("CATALOG_AUDIT_DRY_RUN");
   const databaseTimeoutMs = readinessTimeoutMs();
@@ -222,7 +225,11 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     inventoryAutostartConfigured,
     inventoryAutostartEnabled: runtimeWriteGateEnabled && inventoryAutostartConfigured,
     jobRecoveryConfigured,
-    jobRecoveryEnabled: runtimeWriteGateEnabled && jobRecoveryConfigured,
+    jobRecoveryShopifyWritesConfigured,
+    jobRecoveryEnabled:
+      runtimeWriteGateEnabled &&
+      jobRecoveryConfigured &&
+      jobRecoveryShopifyWritesConfigured,
     sheetImportAutostartConfigured,
     sheetImportAutostartEnabled:
       runtimeWriteGateEnabled && sheetImportAutostartConfigured,
@@ -243,6 +250,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     !runtimeWriteGateEnabled &&
     !inventoryAutostartConfigured &&
     !jobRecoveryConfigured &&
+    !jobRecoveryShopifyWritesConfigured &&
     !sheetImportAutostartConfigured &&
     !configuration.catalogWriteGateEnabled &&
     !configuration.catalogSheetWriteGateEnabled &&
