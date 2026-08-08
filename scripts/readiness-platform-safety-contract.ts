@@ -99,6 +99,39 @@ const checks: Array<[string, boolean]> = [
     "readiness declares safe mode mandatory in production",
     source.includes("safeModeRequired: productionEnvironment"),
   ],
+  [
+    "readiness inspects a bounded recent catalog audit window",
+    source.includes("prisma.importBatch.findMany") &&
+      source.includes('where: { target: "catalog_audit" }') &&
+      source.includes("take: 10"),
+  ],
+  [
+    "rollout monitoring distinguishes dry run from canary",
+    source.includes("latestDryRun") &&
+      source.includes("latestCanary") &&
+      source.includes("run?.dryRun === true") &&
+      source.includes("run?.dryRun === false"),
+  ],
+  [
+    "rollout monitoring only marks a strict one-product clean dry run as canary ready",
+    source.includes("isCanaryReadyDryRun") &&
+      source.includes('run.status === "COMPLETED"') &&
+      source.includes("run.uniqueProductsProcessed === 1") &&
+      source.includes("run.verified === 1") &&
+      source.includes("run.missing === 0") &&
+      source.includes("run.ambiguous === 0") &&
+      source.includes("run.errors === 0"),
+  ],
+  [
+    "rollout readiness never treats sheet-writing runs as canary-ready dry runs",
+    source.includes("run.writeSheet === false"),
+  ],
+  [
+    "database failure response exposes an explicitly non-ready rollout state",
+    source.includes("latestDryRunCanaryReady: false") &&
+      source.includes("latestDryRun: null") &&
+      source.includes("latestCanary: null"),
+  ],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
