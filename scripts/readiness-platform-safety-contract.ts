@@ -132,6 +132,27 @@ const checks: Array<[string, boolean]> = [
       source.includes("latestDryRun: null") &&
       source.includes("latestCanary: null"),
   ],
+  [
+    "readiness uses the same canary dry-run freshness configuration as the canary gate",
+    source.includes("CATALOG_AUDIT_CANARY_DRY_RUN_MAX_AGE_MINUTES || 30") &&
+      source.includes("Math.min(120, Math.max(1, Math.floor(parsed)))"),
+  ],
+  [
+    "stale dry runs cannot be reported as canary ready",
+    source.includes("ageMinutes <= maxAgeMinutes") &&
+      source.includes("isCanaryReadyDryRun(latestDryRun, canaryDryRunMaxAge)"),
+  ],
+  [
+    "readiness exposes dry-run age and expiry for rollout monitoring",
+    source.includes("latestDryRunAgeMinutes") &&
+      source.includes("latestDryRunMaxAgeMinutes: canaryDryRunMaxAge") &&
+      source.includes("latestDryRunExpired"),
+  ],
+  [
+    "database failure response does not fabricate fresh dry-run state",
+    source.includes("latestDryRunAgeMinutes: null") &&
+      source.includes("latestDryRunExpired: false"),
+  ],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
