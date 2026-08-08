@@ -1,0 +1,122 @@
+name: Import sheet 1 canary into Linked Products
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/import-sheet1-canary.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-sheet1-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+
+      - name: Health check and import one known-good row
+        env:
+          BASE_URL: https://datauplode-production.up.railway.app
+          SHEET_URL: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p .import-status
+
+          health_file=$(mktemp)
+          health_code=$(curl --silent --show-error \
+            --connect-timeout 20 --max-time 60 \
+            --retry 4 --retry-delay 4 --retry-all-errors \
+            -o "$health_file" -w "%{http_code}" \
+            "$BASE_URL/api/health" || true)
+          health_body=$(cat "$health_file")
+          rm -f "$health_file"
+
+          if [ "$health_code" -lt 200 ] || [ "$health_code" -ge 300 ]; then
+            HEALTH_CODE="$health_code" HEALTH_BODY="$health_body" python3 - <<'PY'
+import json, os
+from datetime import datetime, timezone
+with open('.import-status/sheet1-canary.json','w',encoding='utf-8') as f:
+    json.dump({
+      'status':'failed',
+      'stage':'health',
+      'httpCode':os.environ.get('HEALTH_CODE'),
+      'response':os.environ.get('HEALTH_BODY'),
+      'updatedAt':datetime.now(timezone.utc).isoformat(),
+    }, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+          else
+            payload=$(python3 - <<'PY'
+import json
+print(json.dumps({
+  'sheetUrl': 'https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0',
+  'rowNumbers': [3],
+  'createManualReview': True,
+  'processOnlyNewRows': False,
+  'waitForPublishCompletion': True,
+}, ensure_ascii=False))
+PY
+            )
+
+            response_file=$(mktemp)
+            http_code=$(curl --silent --show-error \
+              --connect-timeout 20 --max-time 900 \
+              --retry 2 --retry-delay 5 --retry-all-errors \
+              -o "$response_file" -w "%{http_code}" \
+              -X POST "$BASE_URL/api/imports/excel/process-sheet-link" \
+              -H "Content-Type: application/json" \
+              --data "$payload" || true)
+            response_body=$(cat "$response_file")
+            rm -f "$response_file"
+
+            HTTP_CODE="$http_code" RESPONSE_BODY="$response_body" HEALTH_BODY="$health_body" python3 - <<'PY'
+import json, os
+from datetime import datetime, timezone
+raw = os.environ.get('RESPONSE_BODY','')
+try:
+    parsed = json.loads(raw) if raw else None
+except Exception:
+    parsed = {'raw': raw[:10000]}
+code = int(os.environ.get('HTTP_CODE') or 0)
+status = 'completed' if 200 <= code < 300 else 'failed'
+with open('.import-status/sheet1-canary.json','w',encoding='utf-8') as f:
+    json.dump({
+      'status': status,
+      'stage': 'import',
+      'sheet': 'الورقة1',
+      'gid': 0,
+      'rows': [3],
+      'httpCode': code,
+      'health': os.environ.get('HEALTH_BODY'),
+      'response': parsed,
+      'updatedAt': datetime.now(timezone.utc).isoformat(),
+    }, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+          fi
+
+          git add .import-status/sheet1-canary.json
+          git commit -m "Record sheet 1 canary import result [skip ci]" || true
+          git push origin HEAD:stabilize-supabase-railway
+
+          test "$health_code" -ge 200 && test "$health_code" -lt 300
+          if [ "${http_code:-0}" -lt 200 ] || [ "${http_code:-0}" -ge 300 ]; then
+            exit 1
+          fi
