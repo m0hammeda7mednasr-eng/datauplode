@@ -6,6 +6,7 @@ const baseUrl = String(process.env.BASE_URL || '').replace(/\/$/, '');
 const writeToken = String(process.env.WRITE_TOKEN || '');
 const revision = String(process.env.EXPECTED_REVISION || '').toLowerCase();
 const confirmation = String(process.env.RUN_CONFIRMATION || '2026-08-09-sheet1-reconcile-v1');
+const allowFullReconcile = String(process.env.ALLOW_FULL_RECONCILE || '').toLowerCase() === 'true';
 const sheetCsv = String(process.env.SHEET_CSV || 'https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/export?format=csv&gid=0');
 const issueTitle = 'Sheet1 live reconcile status';
 
@@ -220,6 +221,10 @@ async function runCanary(canary) {
 }
 
 async function runFull(plan) {
+  if (!allowFullReconcile) {
+    throw new Error('Broad Sheet 1 reconcile is blocked: ALLOW_FULL_RECONCILE must be explicitly true.');
+  }
+
   const totals = {
     batches: 0, units: 0, rows: 0, verified: 0,
     missing: 0, ambiguous: 0, conflicts: 0, errors: 0, sheetCells: 0,
@@ -229,36 +234,30 @@ async function runFull(plan) {
   for (let index = 0; index < plan.batches.length; index += 1) {
     const batch = plan.batches[index];
     const rowNumbers = batch.flatMap((group) => group.rows);
-    let response = null;
-    let lastError = '';
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        response = await requestJson('/api/sheet1-reconcile/run', {
-          method: 'POST',
-          body: { dryRun: false, writeSheet: true, rowNumbers: rowNumbers },
-          write: true,
-          timeoutMs: 900000,
-        });
-        break;
-      } catch (error) {
-        lastError = String(error?.message || error);
-        if (attempt < 2) await sleep(5000);
-      }
+    let response;
+    try {
+      response = await requestJson('/api/sheet1-reconcile/run', {
+        method: 'POST',
+        body: { dryRun: false, writeSheet: true, rowNumbers },
+        write: true,
+        timeoutMs: 900000,
+      });
+    } catch (error) {
+      const message = String(error?.message || error);
+      throw new Error(
+        `Broad reconcile batch ${index + 1} has an uncertain mutation outcome; automatic retry is disabled. ` +
+        `Stop and verify persisted/Shopify/Sheet read-back before any manual recovery. ${message}`,
+      );
     }
 
-    if (!response) {
-      totals.errors += batch.length;
-      issues.push({ batch: index + 1, transportError: lastError, rowNumbers });
-    } else {
-      const s = response.summary || {};
-      totals.batches += 1;
-      totals.units += Number(s.unitsProcessed || 0);
-      totals.rows += Number(s.rowsProcessed || 0);
-      for (const key of ['verified', 'missing', 'ambiguous', 'conflicts', 'errors']) totals[key] += Number(s[key] || 0);
-      totals.sheetCells += Number(s?.sheetWrite?.cellsWritten || 0);
-      for (const result of response.results || []) {
-        if (result.status !== 'verified') issues.push({ batch: index + 1, ...result });
-      }
+    const s = response.summary || {};
+    totals.batches += 1;
+    totals.units += Number(s.unitsProcessed || 0);
+    totals.rows += Number(s.rowsProcessed || 0);
+    for (const key of ['verified', 'missing', 'ambiguous', 'conflicts', 'errors']) totals[key] += Number(s[key] || 0);
+    totals.sheetCells += Number(s?.sheetWrite?.cellsWritten || 0);
+    for (const result of response.results || []) {
+      if (result.status !== 'verified') issues.push({ batch: index + 1, ...result });
     }
 
     if (index === 0 || (index + 1) % 5 === 0 || index + 1 === plan.batches.length) {
