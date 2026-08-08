@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express from "express";
+import express, { type Request, type Response } from "express";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -27,6 +27,9 @@ import cors from "cors";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const startedAt = new Date();
+const SAFE_SHEET1_SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
+const SAFE_SHEET1_URL = `https://docs.google.com/spreadsheets/d/${SAFE_SHEET1_SPREADSHEET_ID}/edit?gid=0`;
+const SAFE_SHEET1_MARKER_TYPE = "ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1";
 
 function normalizeOrigin(value?: string | null) {
   if (!value) return null;
@@ -115,6 +118,94 @@ function isDatabaseUnavailableError(error: any) {
     message.includes("URL must start with `postgresql://` or `postgres://`") ||
     message.includes("Environment variable not found: DATABASE_URL")
   );
+}
+
+function spreadsheetIdFromInput(value: unknown) {
+  const raw = String(value || "").trim();
+  if (raw === SAFE_SHEET1_SPREADSHEET_ID) return raw;
+  const match = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return match?.[1] || "";
+}
+
+function parseJsonObject(value: string | null | undefined) {
+  if (!value) return {} as Record<string, any>;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {} as Record<string, any>;
+  }
+}
+
+async function safeSheet1WorkerSnapshot() {
+  const job = await prisma.syncJob.findFirst({
+    where: { type: SAFE_SHEET1_MARKER_TYPE },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!job) {
+    return {
+      running: true,
+      jobId: null,
+      status: "starting",
+      stage: "starting",
+      progress: 0,
+      total: 0,
+      verified: 0,
+      errors: 0,
+      missing: 0,
+      ambiguous: 0,
+      conflicts: 0,
+    };
+  }
+
+  const result = parseJsonObject(job.result);
+  const totals = result.totals || {};
+  return {
+    running: job.status === "running" || job.status === "pending",
+    jobId: job.id,
+    status: job.status,
+    stage: result.stage || "starting",
+    progress: Number(result.batch ?? totals.attempted ?? 0) || 0,
+    total: Number(result.totalBatches ?? result.planGroups ?? 0) || 0,
+    verified: Number(totals.verified ?? result.verified ?? 0) || 0,
+    errors: Number(totals.errors ?? result.errors ?? 0) || 0,
+    missing: Number(totals.missing ?? result.missingMappings ?? 0) || 0,
+    ambiguous: Number(totals.ambiguous ?? result.ambiguous ?? 0) || 0,
+    conflicts: Number(totals.conflicts ?? result.multiplierConflicts ?? 0) || 0,
+  };
+}
+
+async function handleLegacySheet1Action(req: Request, res: Response) {
+  const suppliedId = spreadsheetIdFromInput(req.body?.sheetUrl);
+  if (suppliedId && suppliedId !== SAFE_SHEET1_SPREADSHEET_ID) {
+    return res.status(400).json({
+      success: false,
+      safeMode: true,
+      code: "SAFE_SHEET1_ONLY",
+      error: "This production control is locked to the configured Sheet 1 spreadsheet. The unsafe legacy bulk importer was not started.",
+    });
+  }
+
+  const worker = await safeSheet1WorkerSnapshot();
+  return res.json({
+    success: true,
+    safeMode: true,
+    mode: "continuous_existing_products_only",
+    createProducts: false,
+    rebuildProducts: false,
+    sheetUrl: SAFE_SHEET1_URL,
+    message: "Safe continuous Sheet 1 worker is active. Legacy bulk import was bypassed to prevent duplicate products.",
+    worker,
+    summary: {
+      total: worker.total,
+      published: 0,
+      syncedExisting: worker.verified,
+      skipped: worker.missing + worker.ambiguous + worker.conflicts,
+      failed: worker.errors,
+      processedRows: worker.progress,
+      manualReviewCreated: 0,
+    },
+  });
 }
 
 async function seedDefaultPricingRules() {
@@ -235,6 +326,13 @@ async function startServer() {
   app.use("/api", catalogAuditSafety);
   app.use("/api", catalogAuditRouter);
   app.use("/api", sheet1ReconcileRouter);
+
+  // The current frontend still calls these legacy sheet endpoints. Intercept
+  // the dangerous write actions before apiRouter so a UI click can never fall
+  // through to the old bulk importer that previously created a duplicate.
+  app.post("/api/imports/excel/process-sheet-link", handleLegacySheet1Action);
+  app.post("/api/imports/excel/auto-sync/start", handleLegacySheet1Action);
+
   app.use("/api", apiRouter);
 
   console.log("✅ API routes mounted");
@@ -290,8 +388,8 @@ async function startServer() {
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
 
     // A fresh Railway process first takes over any marker left running by the
-    // process that was terminated during the deploy. The one-time runner then
-    // starts after its 20s delay and safely resumes from a fresh Sheet snapshot.
+    // process that was terminated during the deploy. The continuous worker then
+    // starts after its delay and safely resumes from verified Sheet rows.
     void prepareSheet1ReconcileDeploymentTakeover().finally(() => {
       startOneTimeSheet1Reconcile(PORT);
     });
