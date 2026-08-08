@@ -1,0 +1,33 @@
+name: Diagnose Sheet 1 Reconcile
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+    paths:
+      - .github/workflows/sheet1-reconcile-diagnostics.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe live reconcile dry-run
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://datauplode-production.up.railway.app'
+          for row in 5 6 7 8 465 466 467 468; do
+            echo "===== ROW $row ====="
+            code=$(curl --silent --show-error --max-time 300 \
+              --output "row-${row}.json" --write-out '%{http_code}' \
+              --header 'content-type: application/json' \
+              --data "{\"dryRun\":true,\"writeSheet\":false,\"rowNumbers\":[${row}]}" \
+              "$BASE/api/sheet1-reconcile/run" || true)
+            echo "HTTP $code"
+            cat "row-${row}.json" || true
+            echo
+          done
