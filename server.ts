@@ -95,7 +95,7 @@ function jobRecoveryShopifyWritesEnabled() {
 function jobRecoveryEnabled() {
   return (
     runtimeWritesEnabled() &&
-    jobRecoveryConfigured() &&
+    envFlag("SYNC_JOB_RECOVERY_ENABLED") &&
     jobRecoveryShopifyWritesEnabled()
   );
 }
