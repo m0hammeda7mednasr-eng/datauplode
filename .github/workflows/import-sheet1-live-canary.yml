@@ -1,4 +1,4 @@
-name: Live sheet 1 linked-product canary
+name: Live sheet 1 full catalog audit
 
 on:
   push:
@@ -12,75 +12,224 @@ permissions:
   contents: write
 
 concurrency:
-  group: live-sheet1-linked-product-canary
+  group: live-sheet1-full-catalog-audit
   cancel-in-progress: false
 
 jobs:
-  canary:
+  full-audit:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-sheet1-full]')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 360
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
 
-      - name: Call live Railway import endpoint
+      - name: Run full live Sheet 1 audit with checkpoints
         env:
           BASE_URL: https://datauplode-production.up.railway.app
           SHEET_URL: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0
+          STATUS_FILE: .import-status/sheet1-live-full-audit.json
+          BATCH_SIZE: '40'
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p .import-status
 
-          health_file=$(mktemp)
-          health_code=$(curl --silent --show-error --connect-timeout 20 --max-time 60 \
-            --retry 3 --retry-delay 3 --retry-all-errors \
-            -o "$health_file" -w "%{http_code}" "$BASE_URL/api/health" || true)
-          health_body=$(cat "$health_file")
-          rm -f "$health_file"
-
-          payload='{"sheetUrl":"https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0","rowNumbers":[3],"createManualReview":true,"processOnlyNewRows":false,"waitForPublishCompletion":false}'
-          response_file=$(mktemp)
-          http_code=$(curl --silent --show-error --connect-timeout 20 --max-time 240 \
-            --retry 2 --retry-delay 4 --retry-all-errors \
-            -o "$response_file" -w "%{http_code}" \
-            -X POST "$BASE_URL/api/imports/excel/process-sheet-link" \
-            -H "Content-Type: application/json" \
-            --data "$payload" || true)
-          response_body=$(cat "$response_file")
-          rm -f "$response_file"
-
-          HEALTH_CODE="$health_code" HEALTH_BODY="$health_body" HTTP_CODE="$http_code" RESPONSE_BODY="$response_body" python3 - <<'PY'
-import json, os
+          python3 - <<'PY'
+import json
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
-raw = os.environ.get('RESPONSE_BODY','')
-try:
-    parsed = json.loads(raw) if raw else None
-except Exception:
-    parsed = {'raw': raw[:12000]}
-result = {
-  'status': 'completed' if 200 <= int(os.environ.get('HTTP_CODE') or 0) < 300 else 'failed',
-  'sheet': 'الورقة1',
-  'gid': 0,
-  'rows': [3],
-  'healthHttpCode': int(os.environ.get('HEALTH_CODE') or 0),
-  'health': os.environ.get('HEALTH_BODY'),
-  'importHttpCode': int(os.environ.get('HTTP_CODE') or 0),
-  'response': parsed,
-  'updatedAt': datetime.now(timezone.utc).isoformat(),
+
+BASE_URL = os.environ['BASE_URL'].rstrip('/')
+SHEET_URL = os.environ['SHEET_URL']
+STATUS_FILE = os.environ['STATUS_FILE']
+BATCH_SIZE = max(1, int(os.environ.get('BATCH_SIZE', '40')))
+
+status = {
+    'state': 'starting',
+    'mode': 'existing_products_only',
+    'sheet': 'الورقة1',
+    'gid': 0,
+    'spreadsheetUrl': SHEET_URL,
+    'batchSize': BATCH_SIZE,
+    'offset': 0,
+    'batchesCompleted': 0,
+    'totals': {
+        'rowsMarked': 0,
+        'verified': 0,
+        'missing': 0,
+        'ambiguous': 0,
+        'errors': 0,
+    },
+    'batches': [],
+    'startedAt': datetime.now(timezone.utc).isoformat(),
+    'updatedAt': datetime.now(timezone.utc).isoformat(),
 }
-with open('.import-status/sheet1-live-canary.json','w',encoding='utf-8') as f:
-    json.dump(result, f, ensure_ascii=False, indent=2)
-    f.write('\n')
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def save_status():
+    status['updatedAt'] = now()
+    with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(status, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+
+
+def checkpoint(label):
+    save_status()
+    subprocess.run(['git', 'add', STATUS_FILE], check=False)
+    subprocess.run(['git', 'commit', '-m', f'status: sheet1 audit {label} [skip ci]'], check=False)
+    subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=False)
+
+
+def http_json(method, path, payload=None, timeout=300, retries=3):
+    data = None
+    headers = {'Accept': 'application/json'}
+    if payload is not None:
+        data = json.dumps(payload).encode('utf-8')
+        headers['Content-Type'] = 'application/json'
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(
+                f'{BASE_URL}{path}',
+                data=data,
+                headers=headers,
+                method=method,
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                raw = response.read().decode('utf-8', errors='replace')
+                parsed = json.loads(raw) if raw else {}
+                return response.status, parsed
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    body = exc.read().decode('utf-8', errors='replace')
+                    last_error = RuntimeError(f'HTTP {exc.code}: {body[:4000]}')
+                except Exception:
+                    pass
+            if attempt < retries:
+                time.sleep(4 * attempt)
+    raise RuntimeError(str(last_error or 'unknown HTTP error'))
+
+
+# Prove the production backend is alive before touching catalog data.
+try:
+    health_code, health = http_json('GET', '/api/health', timeout=60, retries=4)
+    status['health'] = {'httpCode': health_code, 'body': health}
+    status['state'] = 'running'
+    checkpoint('started')
+except Exception as exc:
+    status['state'] = 'failed_health'
+    status['fatalError'] = str(exc)
+    checkpoint('health-failed')
+    raise
+
+sheet_cfg = {
+    'name': 'الورقة1',
+    'gid': 0,
+    'sheetId': 0,
+    'columnCount': 4,
+}
+
+offset = 0
+consecutive_errors = 0
+batch_index = 0
+
+while True:
+    batch_index += 1
+    payload = {
+        'spreadsheetUrl': SHEET_URL,
+        'sheets': [sheet_cfg],
+        'dryRun': False,
+        'writeSheet': True,
+        'offset': offset,
+        'maxRows': BATCH_SIZE,
+    }
+    started = now()
+    try:
+        http_code, response = http_json(
+            'POST',
+            '/api/catalog-audit/run',
+            payload=payload,
+            timeout=480,
+            retries=3,
+        )
+        summary = response.get('summary') or {}
+        batch = {
+            'index': batch_index,
+            'offset': offset,
+            'httpCode': http_code,
+            'batchId': response.get('batchId'),
+            'startedAt': started,
+            'completedAt': now(),
+            'summary': summary,
+        }
+        status['batches'].append(batch)
+        status['batchesCompleted'] = batch_index
+        for key in ('rowsMarked', 'verified', 'missing', 'ambiguous', 'errors'):
+            status['totals'][key] += int(summary.get(key) or 0)
+
+        consecutive_errors = 0
+        next_offset = int(summary.get('nextOffset') or (offset + BATCH_SIZE))
+        has_more = bool(summary.get('hasMore'))
+        status['offset'] = next_offset
+        status['lastBatch'] = batch
+
+        if batch_index == 1 or batch_index % 5 == 0 or not has_more:
+            checkpoint(f'batch-{batch_index}')
+
+        if not has_more:
+            status['state'] = 'completed'
+            status['completedAt'] = now()
+            checkpoint('completed')
+            break
+
+        if next_offset <= offset:
+            raise RuntimeError(f'Audit returned non-advancing nextOffset={next_offset} at offset={offset}')
+        offset = next_offset
+        time.sleep(1.5)
+
+    except Exception as exc:
+        consecutive_errors += 1
+        failed_batch = {
+            'index': batch_index,
+            'offset': offset,
+            'startedAt': started,
+            'completedAt': now(),
+            'error': str(exc),
+        }
+        status['batches'].append(failed_batch)
+        status['lastBatch'] = failed_batch
+        status['totals']['errors'] += 1
+        checkpoint(f'error-{batch_index}')
+
+        if consecutive_errors >= 3:
+            status['state'] = 'failed_after_retries'
+            status['fatalError'] = f'3 consecutive batch failures; last error: {exc}'
+            status['completedAt'] = now()
+            checkpoint('failed')
+            raise
+
+        time.sleep(8 * consecutive_errors)
+        # Retry the same offset on the next loop.
+        batch_index -= 1
+
+print(json.dumps({
+    'state': status['state'],
+    'batchesCompleted': status['batchesCompleted'],
+    'totals': status['totals'],
+}, ensure_ascii=False))
 PY
-
-          git add .import-status/sheet1-live-canary.json
-          git commit -m "Record live sheet 1 canary result [skip ci]" || true
-          git push origin HEAD:main
-
-          test "$health_code" -ge 200 && test "$health_code" -lt 300
-          test "$http_code" -ge 200 && test "$http_code" -lt 300
