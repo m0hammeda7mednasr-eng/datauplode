@@ -1,0 +1,47 @@
+name: Watch Live Sheet 1 Reconcile
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - src/server/routes/sheet1-reconcile.routes.ts
+      - src/server/oneTimeSheet1Reconcile.ts
+      - server.ts
+      - scripts/watch-sheet1-reconcile.mjs
+      - .github/workflows/sheet1-railway-watch.yml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dabdoob-sheet1-railway-watch
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      EXPECTED_REVISION: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact production branch head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Watch Railway deployment and reconcile job
+        run: node scripts/watch-sheet1-reconcile.mjs
