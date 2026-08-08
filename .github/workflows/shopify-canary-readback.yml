@@ -31,6 +31,7 @@ jobs:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       SHOPIFY_API_VERSION: "2026-04"
+      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
       CANARY_EXPECTED_REVISION: ${{ inputs.canary_revision }}
       CANARY_SHOPIFY_PRODUCT_ID: ${{ inputs.product_id }}
       CANARY_EXPECTED_VARIANTS_JSON: ${{ inputs.expected_variants_json }}
@@ -82,6 +83,58 @@ jobs:
             echo "SHOPIFY_SHOP_DOMAIN must be a direct *.myshopify.com hostname." >&2
             exit 2
           fi
+          if [[ -z "${RAILWAY_SMOKE_BASE_URL}" ]]; then
+            echo "Missing RAILWAY_SMOKE_BASE_URL repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${RAILWAY_SMOKE_BASE_URL}" =~ ^https:// ]]; then
+            echo "RAILWAY_SMOKE_BASE_URL must use HTTPS." >&2
+            exit 2
+          fi
+
+      - name: Verify live Railway and Supabase provenance before Shopify read-back
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output railway-readiness.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('railway-readiness.json', 'utf8'));
+          const expected = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
+          const actual = String(body?.deployment?.revision || '').trim().toLowerCase();
+          const fail = (message) => { console.error(message); process.exit(2); };
+          if (body?.ok !== true) fail('Railway /api/ready is not ready; Shopify read-back is blocked.');
+          if (body?.database?.ok !== true) fail('Railway database readiness is not healthy; Shopify read-back is blocked.');
+          if (body?.database?.target !== 'supabase') fail(`Expected Supabase database target, received ${body?.database?.target ?? 'unknown'}.`);
+          if (body?.deployment?.revisionVerified !== true) fail('Railway deployment revision is not a verified full Git SHA.');
+          if (actual !== expected) fail(`Railway revision ${actual || '<unknown>'} does not match canary revision ${expected}.`);
+          if (body?.platform?.ready !== true) fail('Railway production platform is not ready.');
+          if (body?.platform?.writeSafetyReady !== true) fail('Railway write-safety readiness is not satisfied.');
+          if (body?.configuration?.safeMode !== true) fail('Railway is not reporting safe mode before read-back.');
+          const latestCanary = body?.rollout?.latestCanary;
+          if (!latestCanary) fail('No persisted catalog canary is visible in Supabase readiness.');
+          if (latestCanary.status !== 'COMPLETED') fail(`Latest canary status is ${latestCanary.status ?? 'unknown'}, not COMPLETED.`);
+          if (latestCanary.dryRun !== false) fail('Latest persisted canary is marked as dry-run.');
+          if (latestCanary.writeSheet !== false) fail('Latest persisted canary reports a Google Sheet write.');
+          if (Number(latestCanary.uniqueProductsProcessed) !== 1) fail('Latest persisted canary did not process exactly one product.');
+          if (Number(latestCanary.verified) !== 1 || Number(latestCanary.missing) !== 0 || Number(latestCanary.ambiguous) !== 0 || Number(latestCanary.errors) !== 0) {
+            fail('Latest persisted canary is not a clean one-product verification.');
+          }
+          console.log(JSON.stringify({
+            ok: true,
+            railwayRevision: actual,
+            databaseTarget: body.database.target,
+            writeSafetyReady: body.platform.writeSafetyReady,
+            persistedCanaryBatchId: latestCanary.id,
+            persistedCanaryStatus: latestCanary.status,
+            persistedCanaryProducts: latestCanary.uniqueProductsProcessed,
+            persistedCanaryVerified: latestCanary.verified,
+            shopifyMutations: 0,
+          }, null, 2));
+          NODE
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -106,6 +159,9 @@ jobs:
             echo "- Canary revision: \`${CANARY_EXPECTED_REVISION}\`"
             echo "- Checkout pinned to canary revision: \`true\`"
             echo "- Revision equality required before Shopify read-back: \`true\`"
+            echo "- Live Railway /api/ready verification required before Shopify read-back: \`true\`"
+            echo "- Live database target must be Supabase: \`true\`"
+            echo "- Persisted clean one-product canary must exist in readiness: \`true\`"
             echo "- Product: \`${CANARY_SHOPIFY_PRODUCT_ID}\`"
             echo "- Mode: read-only GraphQL query"
             echo "- Shopify mutations: \`0\`"
