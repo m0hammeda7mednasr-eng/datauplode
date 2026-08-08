@@ -52,6 +52,27 @@ const assertions: Array<[string, boolean]> = [
       !/^\s*(push|pull_request|schedule):/m.test(workflow),
   ],
   [
+    "existing-product audit workflow requires an exact revision input",
+    /audit_revision:\s*\n\s*description:/.test(workflow) &&
+      /AUDIT_REVISION:\s*\$\{\{ inputs\.audit_revision \}\}/.test(workflow) &&
+      /\^\[0-9a-fA-F\]\{40\}\$/.test(workflow),
+  ],
+  [
+    "existing-product audit checks out the requested revision explicitly",
+    /uses:\s*actions\/checkout@v4[\s\S]*?ref:\s*\$\{\{ inputs\.audit_revision \}\}/.test(workflow) &&
+      /fetch-depth:\s*1/.test(workflow),
+  ],
+  [
+    "existing-product audit verifies checkout SHA before Shopify access",
+    /actual_revision="\$\(git rev-parse HEAD\)"/.test(workflow) &&
+      /actual_revision.*expected_revision/.test(workflow) &&
+      /AUDIT_CHECKED_OUT_REVISION=/.test(workflow),
+  ],
+  [
+    "existing-product audit summary records requested and checked-out revisions",
+    /Requested revision:/.test(workflow) && /Checked-out revision:/.test(workflow),
+  ],
+  [
     "existing-product audit workflow has read-only repository permissions",
     /permissions:\s*\n\s*contents:\s*read/.test(workflow) && !/contents:\s*write/.test(workflow),
   ],
