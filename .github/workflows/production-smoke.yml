@@ -71,6 +71,75 @@ jobs:
           set -euo pipefail
           npm run smoke:production 2>&1 | tee production-smoke.log
 
+      - name: Verify explicit production safety telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${SMOKE_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output production-smoke-readiness.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('production-smoke-readiness.json', 'utf8'));
+          const expectedRevision = String(process.env.SMOKE_EXPECTED_REVISION || '').trim().toLowerCase();
+          const actualRevision = String(body?.deployment?.revision || '').trim().toLowerCase();
+          const fail = (message) => { console.error(message); process.exit(2); };
+
+          if (body?.ok !== true) fail('Production readiness must report ok=true before dry-run provenance is accepted.');
+          if (body?.database?.ok !== true) fail('Production database readiness is not healthy.');
+          if (body?.database?.target !== 'supabase') fail('Production database target must be Supabase.');
+          if (body?.database?.projectRefPinned !== true) fail('Supabase project ref is not explicitly pinned in production.');
+          if (body?.database?.projectRefMatched !== true) fail('Live DATABASE_URL does not match the pinned Supabase project ref.');
+          if (body?.deployment?.revisionVerified !== true || actualRevision !== expectedRevision) {
+            fail(`Live Railway revision ${actualRevision || '<unknown>'} does not match expected revision ${expectedRevision}.`);
+          }
+          if (body?.platform?.productionEnvironment !== true) fail('Smoke target is not reporting production environment.');
+          if (body?.platform?.writeSafetyReady !== true) fail('Production write-safety telemetry is not satisfied.');
+          if (body?.platform?.ready !== true) fail('Production platform readiness is not satisfied.');
+
+          const configuration = body?.configuration || {};
+          const mustBeFalse = [
+            'runtimeWriteGateEnabled',
+            'inventoryAutostartConfigured',
+            'inventoryAutostartEnabled',
+            'jobRecoveryConfigured',
+            'jobRecoveryShopifyWritesConfigured',
+            'jobRecoveryEnabled',
+            'sheetImportAutostartConfigured',
+            'sheetImportAutostartEnabled',
+            'catalogWriteGateEnabled',
+            'catalogSheetWriteGateEnabled',
+          ];
+          for (const key of mustBeFalse) {
+            if (configuration[key] !== false) fail(`Production smoke requires configuration.${key}=false.`);
+          }
+          if (configuration.catalogAuditDryRunConfigured !== true) fail('Catalog audit must remain configured for dry-run mode.');
+          if (Number(configuration.catalogCanaryMaxRows) !== 1) fail('Catalog canary max rows must be exactly 1.');
+
+          const jobs = body?.jobs || {};
+          for (const key of ['pending', 'running', 'staleRunning', 'recentFailed']) {
+            if (Number(jobs[key]) !== 0) fail(`Production smoke requires jobs.${key}=0, received ${String(jobs[key])}.`);
+          }
+
+          console.log(JSON.stringify({
+            ok: true,
+            revision: actualRevision,
+            databaseTarget: body.database.target,
+            projectRefPinned: body.database.projectRefPinned,
+            projectRefMatched: body.database.projectRefMatched,
+            writeSafetyReady: body.platform.writeSafetyReady,
+            jobRecoveryShopifyWritesConfigured: configuration.jobRecoveryShopifyWritesConfigured,
+            queue: {
+              pending: jobs.pending,
+              running: jobs.running,
+              staleRunning: jobs.staleRunning,
+              recentFailed: jobs.recentFailed,
+            },
+            shopifyMutations: 0,
+          }, null, 2));
+          NODE
+
       - name: Read back persisted dry run from Supabase readiness
         run: npx tsx scripts/production-smoke-dry-run-readback.ts production-smoke.log
 
@@ -84,6 +153,9 @@ jobs:
             echo "- Target source locked to repository secret \`RAILWAY_SMOKE_BASE_URL\`; workflow URL overrides are disabled."
             echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
             echo "- Checkout pinned and verified against the expected full Git SHA: \`true\`"
+            echo "- Exact Supabase project pin + live DATABASE_URL match required: \`true\`"
+            echo "- Explicit production write-safety telemetry required: \`true\`"
+            echo "- Recovered-job Shopify write gate must be closed: \`true\`"
             echo "- Catalog dry run required: \`true\`"
             echo "- Persisted dry-run read-back from live \`/api/ready\` required before canary: \`true\`"
             echo "- Read-back must match the exact dry-run batch ID and the exact deployed revision."
