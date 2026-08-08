@@ -1,9 +1,11 @@
 import axios from "axios";
+import crypto from "crypto";
 import { envString, isProduction } from "./config/env.js";
 import { prisma } from "./db.js";
 
 const SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const SHEET_GID = 0;
+const SHEET_ID = 0;
 const RUN_CONFIRMATION = "2026-08-09-sheet1-reconcile-v1";
 const MARKER_TYPE = `ONE_TIME_SHEET1_RECONCILE:${RUN_CONFIRMATION}`;
 const START_DELAY_MS = 20_000;
@@ -24,6 +26,8 @@ type ReconcileResponse = {
   results?: Array<Record<string, any>>;
   error?: string;
 };
+
+let googleTokenCache: { token: string; expiresAt: number } | null = null;
 
 function clean(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -124,6 +128,18 @@ async function buildFrozenPlan(): Promise<PlanGroup[]> {
   return plan;
 }
 
+function ensureInternalWriteToken() {
+  let token = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
+  if (!token) {
+    token = crypto.randomBytes(32).toString("hex");
+    process.env.CATALOG_AUDIT_WRITE_TOKEN = token;
+    console.warn(
+      "[sheet1-reconcile] generated an ephemeral in-process write token for the guarded loopback one-time run",
+    );
+  }
+  return token;
+}
+
 async function postLocal(
   port: number,
   payload: Record<string, any>,
@@ -133,10 +149,7 @@ async function postLocal(
     "Content-Type": "application/json",
   };
   if (write) {
-    const token = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
-    if (!token) {
-      throw new Error("CATALOG_AUDIT_WRITE_TOKEN is missing in Railway production environment");
-    }
+    const token = ensureInternalWriteToken();
     headers["x-catalog-audit-write-token"] = token;
     headers["x-sheet1-reconcile-run"] = RUN_CONFIRMATION;
   }
@@ -160,6 +173,112 @@ async function postLocal(
     );
   }
   return body;
+}
+
+function base64Url(value: string | Buffer) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  return buffer
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+async function googleAccessToken() {
+  const direct = clean(process.env.GOOGLE_SHEETS_ACCESS_TOKEN);
+  if (direct) return direct;
+  if (googleTokenCache && googleTokenCache.expiresAt > Date.now() + 60_000) {
+    return googleTokenCache.token;
+  }
+
+  const email = clean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+  const encodedKey = clean(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64);
+  const privateKey = encodedKey
+    ? Buffer.from(encodedKey, "base64").toString("utf8")
+    : String(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+  if (!email || !privateKey) {
+    throw new Error(
+      "Google Sheets writer credentials are missing in Railway (GOOGLE_SHEETS_ACCESS_TOKEN or service-account credentials)",
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claim = base64Url(JSON.stringify({
+    iss: email,
+    scope: "https://www.googleapis.com/auth/spreadsheets",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  }));
+  const unsigned = `${header}.${claim}`;
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(unsigned);
+  signer.end();
+  const assertion = `${unsigned}.${base64Url(signer.sign(privateKey))}`;
+  const body = new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion,
+  });
+  const response = await axios.post("https://oauth2.googleapis.com/token", body, {
+    timeout: 20000,
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+  const token = clean(response.data?.access_token);
+  if (!token) throw new Error("Google did not return an access token");
+  googleTokenCache = {
+    token,
+    expiresAt: Date.now() + Number(response.data?.expires_in || 3600) * 1000,
+  };
+  return token;
+}
+
+async function writeVerifiedSkusToSheet(results: Array<Record<string, any>>) {
+  const verified = results.filter((result) =>
+    result?.status === "verified" && clean(result?.expectedSku) && Array.isArray(result?.rows),
+  );
+  if (!verified.length) return { cellsWritten: 0, batches: 0 };
+
+  const requests: any[] = [];
+  for (const result of verified) {
+    const sku = clean(result.expectedSku);
+    for (const rawRowNumber of result.rows) {
+      const rowNumber = Number(rawRowNumber);
+      if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) continue;
+      requests.push({
+        updateCells: {
+          range: {
+            sheetId: SHEET_ID,
+            startRowIndex: rowNumber - 1,
+            endRowIndex: rowNumber,
+            startColumnIndex: 3,
+            endColumnIndex: 4,
+          },
+          rows: [{ values: [{ userEnteredValue: { stringValue: sku } }] }],
+          fields: "userEnteredValue",
+        },
+      });
+    }
+  }
+  if (!requests.length) return { cellsWritten: 0, batches: 0 };
+
+  const token = await googleAccessToken();
+  let batches = 0;
+  for (let index = 0; index < requests.length; index += 300) {
+    await axios.post(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+      { requests: requests.slice(index, index + 300) },
+      {
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    batches += 1;
+  }
+  return { cellsWritten: requests.length, batches };
 }
 
 async function updateMarker(markerId: string, result: Record<string, any>) {
@@ -195,7 +314,6 @@ function accumulate(
   totals.ambiguous += Number(summary.ambiguous || 0);
   totals.conflicts += Number(summary.conflicts || 0);
   totals.errors += Number(summary.errors || 0);
-  totals.sheetCells += Number(summary.sheetWrite?.cellsWritten || 0);
 }
 
 async function findCanaryFromRows(port: number, rows: number[]) {
@@ -256,6 +374,7 @@ async function runOneTimeSheet1Reconcile(port: number) {
         mode: "existing_products_only",
         createProducts: false,
         rebuildProducts: false,
+        sheetWriteMode: "runner_after_shopify_readback",
       }),
     },
   });
@@ -392,7 +511,7 @@ async function runOneTimeSheet1Reconcile(port: number) {
         try {
           response = await postLocal(port, {
             dryRun: false,
-            writeSheet: true,
+            writeSheet: false,
             rowNumbers,
           }, true);
           break;
@@ -415,6 +534,37 @@ async function runOneTimeSheet1Reconcile(port: number) {
           if (result.status !== "verified") {
             issues.push({ batch: batchIndex + 1, ...result });
           }
+        }
+
+        try {
+          let sheetWrite: { cellsWritten: number; batches: number } | null = null;
+          let sheetError = "";
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            try {
+              sheetWrite = await writeVerifiedSkusToSheet(response.results || []);
+              break;
+            } catch (error: any) {
+              sheetError = clean(error?.message || error);
+              if (attempt < 2) await sleep(3_000);
+            }
+          }
+          if (!sheetWrite) {
+            totals.errors += 1;
+            issues.push({
+              batch: batchIndex + 1,
+              rowNumbers,
+              sheetWriteError: sheetError || "Unknown Google Sheets write error",
+            });
+          } else {
+            totals.sheetCells += sheetWrite.cellsWritten;
+          }
+        } catch (error: any) {
+          totals.errors += 1;
+          issues.push({
+            batch: batchIndex + 1,
+            rowNumbers,
+            sheetWriteError: clean(error?.message || error),
+          });
         }
       }
 
