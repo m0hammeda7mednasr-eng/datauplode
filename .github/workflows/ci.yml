@@ -76,6 +76,9 @@ jobs:
       - name: Enforce production dry-run read-back safety contract
         run: npx tsx scripts/production-smoke-dry-run-readback-safety-contract.ts
 
+      - name: Enforce production one-product canary safety contract
+        run: npx tsx scripts/production-canary-safety-contract.ts
+
       - name: Enforce database preflight schema drift contract
         run: npx tsx scripts/database-preflight-safety-contract.ts
 
