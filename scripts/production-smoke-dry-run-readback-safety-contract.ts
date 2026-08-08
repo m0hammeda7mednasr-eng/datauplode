@@ -14,43 +14,43 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "read-back extracts the exact dry-run batch ID emitted by smoke",
-    /"batchId"\\s\*:\\s\*"\(\[\^"\]\+\)"/.test(verifier) || /matchAll\(\/"batchId"/.test(verifier),
+    verifier.includes('matchAll(/"batchId"\\s*:\\s*"([^\"]+)"/g)'),
   ],
   [
     "read-back requires a full expected Git SHA",
-    /\^\[0-9a-f\]\{40\}\$/i.test(verifier),
+    verifier.includes('/^[0-9a-f]{40}$/i.test(expectedRevision)'),
   ],
   [
     "read-back queries live readiness after the dry run",
-    /\/api\/ready/.test(verifier),
+    verifier.includes('/api/ready'),
   ],
   [
     "read-back rejects a Railway revision change",
-    /Railway revision changed during dry run/.test(verifier),
+    verifier.includes('Railway revision changed during dry run'),
   ],
   [
     "read-back requires Supabase as the live database target",
-    /database\.target !== "supabase"/.test(verifier),
+    verifier.includes('database.target !== "supabase"'),
   ],
   [
     "read-back requires the persisted readiness batch to equal the smoke batch",
-    /persistedBatchId !== dryRunBatchId/.test(verifier),
+    verifier.includes('persistedBatchId !== dryRunBatchId'),
   ],
   [
     "read-back requires readiness to mark the persisted dry run canary-ready",
-    /latestDryRunCanaryReady !== true/.test(verifier),
+    verifier.includes('rollout.latestDryRunCanaryReady !== true'),
   ],
   [
     "read-back rejects expired persisted dry runs",
-    /latestDryRunExpired !== false/.test(verifier),
+    verifier.includes('rollout.latestDryRunExpired !== false'),
   ],
   [
     "read-back requires exactly one verified product and no missing ambiguous or errors",
-    /uniqueProductsProcessed\) !== 1/.test(verifier) &&
-      /verified\) !== 1/.test(verifier) &&
-      /missing\) !== 0/.test(verifier) &&
-      /ambiguous\) !== 0/.test(verifier) &&
-      /errors\) !== 0/.test(verifier),
+    verifier.includes('Number(latestDryRun.uniqueProductsProcessed) !== 1') &&
+      verifier.includes('Number(latestDryRun.verified) !== 1') &&
+      verifier.includes('Number(latestDryRun.missing) !== 0') &&
+      verifier.includes('Number(latestDryRun.ambiguous) !== 0') &&
+      verifier.includes('Number(latestDryRun.errors) !== 0'),
   ],
   [
     "read-back performs no Shopify or Sheet mutation",
