@@ -9,7 +9,9 @@ const SHEET_ID = 0;
 const RUN_CONFIRMATION = "2026-08-09-sheet1-reconcile-v1";
 const MARKER_TYPE = `ONE_TIME_SHEET1_RECONCILE:${RUN_CONFIRMATION}`;
 const START_DELAY_MS = 20_000;
-const GROUPS_PER_BATCH = 10;
+const BETWEEN_GROUPS_MS = 3_500;
+const RETRY_DELAYS_MS = [0, 15_000, 45_000] as const;
+const CONSECUTIVE_ERROR_LIMIT = 4;
 const RECENT_RUNNING_MS = 45 * 60 * 1000;
 const KNOWN_CANARY_ROWS = [5, 6, 7, 8];
 
@@ -25,6 +27,20 @@ type ReconcileResponse = {
   summary?: Record<string, any>;
   results?: Array<Record<string, any>>;
   error?: string;
+};
+
+type RunTotals = {
+  groupsAttempted: number;
+  verified: number;
+  rows: number;
+  missing: number;
+  ambiguous: number;
+  conflicts: number;
+  coreErrors: number;
+  retries: number;
+  sheetCells: number;
+  sheetErrors: number;
+  skippedPreviouslyVerifiedRows: number;
 };
 
 let googleTokenCache: { token: string; expiresAt: number } | null = null;
@@ -97,14 +113,57 @@ function parseMultiplier(value: unknown) {
   return Number.isFinite(number) && number >= 1 && number <= 100 ? number : null;
 }
 
-async function buildFrozenPlan(): Promise<PlanGroup[]> {
+function readJson(value: string | null | undefined) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function loadPreviouslyVerifiedRows() {
+  const rows = new Set<number>();
+  const runs = await prisma.importBatch.findMany({
+    where: { target: "sheet1_reconcile" },
+    orderBy: { createdAt: "desc" },
+    take: 5000,
+    select: { payloadJson: true },
+  });
+
+  for (const run of runs) {
+    const payload = readJson(run.payloadJson);
+    const summary = (payload as any)?.summary || {};
+    if (summary?.dryRun === true) continue;
+    const results = Array.isArray((payload as any)?.results)
+      ? (payload as any).results
+      : [];
+    for (const result of results) {
+      if (result?.status !== "verified" || result?.readbackVerified !== true) continue;
+      if (!Array.isArray(result?.rows)) continue;
+      for (const value of result.rows) {
+        const rowNumber = Number(value);
+        if (Number.isSafeInteger(rowNumber) && rowNumber > 0) rows.add(rowNumber);
+      }
+    }
+  }
+
+  return rows;
+}
+
+async function buildFrozenPlan(previouslyVerifiedRows: Set<number>): Promise<PlanGroup[]> {
   const csvUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
   const response = await axios.get(csvUrl, {
     timeout: Number(process.env.GOOGLE_SHEET_FETCH_TIMEOUT_MS || 30000),
     responseType: "text",
   });
 
-  const grouped = new Map<string, Array<{ rowNumber: number; multiplier: number; sku: string }>>();
+  const grouped = new Map<
+    string,
+    Array<{ rowNumber: number; multiplier: number; sku: string }>
+  >();
+
   parseCsv(String(response.data || "")).forEach((cells, index) => {
     const rawUrl = clean(cells[0]);
     const multiplier = parseMultiplier(cells[1]);
@@ -118,11 +177,16 @@ async function buildFrozenPlan(): Promise<PlanGroup[]> {
 
   const plan: PlanGroup[] = [];
   for (const [url, rows] of grouped) {
-    if (!rows.some((row) => !row.sku)) continue;
+    const pendingRows = rows.filter(
+      (row) => !row.sku && !previouslyVerifiedRows.has(row.rowNumber),
+    );
+    if (!pendingRows.length) continue;
     plan.push({
       url,
-      rows: rows.map((row) => row.rowNumber),
-      multipliers: [...new Set(rows.map((row) => row.multiplier))].sort((a, b) => a - b),
+      rows: pendingRows.map((row) => row.rowNumber),
+      multipliers: [...new Set(pendingRows.map((row) => row.multiplier))].sort(
+        (a, b) => a - b,
+      ),
     });
   }
   return plan;
@@ -165,7 +229,7 @@ async function postLocal(
   );
 
   const body = response.data && typeof response.data === "object"
-    ? response.data as ReconcileResponse
+    ? (response.data as ReconcileResponse)
     : { error: clean(response.data) };
   if (response.status < 200 || response.status >= 300 || body.success !== true) {
     throw new Error(
@@ -173,6 +237,16 @@ async function postLocal(
     );
   }
   return body;
+}
+
+function googleWriterConfigured() {
+  if (clean(process.env.GOOGLE_SHEETS_ACCESS_TOKEN)) return true;
+  const email = clean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+  const privateKey = clean(
+    process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64 ||
+      process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY,
+  );
+  return Boolean(email && privateKey);
 }
 
 function base64Url(value: string | Buffer) {
@@ -197,20 +271,20 @@ async function googleAccessToken() {
     ? Buffer.from(encodedKey, "base64").toString("utf8")
     : String(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
   if (!email || !privateKey) {
-    throw new Error(
-      "Google Sheets writer credentials are missing in Railway (GOOGLE_SHEETS_ACCESS_TOKEN or service-account credentials)",
-    );
+    throw new Error("Google Sheets writer credentials are missing in Railway");
   }
 
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claim = base64Url(JSON.stringify({
-    iss: email,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
-    aud: "https://oauth2.googleapis.com/token",
-    iat: now,
-    exp: now + 3600,
-  }));
+  const claim = base64Url(
+    JSON.stringify({
+      iss: email,
+      scope: "https://www.googleapis.com/auth/spreadsheets",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: now,
+      exp: now + 3600,
+    }),
+  );
   const unsigned = `${header}.${claim}`;
   const signer = crypto.createSign("RSA-SHA256");
   signer.update(unsigned);
@@ -234,8 +308,12 @@ async function googleAccessToken() {
 }
 
 async function writeVerifiedSkusToSheet(results: Array<Record<string, any>>) {
-  const verified = results.filter((result) =>
-    result?.status === "verified" && clean(result?.expectedSku) && Array.isArray(result?.rows),
+  const verified = results.filter(
+    (result) =>
+      result?.status === "verified" &&
+      result?.readbackVerified === true &&
+      clean(result?.expectedSku) &&
+      Array.isArray(result?.rows),
   );
   if (!verified.length) return { cellsWritten: 0, batches: 0 };
 
@@ -254,7 +332,9 @@ async function writeVerifiedSkusToSheet(results: Array<Record<string, any>>) {
             startColumnIndex: 3,
             endColumnIndex: 4,
           },
-          rows: [{ values: [{ userEnteredValue: { stringValue: sku } }] }],
+          rows: [
+            { values: [{ userEnteredValue: { stringValue: sku } }] },
+          ],
           fields: "userEnteredValue",
         },
       });
@@ -301,36 +381,45 @@ async function existingHandledMarker() {
   return null;
 }
 
-function accumulate(
-  totals: Record<string, number>,
-  response: ReconcileResponse,
-) {
-  const summary = response.summary || {};
-  totals.batches += 1;
-  totals.units += Number(summary.unitsProcessed || 0);
-  totals.rows += Number(summary.rowsProcessed || 0);
-  totals.verified += Number(summary.verified || 0);
-  totals.missing += Number(summary.missing || 0);
-  totals.ambiguous += Number(summary.ambiguous || 0);
-  totals.conflicts += Number(summary.conflicts || 0);
-  totals.errors += Number(summary.errors || 0);
+function resultStatus(response: ReconcileResponse) {
+  const results = Array.isArray(response.results) ? response.results : [];
+  if (!results.length) return "error";
+  if (results.every((result) => result?.status === "verified")) return "verified";
+  if (results.some((result) => result?.status === "error")) return "error";
+  if (results.some((result) => result?.status === "ambiguous")) return "ambiguous";
+  if (results.some((result) => result?.status === "conflict")) return "conflict";
+  if (results.some((result) => result?.status === "missing")) return "missing";
+  return clean(results[0]?.status) || "error";
+}
+
+function collectIssues(response: ReconcileResponse) {
+  return (response.results || [])
+    .filter((result) => result?.status !== "verified")
+    .map((result) => ({
+      status: clean(result?.status),
+      rows: result?.rows,
+      url: result?.url,
+      productCode: result?.productCode,
+      reason: clean(result?.reason).slice(0, 2000),
+    }));
 }
 
 async function findCanaryFromRows(port: number, rows: number[]) {
   for (const rowNumber of rows) {
     try {
-      const response = await postLocal(port, {
-        dryRun: true,
-        writeSheet: false,
-        rowNumbers: [rowNumber],
-      }, false);
+      const response = await postLocal(
+        port,
+        { dryRun: true, writeSheet: false, rowNumbers: [rowNumber] },
+        false,
+      );
       const summary = response.summary || {};
-      const verified = (response.results || []).find((result) =>
-        result.status === "verified" &&
-        result.readbackVerified === true &&
-        clean(result.expectedSku) &&
-        Array.isArray(result.rows) &&
-        result.rows.length > 0,
+      const verified = (response.results || []).find(
+        (result) =>
+          result.status === "verified" &&
+          result.readbackVerified === true &&
+          clean(result.expectedSku) &&
+          Array.isArray(result.rows) &&
+          result.rows.length > 0,
       );
       if (
         Number(summary.errors || 0) === 0 &&
@@ -355,10 +444,53 @@ async function findCanaryFromRows(port: number, rows: number[]) {
   return null;
 }
 
+async function processGroupWithRetries(
+  port: number,
+  group: PlanGroup,
+  totals: RunTotals,
+) {
+  let lastResponse: ReconcileResponse | null = null;
+  let lastTransportError = "";
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+    const delay = RETRY_DELAYS_MS[attempt];
+    if (delay > 0) {
+      totals.retries += 1;
+      console.warn(
+        `[sheet1-reconcile] retrying rows ${group.rows.join(",")} after ${delay}ms`,
+      );
+      await sleep(delay);
+    }
+
+    try {
+      const response = await postLocal(
+        port,
+        { dryRun: false, writeSheet: false, rowNumbers: group.rows },
+        true,
+      );
+      lastResponse = response;
+      const status = resultStatus(response);
+      if (status !== "error") {
+        return { response, status, transportError: "" };
+      }
+    } catch (error: any) {
+      lastTransportError = clean(error?.message || error).slice(0, 2000);
+    }
+  }
+
+  return {
+    response: lastResponse,
+    status: "error",
+    transportError: lastTransportError,
+  };
+}
+
 async function runOneTimeSheet1Reconcile(port: number) {
   const existing = await existingHandledMarker();
   if (existing) {
-    console.log(`[sheet1-reconcile] ${MARKER_TYPE} already ${existing.status}; startup run skipped`);
+    console.log(
+      `[sheet1-reconcile] ${MARKER_TYPE} already ${existing.status}; startup run skipped`,
+    );
     return;
   }
 
@@ -374,30 +506,48 @@ async function runOneTimeSheet1Reconcile(port: number) {
         mode: "existing_products_only",
         createProducts: false,
         rebuildProducts: false,
-        sheetWriteMode: "runner_after_shopify_readback",
+        pacingMs: BETWEEN_GROUPS_MS,
+        retryDelaysMs: RETRY_DELAYS_MS,
+        resumeFromVerifiedImportBatches: true,
       }),
     },
   });
 
-  const totals = {
-    batches: 0,
-    units: 0,
-    rows: 0,
+  const totals: RunTotals = {
+    groupsAttempted: 0,
     verified: 0,
+    rows: 0,
     missing: 0,
     ambiguous: 0,
     conflicts: 0,
-    errors: 0,
+    coreErrors: 0,
+    retries: 0,
     sheetCells: 0,
+    sheetErrors: 0,
+    skippedPreviouslyVerifiedRows: 0,
   };
   const issues: Array<Record<string, any>> = [];
+  let sheetWriteEnabled = googleWriterConfigured();
+  let sheetWriteDisabledReason = sheetWriteEnabled
+    ? ""
+    : "Google writer credentials are not configured in Railway; external Sheet backfill is required.";
 
   try {
-    const plan = await buildFrozenPlan();
-    console.log(`[sheet1-reconcile] frozen plan contains ${plan.length} missing-SKU URL groups`);
+    const previouslyVerifiedRows = await loadPreviouslyVerifiedRows();
+    totals.skippedPreviouslyVerifiedRows = previouslyVerifiedRows.size;
+    const plan = await buildFrozenPlan(previouslyVerifiedRows);
+
+    console.log(
+      `[sheet1-reconcile] resume plan has ${plan.length} URL groups; ` +
+        `${previouslyVerifiedRows.size} rows already have verified Shopify read-back`,
+    );
+
     await updateMarker(marker.id, {
       stage: "plan_ready",
       planGroups: plan.length,
+      previouslyVerifiedRows: previouslyVerifiedRows.size,
+      sheetWriteEnabled,
+      sheetWriteDisabledReason,
       totals,
     });
 
@@ -410,6 +560,9 @@ async function runOneTimeSheet1Reconcile(port: number) {
           result: JSON.stringify({
             stage: "completed",
             planGroups: 0,
+            sheetWriteEnabled,
+            sheetWriteDisabledReason,
+            sheetBackfillRequired: !sheetWriteEnabled,
             totals,
             issues: [],
           }),
@@ -419,68 +572,59 @@ async function runOneTimeSheet1Reconcile(port: number) {
     }
 
     let canary = await findCanaryFromRows(port, KNOWN_CANARY_ROWS);
-
     if (!canary) {
-      const probes = plan.slice(0, 100);
-      for (const group of probes) {
-        try {
-          const response = await postLocal(port, {
-            dryRun: true,
-            writeSheet: false,
-            rowNumbers: group.rows,
-          }, false);
-          const summary = response.summary || {};
-          const verified = (response.results || []).find((result) =>
+      for (const group of plan.slice(0, 50)) {
+        const response = await postLocal(
+          port,
+          { dryRun: true, writeSheet: false, rowNumbers: group.rows },
+          false,
+        );
+        const verified = (response.results || []).find(
+          (result) =>
             result.status === "verified" &&
             result.readbackVerified === true &&
-            clean(result.expectedSku) &&
-            Array.isArray(result.rows) &&
-            result.rows.length > 0,
-          );
-          if (
-            Number(summary.errors || 0) === 0 &&
-            Number(summary.ambiguous || 0) === 0 &&
-            Number(summary.conflicts || 0) === 0 &&
-            verified
-          ) {
-            canary = {
-              rowNumber: Number(verified.rows[0]),
-              expectedSku: clean(verified.expectedSku),
-              productId: clean(verified.shopifyProductId),
-              dryRunBatchId: clean(response.batchId),
-            };
-            break;
-          }
-        } catch (error: any) {
-          console.warn("[sheet1-reconcile] missing-group dry-run probe failed", {
-            rows: group.rows,
-            error: clean(error?.message || error),
-          });
+            clean(result.expectedSku),
+        );
+        if (verified) {
+          canary = {
+            rowNumber: Number(verified.rows?.[0]),
+            expectedSku: clean(verified.expectedSku),
+            productId: clean(verified.shopifyProductId),
+            dryRunBatchId: clean(response.batchId),
+          };
+          break;
         }
+        await sleep(BETWEEN_GROUPS_MS);
       }
     }
 
     if (!canary) {
-      throw new Error("No clean canary candidate was found in verified rows or the first 100 missing groups");
+      throw new Error("No clean canary candidate was found");
     }
 
     await updateMarker(marker.id, {
       stage: "dry_run_passed",
       planGroups: plan.length,
       canary,
+      sheetWriteEnabled,
+      sheetWriteDisabledReason,
       totals,
     });
-    console.log("[sheet1-reconcile] dry-run canary selected", canary);
 
-    const canaryResponse = await postLocal(port, {
-      dryRun: false,
-      writeSheet: false,
-      rowNumbers: [canary.rowNumber],
-    }, true);
+    const canaryResponse = await postLocal(
+      port,
+      { dryRun: false, writeSheet: false, rowNumbers: [canary.rowNumber] },
+      true,
+    );
     const canaryResults = canaryResponse.results || [];
-    const canaryVerified = canaryResults.length > 0 && canaryResults.every((result) =>
-      result.status === "verified" && result.readbackVerified === true,
-    ) && canaryResults.some((result) => clean(result.expectedSku) === canary.expectedSku);
+    const canaryVerified =
+      canaryResults.length > 0 &&
+      canaryResults.every(
+        (result) => result.status === "verified" && result.readbackVerified === true,
+      ) &&
+      canaryResults.some(
+        (result) => clean(result.expectedSku) === canary?.expectedSku,
+      );
     if (!canaryVerified) {
       throw new Error("One-product canary did not pass exact Shopify read-back");
     }
@@ -488,82 +632,70 @@ async function runOneTimeSheet1Reconcile(port: number) {
     await updateMarker(marker.id, {
       stage: "canary_passed",
       planGroups: plan.length,
-      canary: {
-        ...canary,
-        writeBatchId: canaryResponse.batchId || null,
-      },
+      canary: { ...canary, writeBatchId: canaryResponse.batchId || null },
+      sheetWriteEnabled,
+      sheetWriteDisabledReason,
       totals,
     });
-    console.log("[sheet1-reconcile] one-product canary + read-back passed");
 
-    const batches: PlanGroup[][] = [];
-    for (let index = 0; index < plan.length; index += GROUPS_PER_BATCH) {
-      batches.push(plan.slice(index, index + GROUPS_PER_BATCH));
-    }
+    let consecutiveCoreErrors = 0;
 
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-      const batch = batches[batchIndex];
-      const rowNumbers = batch.flatMap((group) => group.rows);
-      let response: ReconcileResponse | null = null;
-      let lastError = "";
+    for (let groupIndex = 0; groupIndex < plan.length; groupIndex += 1) {
+      const group = plan[groupIndex];
+      totals.groupsAttempted += 1;
+      const processed = await processGroupWithRetries(port, group, totals);
+      const response = processed.response;
+      const status = processed.status;
 
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
-        try {
-          response = await postLocal(port, {
-            dryRun: false,
-            writeSheet: false,
-            rowNumbers,
-          }, true);
-          break;
-        } catch (error: any) {
-          lastError = clean(error?.message || error);
-          if (attempt < 2) await sleep(5_000);
-        }
-      }
+      if (status === "verified" && response) {
+        consecutiveCoreErrors = 0;
+        const summary = response.summary || {};
+        totals.verified += Number(summary.verified || 0);
+        totals.rows += Number(summary.rowsProcessed || 0);
 
-      if (!response) {
-        totals.errors += batch.length;
-        issues.push({
-          batch: batchIndex + 1,
-          rowNumbers,
-          transportError: lastError,
-        });
-      } else {
-        accumulate(totals, response);
-        for (const result of response.results || []) {
-          if (result.status !== "verified") {
-            issues.push({ batch: batchIndex + 1, ...result });
-          }
-        }
-
-        try {
-          let sheetWrite: { cellsWritten: number; batches: number } | null = null;
-          let sheetError = "";
-          for (let attempt = 1; attempt <= 2; attempt += 1) {
-            try {
-              sheetWrite = await writeVerifiedSkusToSheet(response.results || []);
-              break;
-            } catch (error: any) {
-              sheetError = clean(error?.message || error);
-              if (attempt < 2) await sleep(3_000);
-            }
-          }
-          if (!sheetWrite) {
-            totals.errors += 1;
-            issues.push({
-              batch: batchIndex + 1,
-              rowNumbers,
-              sheetWriteError: sheetError || "Unknown Google Sheets write error",
-            });
-          } else {
+        if (sheetWriteEnabled) {
+          try {
+            const sheetWrite = await writeVerifiedSkusToSheet(response.results || []);
             totals.sheetCells += sheetWrite.cellsWritten;
+          } catch (error: any) {
+            totals.sheetErrors += 1;
+            sheetWriteEnabled = false;
+            sheetWriteDisabledReason = clean(error?.message || error).slice(0, 2000);
+            issues.push({
+              type: "sheet_write_disabled",
+              group: groupIndex + 1,
+              rows: group.rows,
+              reason: sheetWriteDisabledReason,
+            });
+            console.error(
+              "[sheet1-reconcile] Google Sheet writeback disabled for the rest of this run:",
+              sheetWriteDisabledReason,
+            );
           }
-        } catch (error: any) {
-          totals.errors += 1;
+        }
+      } else if (status === "conflict") {
+        consecutiveCoreErrors = 0;
+        totals.conflicts += 1;
+        if (response) issues.push(...collectIssues(response));
+      } else if (status === "ambiguous") {
+        consecutiveCoreErrors = 0;
+        totals.ambiguous += 1;
+        if (response) issues.push(...collectIssues(response));
+      } else if (status === "missing") {
+        consecutiveCoreErrors = 0;
+        totals.missing += 1;
+        if (response) issues.push(...collectIssues(response));
+      } else {
+        consecutiveCoreErrors += 1;
+        totals.coreErrors += 1;
+        if (response) {
+          issues.push(...collectIssues(response));
+        } else {
           issues.push({
-            batch: batchIndex + 1,
-            rowNumbers,
-            sheetWriteError: clean(error?.message || error),
+            status: "error",
+            rows: group.rows,
+            url: group.url,
+            reason: processed.transportError || "Unknown reconcile transport error",
           });
         }
       }
@@ -571,14 +703,39 @@ async function runOneTimeSheet1Reconcile(port: number) {
       await updateMarker(marker.id, {
         stage: "full_run",
         planGroups: plan.length,
-        batch: batchIndex + 1,
-        totalBatches: batches.length,
+        batch: groupIndex + 1,
+        totalBatches: plan.length,
+        currentRows: group.rows,
         canary,
+        sheetWriteEnabled,
+        sheetWriteDisabledReason,
+        sheetBackfillRequired: !sheetWriteEnabled,
+        consecutiveCoreErrors,
         totals,
         issues: issues.slice(-100),
       });
-      console.log(`[sheet1-reconcile] batch ${batchIndex + 1}/${batches.length}`, totals);
+
+      console.log(
+        `[sheet1-reconcile] group ${groupIndex + 1}/${plan.length} status=${status}`,
+        totals,
+      );
+
+      if (consecutiveCoreErrors >= CONSECUTIVE_ERROR_LIMIT) {
+        throw new Error(
+          `Circuit breaker stopped the run after ${CONSECUTIVE_ERROR_LIMIT} consecutive core errors. ` +
+            "The last failed groups are recorded in SyncJob.result for diagnosis.",
+        );
+      }
+
+      await sleep(BETWEEN_GROUPS_MS);
     }
+
+    const completedWithIssues =
+      totals.missing +
+        totals.ambiguous +
+        totals.conflicts +
+        totals.coreErrors >
+        0;
 
     await prisma.syncJob.update({
       where: { id: marker.id },
@@ -589,14 +746,15 @@ async function runOneTimeSheet1Reconcile(port: number) {
           stage: "completed",
           planGroups: plan.length,
           canary,
+          sheetWriteEnabled,
+          sheetWriteDisabledReason,
+          sheetBackfillRequired: !sheetWriteEnabled,
           totals,
           issues: issues.slice(0, 500),
-          completedWithIssues:
-            totals.missing + totals.ambiguous + totals.conflicts + totals.errors > 0,
+          completedWithIssues,
         }),
       },
     });
-    console.log("[sheet1-reconcile] one-time run completed", totals);
   } catch (error: any) {
     const message = clean(error?.message || error || "Unknown Sheet 1 reconcile failure");
     await prisma.syncJob.update({
@@ -607,8 +765,11 @@ async function runOneTimeSheet1Reconcile(port: number) {
         result: JSON.stringify({
           stage: "failed",
           error: message.slice(0, 5000),
+          sheetWriteEnabled,
+          sheetWriteDisabledReason,
+          sheetBackfillRequired: !sheetWriteEnabled,
           totals,
-          issues: issues.slice(0, 200),
+          issues: issues.slice(-200),
         }),
       },
     });
