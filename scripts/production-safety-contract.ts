@@ -57,8 +57,10 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "readiness does not expose database hostnames",
-    /return "configured";/.test(readiness) &&
-      !/return url\.hostname \|\| "configured"/.test(readiness),
+    /target:\s*"configured"/.test(readiness) &&
+      !/host:\s*url\.hostname/.test(readiness) &&
+      !/hostname:\s*url\.hostname/.test(readiness) &&
+      !/database:\s*url\.pathname/.test(readiness),
   ],
   [
     "readiness does not expose raw database errors",
