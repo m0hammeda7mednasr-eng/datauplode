@@ -8,6 +8,7 @@ const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
 const readiness = read("src/server/routes/readiness.routes.ts");
 const databasePreflight = read("scripts/database-preflight.ts");
+const databaseRuntime = read("src/server/db.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
 
@@ -35,6 +36,17 @@ const assertions: Array<[string, boolean]> = [
     /target\.sslMode !== "require"/.test(databasePreflight) &&
       /target\.port !== "5432"/.test(databasePreflight) &&
       /transaction pooler port 6543 is not approved/.test(databasePreflight),
+  ],
+  [
+    "runtime preserves the preflight-approved Supabase session pooler",
+    !/url\.port\s*=\s*["']6543["']/.test(databaseRuntime) &&
+      !/searchParams\.set\(["']pgbouncer["']/.test(databaseRuntime) &&
+      /do not rewrite a Supabase Session Pooler URL/.test(databaseRuntime),
+  ],
+  [
+    "runtime may tune connection limit without changing database target",
+    /searchParams\.has\(["']connection_limit["']\)/.test(databaseRuntime) &&
+      /searchParams\.set\(["']connection_limit["']/.test(databaseRuntime),
   ],
   [
     "database preflight requires bounded pool configuration",
