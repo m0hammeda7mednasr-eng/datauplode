@@ -99,3 +99,6 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Build Railway Docker image
+        run: docker build --tag dabdoob-ci:${{ github.sha }} .
