@@ -109,6 +109,10 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
   }
   const summary = payload?.summary || {};
   const results = Array.isArray(payload?.results) ? payload.results : [];
+  const provenance =
+    payload?.provenance && typeof payload.provenance === "object"
+      ? payload.provenance
+      : {};
   const shopifyProductIds = [
     ...new Set(
       results
@@ -116,6 +120,24 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
         .filter((id: string) => /^gid:\/\/shopify\/Product\/\d+$/.test(id)),
     ),
   ];
+  const dryRunBatchId = String(provenance?.dryRunBatchId || "").trim() || null;
+  const provenanceShopifyProductIdRaw = String(
+    provenance?.shopifyProductId || "",
+  ).trim();
+  const provenanceShopifyProductId = /^gid:\/\/shopify\/Product\/\d+$/.test(
+    provenanceShopifyProductIdRaw,
+  )
+    ? provenanceShopifyProductIdRaw
+    : null;
+  const canaryProvenanceValid =
+    summary.dryRun === false
+      ? Boolean(
+          dryRunBatchId &&
+            shopifyProductIds.length === 1 &&
+            provenanceShopifyProductId === shopifyProductIds[0],
+        )
+      : null;
+
   return {
     id: run.id,
     status: run.status,
@@ -131,6 +153,9 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
     errors: Number(summary.errors || 0),
     shopifyProductIds,
     shopifyProductId: shopifyProductIds.length === 1 ? shopifyProductIds[0] : null,
+    dryRunBatchId,
+    provenanceShopifyProductId,
+    canaryProvenanceValid,
   };
 }
 
