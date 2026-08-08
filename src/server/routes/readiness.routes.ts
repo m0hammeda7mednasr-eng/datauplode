@@ -30,6 +30,12 @@ function recentFailedJobMinutes() {
   return Math.max(5, Math.min(10080, Math.trunc(parsed)));
 }
 
+function canaryDryRunMaxAgeMinutes() {
+  const parsed = Number(process.env.CATALOG_AUDIT_CANARY_DRY_RUN_MAX_AGE_MINUTES || 30);
+  if (!Number.isFinite(parsed)) return 30;
+  return Math.min(120, Math.max(1, Math.floor(parsed)));
+}
+
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
@@ -118,9 +124,24 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
   };
 }
 
-function isCanaryReadyDryRun(run: ReturnType<typeof catalogAuditObservation>) {
+function dryRunAgeMinutes(run: ReturnType<typeof catalogAuditObservation>, nowMs = Date.now()) {
+  if (!run) return null;
+  const createdAtMs = new Date(run.createdAt).getTime();
+  const ageMs = nowMs - createdAtMs;
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  return ageMs / 60_000;
+}
+
+function isCanaryReadyDryRun(
+  run: ReturnType<typeof catalogAuditObservation>,
+  maxAgeMinutes: number,
+  nowMs = Date.now(),
+) {
+  const ageMinutes = dryRunAgeMinutes(run, nowMs);
   return Boolean(
     run &&
+      ageMinutes !== null &&
+      ageMinutes <= maxAgeMinutes &&
       run.status === "COMPLETED" &&
       run.dryRun === true &&
       run.writeSheet === false &&
@@ -141,6 +162,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const databaseTimeoutMs = readinessTimeoutMs();
   const staleJobThresholdMinutes = staleRunningJobMinutes();
   const recentFailureThresholdMinutes = recentFailedJobMinutes();
+  const canaryDryRunMaxAge = canaryDryRunMaxAgeMinutes();
   const staleJobCutoff = new Date(Date.now() - staleJobThresholdMinutes * 60_000);
   const recentFailureCutoff = new Date(Date.now() - recentFailureThresholdMinutes * 60_000);
 
@@ -232,7 +254,12 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     const latestCatalogAudit = observedAudits[0] || null;
     const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;
     const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;
-    const latestDryRunCanaryReady = isCanaryReadyDryRun(latestDryRun);
+    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);
+    const latestDryRunCanaryReady = isCanaryReadyDryRun(latestDryRun, canaryDryRunMaxAge);
+    const latestDryRunExpired = Boolean(
+      latestDryRun &&
+        (latestDryRunAgeMinutes === null || latestDryRunAgeMinutes > canaryDryRunMaxAge),
+    );
 
     const productionMinimumReady =
       configuration.database &&
@@ -277,6 +304,9 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       rollout: {
         recentAuditWindow: observedAudits.length,
         latestDryRun,
+        latestDryRunAgeMinutes,
+        latestDryRunMaxAgeMinutes: canaryDryRunMaxAge,
+        latestDryRunExpired,
         latestDryRunCanaryReady,
         latestCanary,
       },
@@ -319,6 +349,9 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       rollout: {
         recentAuditWindow: 0,
         latestDryRun: null,
+        latestDryRunAgeMinutes: null,
+        latestDryRunMaxAgeMinutes: canaryDryRunMaxAge,
+        latestDryRunExpired: false,
         latestDryRunCanaryReady: false,
         latestCanary: null,
       },
