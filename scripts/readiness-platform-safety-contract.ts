@@ -87,9 +87,23 @@ const checks: Array<[string, boolean]> = [
     source.includes("!runtimeWriteGateEnabled") &&
       source.includes("!inventoryAutostartConfigured") &&
       source.includes("!jobRecoveryConfigured") &&
+      source.includes("!jobRecoveryShopifyWritesConfigured") &&
       source.includes("!sheetImportAutostartConfigured") &&
       source.includes("!configuration.catalogWriteGateEnabled") &&
       source.includes("!configuration.catalogSheetWriteGateEnabled"),
+  ],
+  [
+    "readiness exposes recovered-job Shopify write gate explicitly",
+    source.includes('enabled(\n    "SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED",\n  )') &&
+      source.includes("jobRecoveryShopifyWritesConfigured,"),
+  ],
+  [
+    "readiness only reports job recovery enabled when all three write gates are open",
+    source.includes("jobRecoveryEnabled:\n      runtimeWriteGateEnabled &&\n      jobRecoveryConfigured &&\n      jobRecoveryShopifyWritesConfigured"),
+  ],
+  [
+    "readiness never reports two-gate recovered-job writes as enabled",
+    !source.includes("jobRecoveryEnabled: runtimeWriteGateEnabled && jobRecoveryConfigured,"),
   ],
   [
     "readiness exposes write safety state for monitoring",
@@ -204,6 +218,7 @@ console.log(
   JSON.stringify(
     {
       assertions: checks.length,
+      recoveredJobShopifyWriteGateObserved: true,
       exactCanaryProductIdentityObserved: true,
       exactDryRunToCanaryProvenanceObserved: true,
       databaseWrites: 0,
