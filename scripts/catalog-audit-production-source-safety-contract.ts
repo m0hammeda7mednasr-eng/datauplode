@@ -68,6 +68,34 @@ const checks: Array<[string, boolean]> = [
     source.includes("batchSheetId === configuredSheetId"),
   ],
   [
+    "canary revalidates the exact dry-run sheet row before write",
+    source.includes("CATALOG_AUDIT_CANARY_SOURCE_CHANGED") &&
+      source.includes("expectedRowNumber - 1") &&
+      source.includes("canonicalSourceUrl(cell) === expectedSourceUrl"),
+  ],
+  [
+    "canary fails closed when live sheet revalidation is unavailable",
+    source.includes("CATALOG_AUDIT_CANARY_SOURCE_REVALIDATION_UNAVAILABLE") &&
+      source.includes("no Shopify write was attempted"),
+  ],
+  [
+    "canary requires a unique exact Prisma mapping for the dry-run source URL",
+    source.includes("CATALOG_AUDIT_CANARY_PRODUCT_MAPPING_NOT_UNIQUE") &&
+      source.includes("exactMappings.length !== 1") &&
+      source.includes("prisma.sourceProduct.findMany"),
+  ],
+  [
+    "canary requires current Prisma Shopify ID to equal dry-run Shopify ID",
+    source.includes("CATALOG_AUDIT_CANARY_PRODUCT_IDENTITY_CHANGED") &&
+      source.includes("currentShopifyProductId !== expectedShopifyProductId"),
+  ],
+  [
+    "canary carries verified product identity forward for monitoring",
+    source.includes("canaryExpectedShopifyProductId") &&
+      source.includes("X-Catalog-Audit-Canary-Product") &&
+      source.includes("X-Catalog-Audit-Canary-Source-Row"),
+  ],
+  [
     "production smoke rejects missing existing Shopify product",
     smoke.includes("verified !== 1 || missing !== 0") &&
       smoke.includes("must prove one existing Shopify product before canary"),
