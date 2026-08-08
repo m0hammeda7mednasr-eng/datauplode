@@ -10,6 +10,34 @@ const checks: Array<[string, boolean]> = [
     source.includes('databaseTargetValue === "supabase"'),
   ],
   [
+    "production readiness requires pinned Supabase project ref",
+    source.includes("databaseBindingValue.projectRefPinned === true"),
+  ],
+  [
+    "production readiness requires DATABASE_URL to match pinned Supabase project ref",
+    source.includes("databaseBindingValue.projectRefMatched === true"),
+  ],
+  [
+    "runtime readiness derives direct Supabase project ref",
+    source.includes('host.match(/^db\\.([a-z0-9-]+)\\.supabase\\.(?:co|com)$/)'),
+  ],
+  [
+    "runtime readiness derives Session pooler project ref from username",
+    source.includes('/\\.pooler\\.supabase\\.(?:co|com)$/.test(host)') &&
+      source.includes('const separator = username.lastIndexOf(".")'),
+  ],
+  [
+    "readiness reports project pin state without exposing the project ref value",
+    source.includes("projectRefPinned: databaseBindingValue.projectRefPinned") &&
+      source.includes("projectRefMatched: databaseBindingValue.projectRefMatched") &&
+      !source.includes("projectRef: expectedProjectRef"),
+  ],
+  [
+    "failure readiness preserves Supabase project binding diagnostics",
+    source.split("projectRefPinned: databaseBindingValue.projectRefPinned").length - 1 >= 2 &&
+      source.split("projectRefMatched: databaseBindingValue.projectRefMatched").length - 1 >= 2,
+  ],
+  [
     "production readiness requires a verified deployment revision",
     source.includes("deployment.revisionVerified === true"),
   ],
@@ -30,6 +58,10 @@ const checks: Array<[string, boolean]> = [
     source.includes("supabaseRequired: productionEnvironment"),
   ],
   [
+    "readiness reports whether exact Supabase project pin is required",
+    source.includes("supabaseProjectPinRequired: productionEnvironment"),
+  ],
+  [
     "readiness reports whether Railway revision is required",
     source.includes("railwayRevisionRequired: productionEnvironment"),
   ],
@@ -38,8 +70,9 @@ const checks: Array<[string, boolean]> = [
     source.includes("ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady)"),
   ],
   [
-    "database target is computed once for consistent reporting",
-    source.includes("const databaseTargetValue = databaseTarget();"),
+    "database binding is computed once for consistent reporting",
+    source.includes("const databaseBindingValue = databaseBinding();") &&
+      source.includes("const databaseTargetValue = databaseBindingValue.target;"),
   ],
   [
     "database target report uses the checked value",
@@ -218,6 +251,7 @@ console.log(
   JSON.stringify(
     {
       assertions: checks.length,
+      exactSupabaseProjectBindingObserved: true,
       recoveredJobShopifyWriteGateObserved: true,
       exactCanaryProductIdentityObserved: true,
       exactDryRunToCanaryProvenanceObserved: true,
