@@ -82,6 +82,26 @@ function isSupabaseHost(hostname: string) {
   return normalized.endsWith(".supabase.com") || normalized.endsWith(".supabase.co");
 }
 
+function normalizeProjectRef(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function supabaseProjectRef(url: URL) {
+  const hostname = url.hostname.trim().toLowerCase().replace(/\.$/, "");
+  const directMatch = hostname.match(/^db\.([a-z0-9-]+)\.supabase\.(?:co|com)$/);
+  if (directMatch) return directMatch[1];
+
+  if (/\.pooler\.supabase\.(?:co|com)$/.test(hostname)) {
+    const username = decodeURIComponent(url.username || "").trim().toLowerCase();
+    const separator = username.lastIndexOf(".");
+    if (separator >= 0 && separator < username.length - 1) {
+      return username.slice(separator + 1);
+    }
+  }
+
+  return null;
+}
+
 function databaseSummary(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
@@ -91,6 +111,7 @@ function databaseSummary(rawUrl: string) {
       target: isSupabase ? "supabase" : "configured",
       port: url.port || "5432",
       supabase: isSupabase,
+      projectRef: isSupabase ? supabaseProjectRef(url) : null,
       sslMode: url.searchParams.get("sslmode") || "unspecified",
       connectionLimit: boundedInteger(url.searchParams.get("connection_limit"), 1, 20),
       poolTimeoutSeconds: boundedInteger(url.searchParams.get("pool_timeout"), 1, 60),
@@ -112,13 +133,30 @@ async function main() {
   }
 
   const production = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+  const expectedProjectRef = normalizeProjectRef(String(process.env.SUPABASE_PROJECT_REF || ""));
   if (production && !target.supabase) {
     throw new Error(
       "Production database preflight requires an official Supabase host (*.supabase.com or *.supabase.co).",
     );
   }
 
+  if (production && !expectedProjectRef) {
+    throw new Error(
+      "SUPABASE_PROJECT_REF is required in production to prevent connecting Dabdoob to the wrong Supabase project.",
+    );
+  }
+
   if (target.supabase) {
+    if (!target.projectRef) {
+      throw new Error(
+        "Could not derive the Supabase project ref from DATABASE_URL. Use db.<PROJECT_REF>.supabase.co or a Session pooler username ending in .<PROJECT_REF>.",
+      );
+    }
+    if (expectedProjectRef && target.projectRef !== expectedProjectRef) {
+      throw new Error(
+        "DATABASE_URL Supabase project does not match SUPABASE_PROJECT_REF. Refusing to run against a different project.",
+      );
+    }
     if (target.sslMode !== "require") {
       throw new Error(
         "Supabase DATABASE_URL must include sslmode=require before production deployment.",
@@ -207,7 +245,17 @@ async function main() {
     JSON.stringify(
       {
         ok: true,
-        database: target,
+        database: {
+          protocol: target.protocol,
+          target: target.target,
+          port: target.port,
+          supabase: target.supabase,
+          sslMode: target.sslMode,
+          connectionLimit: target.connectionLimit,
+          poolTimeoutSeconds: target.poolTimeoutSeconds,
+          projectRefPinned: Boolean(expectedProjectRef),
+          projectRefMatched: Boolean(expectedProjectRef && target.projectRef === expectedProjectRef),
+        },
         schema: {
           requiredTables: REQUIRED_TABLES.length,
           foundRequiredTables: REQUIRED_TABLES.length - missingTables.length,
