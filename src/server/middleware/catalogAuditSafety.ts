@@ -152,6 +152,110 @@ async function verifyCurrentCanarySource(
   };
 }
 
+async function persistCanaryProvenance(
+  canaryBatchId: string,
+  dryRunBatchId: string,
+  expectedShopifyProductId: string,
+) {
+  const batch = await prisma.importBatch.findUnique({ where: { id: canaryBatchId } });
+  if (!batch || batch.target !== "catalog_audit" || batch.status !== "COMPLETED") {
+    throw new Error("Persisted canary batch is missing or incomplete.");
+  }
+
+  let payload: any = {};
+  try {
+    payload = JSON.parse(batch.payloadJson || "{}");
+  } catch {
+    throw new Error("Persisted canary payload is not valid JSON.");
+  }
+
+  const summary = payload?.summary || {};
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  const productIds = [
+    ...new Set(
+      results
+        .map((entry: any) => clean(entry?.shopifyProductId))
+        .filter((id: string) => /^gid:\/\/shopify\/Product\/\d+$/.test(id)),
+    ),
+  ];
+  if (
+    summary.dryRun !== false ||
+    summary.writeSheet !== false ||
+    Number(summary.uniqueProductsProcessed) !== 1 ||
+    Number(summary.verified) !== 1 ||
+    Number(summary.missing) !== 0 ||
+    Number(summary.ambiguous) !== 0 ||
+    Number(summary.errors) !== 0 ||
+    productIds.length !== 1 ||
+    productIds[0] !== expectedShopifyProductId
+  ) {
+    throw new Error("Persisted canary payload does not match the verified one-product canary identity.");
+  }
+
+  payload.provenance = {
+    ...(payload?.provenance && typeof payload.provenance === "object" ? payload.provenance : {}),
+    dryRunBatchId,
+    shopifyProductId: expectedShopifyProductId,
+  };
+
+  await prisma.importBatch.update({
+    where: { id: canaryBatchId },
+    data: { payloadJson: JSON.stringify(payload) },
+  });
+}
+
+function installCanaryProvenancePersistence(
+  res: Response,
+  dryRunBatchId: string,
+  expectedShopifyProductId: string,
+) {
+  const originalJson = res.json.bind(res);
+  let intercepted = false;
+
+  res.json = ((body: any) => {
+    const canaryBatchId = clean(body?.batchId);
+    if (intercepted || body?.success !== true || !canaryBatchId) {
+      return originalJson(body);
+    }
+    intercepted = true;
+
+    void persistCanaryProvenance(
+      canaryBatchId,
+      dryRunBatchId,
+      expectedShopifyProductId,
+    )
+      .then(() =>
+        originalJson({
+          ...body,
+          provenance: {
+            dryRunBatchId,
+            shopifyProductId: expectedShopifyProductId,
+          },
+        }),
+      )
+      .catch((error: any) => {
+        console.error("Catalog canary provenance persistence failed", {
+          canaryBatchId,
+          dryRunBatchId,
+          error: error?.message || String(error),
+        });
+        if (!res.headersSent) {
+          res.status(500);
+          return originalJson({
+            success: false,
+            code: "CATALOG_AUDIT_CANARY_PROVENANCE_PERSIST_FAILED",
+            error:
+              "The canary completed but its exact dry-run provenance could not be persisted. Do not broaden writes or retry automatically; verify the canary batch manually.",
+            batchId: canaryBatchId,
+          });
+        }
+        return res;
+      });
+
+    return res;
+  }) as typeof res.json;
+}
+
 async function verifyCanaryDryRunBatch(req: Request, res: Response, configuredSheetId: string) {
   const dryRunBatchId = clean(
     req.header("x-catalog-audit-dry-run-batch-id") || req.body?.dryRunBatchId,
@@ -361,6 +465,8 @@ export async function catalogAuditSafety(req: Request, res: Response, next: Next
 
   if (production) {
     const expectedShopifyProductId = clean(req.body?.canaryExpectedShopifyProductId);
+    const dryRunBatchId = clean(req.body?.dryRunBatchId);
+    installCanaryProvenancePersistence(res, dryRunBatchId, expectedShopifyProductId);
     try {
       return runWithCatalogCanaryMutationGuard(expectedShopifyProductId, () => next());
     } catch (error: any) {
