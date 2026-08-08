@@ -1,0 +1,366 @@
+name: Live Sheet 1 Reconcile
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - src/server/routes/sheet1-reconcile.routes.ts
+      - server.ts
+      - .github/workflows/sheet1-live-reconcile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dabdoob-live-sheet1-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+      EXPECTED_REVISION: ${{ github.sha }}
+      RUN_CONFIRMATION: 2026-08-09-sheet1-reconcile-v1
+      SHEET_CSV: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/export?format=csv&gid=0
+      STATUS_TITLE: Sheet1 live reconcile status
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Create status issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue="$(gh issue list --state open --search 'Sheet1 live reconcile status in:title' --json number --jq '.[0].number // empty')"
+          if [[ -z "$issue" ]]; then
+            issue="$(gh issue create --title "$STATUS_TITLE" --body "Starting live Sheet 1 reconcile for revision \`$EXPECTED_REVISION\`." --json number --jq '.number')"
+          else
+            gh issue edit "$issue" --body "Starting live Sheet 1 reconcile for revision \`$EXPECTED_REVISION\`."
+          fi
+          echo "STATUS_ISSUE=$issue" >> "$GITHUB_ENV"
+
+      - name: Install and typecheck
+        run: |
+          set -euo pipefail
+          npm ci --include=dev
+          npm run lint
+          npm run build
+
+      - name: Wait for Railway deployment and readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_URL" || ! "$BASE_URL" =~ ^https:// ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED before writes: RAILWAY_SMOKE_BASE_URL is missing or invalid. Revision: \`$EXPECTED_REVISION\`."
+            exit 2
+          fi
+          if [[ -z "$WRITE_TOKEN" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED before writes: CATALOG_AUDIT_WRITE_TOKEN secret is missing. Revision: \`$EXPECTED_REVISION\`."
+            exit 2
+          fi
+
+          ready=0
+          for attempt in $(seq 1 90); do
+            code="$(curl --silent --show-error --max-time 20 --output readiness.json --write-out '%{http_code}' "${BASE_URL%/}/api/ready" || true)"
+            if [[ "$code" == "200" || "$code" == "503" ]]; then
+              if EXPECTED_REVISION="$EXPECTED_REVISION" node <<'NODE'
+const fs = require('node:fs');
+let body = {};
+try { body = JSON.parse(fs.readFileSync('readiness.json','utf8')); } catch { process.exit(1); }
+const expected = String(process.env.EXPECTED_REVISION || '').toLowerCase();
+const actual = String(body?.deployment?.revision || '').toLowerCase();
+if (body?.database?.ok === true && body?.database?.target === 'supabase' && body?.deployment?.revisionVerified === true && actual === expected && body?.platform?.productionEnvironment === true) process.exit(0);
+process.exit(1);
+NODE
+              then
+                ready=1
+                break
+              fi
+            fi
+            sleep 10
+          done
+
+          if [[ "$ready" != "1" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED before writes: Railway never became ready on exact revision \`$EXPECTED_REVISION\`. No reconcile write was attempted."
+            exit 2
+          fi
+
+          config_code="$(curl --silent --show-error --max-time 30 --output reconcile-config.json --write-out '%{http_code}' "${BASE_URL%/}/api/sheet1-reconcile/config" || true)"
+          if [[ "$config_code" != "200" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED before writes: deployed revision does not expose /api/sheet1-reconcile/config (HTTP $config_code)."
+            exit 2
+          fi
+
+          gh issue edit "$STATUS_ISSUE" --body "DEPLOYED + READY ✅\n\nRevision: \`$EXPECTED_REVISION\`\nDatabase: Supabase healthy\nNew engine: /api/sheet1-reconcile mounted\nNext: snapshot + dry-run canary."
+
+      - name: Snapshot missing-SKU groups
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 60 "$SHEET_CSV" -o sheet1.csv
+          python3 <<'PY'
+import csv, json, re
+from collections import OrderedDict
+from urllib.parse import urlsplit, urlunsplit
+
+rows = []
+with open('sheet1.csv', newline='', encoding='utf-8-sig') as f:
+    for idx, cells in enumerate(csv.reader(f), start=1):
+        cells += [''] * (4-len(cells))
+        url = cells[0].strip()
+        multiplier = cells[1].strip().replace(',', '.')
+        sku = cells[3].strip()
+        if not re.match(r'^https?://', url, re.I):
+            continue
+        try:
+            m = float(multiplier)
+        except Exception:
+            continue
+        if not (1 <= m <= 100):
+            continue
+        parts = urlsplit(url.replace('\t','').replace('\r','').replace('\n','').strip())
+        normalized = urlunsplit((parts.scheme, parts.netloc.lower(), parts.path.rstrip('/'), '', ''))
+        rows.append({'row':idx,'url':normalized,'multiplier':m,'sku':sku})
+
+groups = OrderedDict()
+for row in rows:
+    groups.setdefault(row['url'], []).append(row)
+
+missing_groups = []
+for url, group in groups.items():
+    if any(not row['sku'] for row in group):
+        missing_groups.append({'url':url,'rows':[row['row'] for row in group],'multipliers':sorted(set(row['multiplier'] for row in group))})
+
+batches = []
+current = []
+for group in missing_groups:
+    if len(current) >= 12:
+        batches.append(current)
+        current = []
+    current.append(group)
+if current:
+    batches.append(current)
+
+with open('sheet1-plan.json','w',encoding='utf-8') as f:
+    json.dump({'validRows':len(rows),'missingGroups':len(missing_groups),'batches':batches},f,ensure_ascii=False,indent=2)
+
+print(json.dumps({'validRows':len(rows),'missingGroups':len(missing_groups),'batches':len(batches)}, ensure_ascii=False))
+PY
+
+      - name: Find a clean dry-run canary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+import json
+plan=json.load(open('sheet1-plan.json',encoding='utf-8'))
+probes=[]
+for batch in plan['batches'][:20]:
+    for group in batch:
+        probes.append(group)
+json.dump(probes[:80],open('canary-probes.json','w',encoding='utf-8'),ensure_ascii=False)
+PY
+
+          : > canary.env
+          python3 <<'PY'
+import json, os, subprocess, sys
+base=os.environ['BASE_URL'].rstrip('/')
+probes=json.load(open('canary-probes.json',encoding='utf-8'))
+for group in probes:
+    payload=json.dumps({'dryRun':True,'writeSheet':False,'rowNumbers':group['rows']})
+    p=subprocess.run(['curl','--silent','--show-error','--max-time','240','--header','content-type: application/json','--data',payload,f'{base}/api/sheet1-reconcile/run'],capture_output=True,text=True)
+    if p.returncode != 0:
+        continue
+    try:
+        body=json.loads(p.stdout)
+    except Exception:
+        continue
+    summary=body.get('summary') or {}
+    results=body.get('results') or []
+    clean=[r for r in results if r.get('status')=='verified' and r.get('expectedSku') and r.get('readbackVerified') is True]
+    if summary.get('errors')==0 and summary.get('ambiguous')==0 and summary.get('conflicts')==0 and clean:
+        result=clean[0]
+        with open('canary.env','w',encoding='utf-8') as f:
+            f.write(f"CANARY_ROW={result['rows'][0]}\n")
+            f.write(f"CANARY_SKU={result['expectedSku']}\n")
+            f.write(f"CANARY_PRODUCT_ID={result.get('shopifyProductId','')}\n")
+            f.write(f"DRY_RUN_BATCH_ID={body.get('batchId','')}\n")
+        print(json.dumps({'row':result['rows'][0],'sku':result['expectedSku'],'productId':result.get('shopifyProductId'),'batchId':body.get('batchId')},ensure_ascii=False))
+        sys.exit(0)
+print('No clean canary candidate found',file=sys.stderr)
+sys.exit(2)
+PY
+          source canary.env
+          gh issue edit "$STATUS_ISSUE" --body "DRY RUN ✅\n\nRevision: \`$EXPECTED_REVISION\`\nCanary row: \`$CANARY_ROW\`\nExpected SKU: \`$CANARY_SKU\`\nProduct: \`$CANARY_PRODUCT_ID\`\nDry-run batch: \`$DRY_RUN_BATCH_ID\`\nNo product creation/rebuild path exists in this engine.\nNext: one-product write + read-back."
+
+      - name: Execute one-product canary and read-back
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source canary.env
+          payload="{\"dryRun\":false,\"writeSheet\":false,\"rowNumbers\":[${CANARY_ROW}]}"
+          code="$(curl --silent --show-error --max-time 300 \
+            --output canary-write.json --write-out '%{http_code}' \
+            --header 'content-type: application/json' \
+            --header "x-catalog-audit-write-token: $WRITE_TOKEN" \
+            --header "x-sheet1-reconcile-run: $RUN_CONFIRMATION" \
+            --data "$payload" \
+            "${BASE_URL%/}/api/sheet1-reconcile/run" || true)"
+          if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "CANARY FAILED ❌\n\nHTTP: $code\nRevision: \`$EXPECTED_REVISION\`\nNo full run was started."
+            cat canary-write.json >&2 || true
+            exit 2
+          fi
+          CANARY_SKU="$CANARY_SKU" node <<'NODE'
+const fs=require('node:fs');
+const body=JSON.parse(fs.readFileSync('canary-write.json','utf8'));
+const expected=process.env.CANARY_SKU;
+const results=body.results||[];
+const ok=body.success===true && results.length>=1 && results.every(r=>r.status==='verified' && r.readbackVerified===true) && results.some(r=>r.expectedSku===expected);
+if(!ok){console.error(JSON.stringify(body,null,2));process.exit(2)}
+NODE
+          gh issue edit "$STATUS_ISSUE" --body "CANARY + SHOPIFY READ-BACK ✅\n\nRevision: \`$EXPECTED_REVISION\`\nCanary row: \`$CANARY_ROW\`\nCanonical SKU: \`$CANARY_SKU\`\nProduct: \`$CANARY_PRODUCT_ID\`\nNo full run starts unless this read-back is exact.\nNext: full missing-SKU snapshot batches."
+
+      - name: Run full missing-SKU snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+import json, os, subprocess, time
+base=os.environ['BASE_URL'].rstrip('/')
+token=os.environ['WRITE_TOKEN']
+confirm=os.environ['RUN_CONFIRMATION']
+plan=json.load(open('sheet1-plan.json',encoding='utf-8'))
+issue=os.environ['STATUS_ISSUE']
+revision=os.environ['EXPECTED_REVISION']
+
+totals={'batches':0,'units':0,'rows':0,'verified':0,'missing':0,'ambiguous':0,'conflicts':0,'errors':0,'sheetCells':0}
+details=[]
+
+def issue_update(text):
+    subprocess.run(['gh','issue','edit',issue,'--body',text],check=False)
+
+for index,batch in enumerate(plan['batches'],start=1):
+    row_numbers=[]
+    for group in batch:
+        row_numbers.extend(group['rows'])
+    payload=json.dumps({'dryRun':False,'writeSheet':True,'rowNumbers':row_numbers})
+    response=None
+    last_error=''
+    for attempt in range(1,3):
+        p=subprocess.run([
+            'curl','--silent','--show-error','--max-time','900',
+            '--header','content-type: application/json',
+            '--header',f'x-catalog-audit-write-token: {token}',
+            '--header',f'x-sheet1-reconcile-run: {confirm}',
+            '--data',payload,
+            f'{base}/api/sheet1-reconcile/run'
+        ],capture_output=True,text=True)
+        if p.returncode==0:
+            try:
+                parsed=json.loads(p.stdout)
+                if parsed.get('success') is True:
+                    response=parsed
+                    break
+                last_error=parsed.get('error') or p.stdout[:1000]
+            except Exception:
+                last_error=p.stdout[:1000]
+        else:
+            last_error=p.stderr[:1000]
+        time.sleep(5*attempt)
+    if response is None:
+        totals['errors']+=len(batch)
+        details.append({'batch':index,'httpFailure':last_error,'rows':row_numbers})
+        if index==1 or index%5==0:
+            issue_update(f"FULL RUN IN PROGRESS ⚠️\n\nRevision: `{revision}`\nBatch: {index}/{len(plan['batches'])}\nTotals: {json.dumps(totals)}\nLast transport error: {last_error[:500]}")
+        continue
+
+    s=response.get('summary') or {}
+    totals['batches']+=1
+    totals['units']+=int(s.get('unitsProcessed') or 0)
+    totals['rows']+=int(s.get('rowsProcessed') or 0)
+    for key in ['verified','missing','ambiguous','conflicts','errors']:
+        totals[key]+=int(s.get(key) or 0)
+    totals['sheetCells']+=int((s.get('sheetWrite') or {}).get('cellsWritten') or 0)
+    issues=[r for r in response.get('results',[]) if r.get('status')!='verified']
+    if issues:
+        details.extend([{'batch':index,**r} for r in issues])
+
+    if index==1 or index%5==0 or index==len(plan['batches']):
+        body=(
+            f"FULL RUN IN PROGRESS {'✅' if totals['errors']==0 else '⚠️'}\n\n"
+            f"Revision: `{revision}`\n"
+            f"Batch: {index}/{len(plan['batches'])}\n"
+            f"Verified units: {totals['verified']}\n"
+            f"Sheet SKU cells written: {totals['sheetCells']}\n"
+            f"Missing mappings: {totals['missing']}\n"
+            f"Ambiguous: {totals['ambiguous']}\n"
+            f"Multiplier conflicts: {totals['conflicts']}\n"
+            f"Errors: {totals['errors']}\n"
+            f"Product creation/rebuild: 0"
+        )
+        issue_update(body)
+
+with open('full-result.json','w',encoding='utf-8') as f:
+    json.dump({'revision':revision,'plan':{'missingGroups':plan['missingGroups'],'batches':len(plan['batches'])},'totals':totals,'issues':details[:300]},f,ensure_ascii=False,indent=2)
+
+state='COMPLETED' if sum(totals[k] for k in ['missing','ambiguous','conflicts','errors'])==0 else 'COMPLETED_WITH_ISSUES'
+body=(
+    f"{state} {'✅' if state=='COMPLETED' else '⚠️'}\n\n"
+    f"Revision: `{revision}`\n"
+    f"Snapshot missing URL groups: {plan['missingGroups']}\n"
+    f"Batches completed: {totals['batches']}/{len(plan['batches'])}\n"
+    f"Verified units: {totals['verified']}\n"
+    f"Rows processed: {totals['rows']}\n"
+    f"Sheet SKU cells written: {totals['sheetCells']}\n"
+    f"Missing mappings: {totals['missing']}\n"
+    f"Ambiguous: {totals['ambiguous']}\n"
+    f"Multiplier conflicts: {totals['conflicts']}\n"
+    f"Errors: {totals['errors']}\n"
+    f"Product creation/rebuild: 0\n"
+    f"Canonical SKU format: DAB-BRAND-PRODUCTCODE-CANONICALSIZE-MULTIPLIER"
+)
+issue_update(body)
+print(json.dumps({'state':state,'totals':totals},ensure_ascii=False))
+PY
+
+      - name: Final summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Live Sheet 1 reconcile"
+            echo "- Revision: \`$EXPECTED_REVISION\`"
+            echo "- Existing products only: \`true\`"
+            echo "- Create products: \`false\`"
+            echo "- Rebuild products: \`false\`"
+            echo "- Dry-run before canary: \`true\`"
+            echo "- One-product read-back before full run: \`true\`"
+            echo "- Full batch source: frozen missing-SKU snapshot"
+            echo "- Status issue: #$STATUS_ISSUE"
+          } >> "$GITHUB_STEP_SUMMARY"
