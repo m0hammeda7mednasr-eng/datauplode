@@ -14,6 +14,7 @@ import {
 } from "./src/server/config/env.js";
 import apiRouter from "./src/server/api.js";
 import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
+import sheet1ReconcileRouter from "./src/server/routes/sheet1-reconcile.routes.js";
 import readinessRouter from "./src/server/routes/readiness.routes.js";
 import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.js";
 import { prisma } from "./src/server/db.js";
@@ -171,7 +172,12 @@ async function startServer() {
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Catalog-Audit-Write-Token"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Catalog-Audit-Write-Token",
+      "X-Sheet1-Reconcile-Run",
+    ],
   };
 
   // Emit CORS headers as early as possible for approved browser origins.
@@ -195,7 +201,7 @@ async function startServer() {
       res.setHeader(
         "Access-Control-Allow-Headers",
         req.get("access-control-request-headers") ||
-          "Content-Type,Authorization,X-Catalog-Audit-Write-Token",
+          "Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sheet1-Reconcile-Run",
       );
       return res.sendStatus(204);
     }
@@ -238,6 +244,7 @@ async function startServer() {
   app.use("/api", readinessRouter);
   app.use("/api", catalogAuditSafety);
   app.use("/api", catalogAuditRouter);
+  app.use("/api", sheet1ReconcileRouter);
   app.use("/api", apiRouter);
 
   console.log("✅ API routes mounted");
