@@ -23,6 +23,42 @@ const assertions: Array<[string, boolean]> = [
     "production smoke summary documents that target overrides are disabled",
     /workflow URL overrides are disabled/.test(workflow),
   ],
+  [
+    "production smoke independently verifies exact Supabase project binding",
+    /projectRefPinned !== true/.test(workflow) &&
+      /projectRefMatched !== true/.test(workflow) &&
+      /database\?\.target !== 'supabase'/.test(workflow),
+  ],
+  [
+    "production smoke independently verifies exact Railway revision",
+    /revisionVerified !== true/.test(workflow) &&
+      /actualRevision !== expectedRevision/.test(workflow),
+  ],
+  [
+    "production smoke independently verifies write safety",
+    /platform\?\.writeSafetyReady !== true/.test(workflow) &&
+      /platform\?\.ready !== true/.test(workflow),
+  ],
+  [
+    "production smoke requires recovered-job Shopify write gate closed",
+    /jobRecoveryShopifyWritesConfigured/.test(workflow) &&
+      /mustBeFalse/.test(workflow),
+  ],
+  [
+    "production smoke requires a quiescent queue",
+    /\['pending', 'running', 'staleRunning', 'recentFailed'\]/.test(workflow) &&
+      /Number\(jobs\[key\]\) !== 0/.test(workflow),
+  ],
+  [
+    "production smoke supplies no Shopify mutation credential",
+    !/SHOPIFY_ACCESS_TOKEN:\s*\$\{\{/.test(workflow) &&
+      !/CATALOG_AUDIT_WRITE_TOKEN:\s*\$\{\{/.test(workflow),
+  ],
+  [
+    "production smoke summary documents zero-write preconditions",
+    /Recovered-job Shopify write gate must be closed/.test(workflow) &&
+      /No Shopify write token is supplied/.test(workflow),
+  ],
 ];
 
 const failed = assertions.filter(([, ok]) => !ok);
