@@ -58,7 +58,10 @@ assert(
   preDeployCommand.includes('npm run db:deploy:verified'),
   'Railway must retain verified Prisma deployment after the safe-mode preflight',
 );
-assert(railwayConfig?.deploy?.healthcheckPath === '/api/ready', 'Railway healthcheck must use /api/ready');
+assert(
+  railwayConfig?.deploy?.healthcheckPath === '/api/health',
+  'Railway healthcheck must use /api/health liveness; /api/ready remains the strict integration readiness endpoint',
+);
 assert(
   railwayConfig?.deploy?.restartPolicyType === 'ON_FAILURE',
   'Railway restart policy must not restart successful processes indefinitely',
