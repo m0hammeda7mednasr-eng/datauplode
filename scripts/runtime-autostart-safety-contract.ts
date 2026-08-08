@@ -4,11 +4,13 @@ import path from 'node:path';
 const root = process.cwd();
 const serverPath = path.join(root, 'server.ts');
 const queuePath = path.join(root, 'src/server/services/queue.ts');
+const oneTimeSheetImportPath = path.join(root, 'src/server/oneTimeSheetImport.ts');
 const railwayEnvExamplePath = path.join(root, '.env.railway.example');
 const productionEnvExamplePath = path.join(root, '.env.production.example');
 
 const server = fs.readFileSync(serverPath, 'utf8');
 const queue = fs.readFileSync(queuePath, 'utf8');
+const oneTimeSheetImport = fs.readFileSync(oneTimeSheetImportPath, 'utf8');
 const railwayEnvExample = fs.readFileSync(railwayEnvExamplePath, 'utf8');
 const productionEnvExample = fs.readFileSync(productionEnvExamplePath, 'utf8');
 
@@ -54,6 +56,10 @@ const checks: Array<[string, boolean]> = [
   ['recovery has explicit blocked path for Shopify write gate', /Interrupted-job recovery blocked: SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false/.test(server)],
   ['inventory monitor call is guarded', /if \(inventoryAutostartEnabled\(\)[\s\S]*QueueService\.startInventoryMonitor\(\)/.test(server)],
   ['sheet import call is guarded', /if \(sheetImportAutostartEnabled\(\)[\s\S]*startOneTimeSheetImport\(PORT\)/.test(server)],
+  ['one-time sheet importer independently checks both runtime and import gates', /function sheetImportAutostartEnabled\(\)[\s\S]*envFlag\("SYNC_RUNTIME_WRITE_ENABLED"\)[\s\S]*envFlag\("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED"\)/.test(oneTimeSheetImport)],
+  ['one-time sheet importer blocks before scheduling when either gate is closed', /if \(!sheetImportAutostartEnabled\(\)\)[\s\S]*blocked unless SYNC_RUNTIME_WRITE_ENABLED=true and SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=true[\s\S]*return;[\s\S]*setTimeout/.test(oneTimeSheetImport)],
+  ['one-time sheet importer still requires Railway production environment', /if \(!isProduction\(\) \|\| !isRailway\)[\s\S]*return;/.test(oneTimeSheetImport)],
+  ['one-time sheet importer does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(oneTimeSheetImport)],
   ['all write gates are closed in Railway example', hasClosedProductionGates(railwayEnvExample)],
   ['Railway recovery Shopify-write gate defaults closed', /^SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false$/m.test(railwayEnvExample)],
   ['catalog dry run remains enabled in Railway example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(railwayEnvExample)],
