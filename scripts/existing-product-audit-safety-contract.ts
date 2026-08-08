@@ -69,6 +69,53 @@ const assertions: Array<[string, boolean]> = [
       /AUDIT_CHECKED_OUT_REVISION=/.test(workflow),
   ],
   [
+    "existing-product audit binds live target to the locked Railway secret",
+    /AUDIT_BASE_URL:\s*\$\{\{ secrets\.RAILWAY_SMOKE_BASE_URL \}\}/.test(workflow) &&
+      /Existing-product audit target must use HTTPS/.test(workflow),
+  ],
+  [
+    "existing-product audit verifies live Railway revision before Shopify access",
+    /Verify live Railway and Supabase readiness/.test(workflow) &&
+      /deployment\?\.revisionVerified/.test(workflow) &&
+      /actualRevision !== expectedRevision/.test(workflow) &&
+      /Live Railway revision/.test(workflow),
+  ],
+  [
+    "existing-product audit requires exact live Supabase binding",
+    /database\?\.target !== 'supabase'/.test(workflow) &&
+      /database\?\.projectRefPinned !== true/.test(workflow) &&
+      /database\?\.projectRefMatched !== true/.test(workflow),
+  ],
+  [
+    "existing-product audit requires production write-safety before Shopify access",
+    /platform\?\.productionEnvironment !== true/.test(workflow) &&
+      /platform\?\.writeSafetyReady !== true/.test(workflow) &&
+      /platform\?\.ready !== true/.test(workflow),
+  ],
+  [
+    "existing-product audit requires broad and background write gates closed",
+    [
+      'runtimeWriteGateEnabled',
+      'inventoryAutostartEnabled',
+      'jobRecoveryShopifyWritesConfigured',
+      'sheetImportAutostartEnabled',
+      'catalogWriteGateEnabled',
+      'catalogSheetWriteGateEnabled',
+    ].every((key) => workflow.includes(`'${key}'`)) &&
+      /configuration\[key\] !== false/.test(workflow),
+  ],
+  [
+    "existing-product audit requires a quiet production job queue",
+    /\['pending', 'running', 'staleRunning', 'recentFailed'\]/.test(workflow) &&
+      /Number\(jobs\[key\]\) !== 0/.test(workflow),
+  ],
+  [
+    "existing-product audit readiness gate occurs before Shopify secret validation",
+    workflow.indexOf("Verify live Railway and Supabase readiness") >= 0 &&
+      workflow.indexOf("Validate required Shopify read secrets") >
+        workflow.indexOf("Verify live Railway and Supabase readiness"),
+  ],
+  [
     "existing-product audit summary records requested and checked-out revisions",
     /Requested revision:/.test(workflow) && /Checked-out revision:/.test(workflow),
   ],
