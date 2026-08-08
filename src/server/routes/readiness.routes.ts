@@ -108,6 +108,14 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
     payload = {};
   }
   const summary = payload?.summary || {};
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  const shopifyProductIds = [
+    ...new Set(
+      results
+        .map((result: any) => String(result?.shopifyProductId || "").trim())
+        .filter((id: string) => /^gid:\/\/shopify\/Product\/\d+$/.test(id)),
+    ),
+  ];
   return {
     id: run.id,
     status: run.status,
@@ -121,6 +129,8 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
     missing: Number(summary.missing || 0),
     ambiguous: Number(summary.ambiguous || 0),
     errors: Number(summary.errors || 0),
+    shopifyProductIds,
+    shopifyProductId: shopifyProductIds.length === 1 ? shopifyProductIds[0] : null,
   };
 }
 
@@ -149,7 +159,8 @@ function isCanaryReadyDryRun(
       run.verified === 1 &&
       run.missing === 0 &&
       run.ambiguous === 0 &&
-      run.errors === 0,
+      run.errors === 0 &&
+      run.shopifyProductIds.length === 1,
   );
 }
 
