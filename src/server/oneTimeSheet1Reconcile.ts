@@ -9,6 +9,7 @@ const MARKER_TYPE = `ONE_TIME_SHEET1_RECONCILE:${RUN_CONFIRMATION}`;
 const START_DELAY_MS = 20_000;
 const GROUPS_PER_BATCH = 10;
 const RECENT_RUNNING_MS = 45 * 60 * 1000;
+const KNOWN_CANARY_ROWS = [5, 6, 7, 8];
 
 type PlanGroup = {
   url: string;
@@ -197,6 +198,45 @@ function accumulate(
   totals.sheetCells += Number(summary.sheetWrite?.cellsWritten || 0);
 }
 
+async function findCanaryFromRows(port: number, rows: number[]) {
+  for (const rowNumber of rows) {
+    try {
+      const response = await postLocal(port, {
+        dryRun: true,
+        writeSheet: false,
+        rowNumbers: [rowNumber],
+      }, false);
+      const summary = response.summary || {};
+      const verified = (response.results || []).find((result) =>
+        result.status === "verified" &&
+        result.readbackVerified === true &&
+        clean(result.expectedSku) &&
+        Array.isArray(result.rows) &&
+        result.rows.length > 0,
+      );
+      if (
+        Number(summary.errors || 0) === 0 &&
+        Number(summary.ambiguous || 0) === 0 &&
+        Number(summary.conflicts || 0) === 0 &&
+        verified
+      ) {
+        return {
+          rowNumber: Number(verified.rows[0]),
+          expectedSku: clean(verified.expectedSku),
+          productId: clean(verified.shopifyProductId),
+          dryRunBatchId: clean(response.batchId),
+        };
+      }
+    } catch (error: any) {
+      console.warn("[sheet1-reconcile] known canary probe failed", {
+        rowNumber,
+        error: clean(error?.message || error),
+      });
+    }
+  }
+  return null;
+}
+
 async function runOneTimeSheet1Reconcile(port: number) {
   const existing = await existingHandledMarker();
   if (existing) {
@@ -259,47 +299,50 @@ async function runOneTimeSheet1Reconcile(port: number) {
       return;
     }
 
-    let canary: { rowNumber: number; expectedSku: string; productId: string; dryRunBatchId: string } | null = null;
-    const probes = plan.slice(0, 100);
-    for (const group of probes) {
-      try {
-        const response = await postLocal(port, {
-          dryRun: true,
-          writeSheet: false,
-          rowNumbers: group.rows,
-        }, false);
-        const summary = response.summary || {};
-        const verified = (response.results || []).find((result) =>
-          result.status === "verified" &&
-          result.readbackVerified === true &&
-          clean(result.expectedSku) &&
-          Array.isArray(result.rows) &&
-          result.rows.length > 0,
-        );
-        if (
-          Number(summary.errors || 0) === 0 &&
-          Number(summary.ambiguous || 0) === 0 &&
-          Number(summary.conflicts || 0) === 0 &&
-          verified
-        ) {
-          canary = {
-            rowNumber: Number(verified.rows[0]),
-            expectedSku: clean(verified.expectedSku),
-            productId: clean(verified.shopifyProductId),
-            dryRunBatchId: clean(response.batchId),
-          };
-          break;
+    let canary = await findCanaryFromRows(port, KNOWN_CANARY_ROWS);
+
+    if (!canary) {
+      const probes = plan.slice(0, 100);
+      for (const group of probes) {
+        try {
+          const response = await postLocal(port, {
+            dryRun: true,
+            writeSheet: false,
+            rowNumbers: group.rows,
+          }, false);
+          const summary = response.summary || {};
+          const verified = (response.results || []).find((result) =>
+            result.status === "verified" &&
+            result.readbackVerified === true &&
+            clean(result.expectedSku) &&
+            Array.isArray(result.rows) &&
+            result.rows.length > 0,
+          );
+          if (
+            Number(summary.errors || 0) === 0 &&
+            Number(summary.ambiguous || 0) === 0 &&
+            Number(summary.conflicts || 0) === 0 &&
+            verified
+          ) {
+            canary = {
+              rowNumber: Number(verified.rows[0]),
+              expectedSku: clean(verified.expectedSku),
+              productId: clean(verified.shopifyProductId),
+              dryRunBatchId: clean(response.batchId),
+            };
+            break;
+          }
+        } catch (error: any) {
+          console.warn("[sheet1-reconcile] missing-group dry-run probe failed", {
+            rows: group.rows,
+            error: clean(error?.message || error),
+          });
         }
-      } catch (error: any) {
-        console.warn("[sheet1-reconcile] dry-run probe failed", {
-          rows: group.rows,
-          error: clean(error?.message || error),
-        });
       }
     }
 
     if (!canary) {
-      throw new Error("No clean missing-SKU canary candidate was found in the first 100 groups");
+      throw new Error("No clean canary candidate was found in verified rows or the first 100 missing groups");
     }
 
     await updateMarker(marker.id, {
