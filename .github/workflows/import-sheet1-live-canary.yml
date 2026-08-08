@@ -1,0 +1,86 @@
+name: Live sheet 1 linked-product canary
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/import-sheet1-live-canary.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live-sheet1-linked-product-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Call live Railway import endpoint
+        env:
+          BASE_URL: https://datauplode-production.up.railway.app
+          SHEET_URL: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p .import-status
+
+          health_file=$(mktemp)
+          health_code=$(curl --silent --show-error --connect-timeout 20 --max-time 60 \
+            --retry 3 --retry-delay 3 --retry-all-errors \
+            -o "$health_file" -w "%{http_code}" "$BASE_URL/api/health" || true)
+          health_body=$(cat "$health_file")
+          rm -f "$health_file"
+
+          payload='{"sheetUrl":"https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/edit?gid=0","rowNumbers":[3],"createManualReview":true,"processOnlyNewRows":false,"waitForPublishCompletion":false}'
+          response_file=$(mktemp)
+          http_code=$(curl --silent --show-error --connect-timeout 20 --max-time 240 \
+            --retry 2 --retry-delay 4 --retry-all-errors \
+            -o "$response_file" -w "%{http_code}" \
+            -X POST "$BASE_URL/api/imports/excel/process-sheet-link" \
+            -H "Content-Type: application/json" \
+            --data "$payload" || true)
+          response_body=$(cat "$response_file")
+          rm -f "$response_file"
+
+          HEALTH_CODE="$health_code" HEALTH_BODY="$health_body" HTTP_CODE="$http_code" RESPONSE_BODY="$response_body" python3 - <<'PY'
+import json, os
+from datetime import datetime, timezone
+raw = os.environ.get('RESPONSE_BODY','')
+try:
+    parsed = json.loads(raw) if raw else None
+except Exception:
+    parsed = {'raw': raw[:12000]}
+result = {
+  'status': 'completed' if 200 <= int(os.environ.get('HTTP_CODE') or 0) < 300 else 'failed',
+  'sheet': 'الورقة1',
+  'gid': 0,
+  'rows': [3],
+  'healthHttpCode': int(os.environ.get('HEALTH_CODE') or 0),
+  'health': os.environ.get('HEALTH_BODY'),
+  'importHttpCode': int(os.environ.get('HTTP_CODE') or 0),
+  'response': parsed,
+  'updatedAt': datetime.now(timezone.utc).isoformat(),
+}
+with open('.import-status/sheet1-live-canary.json','w',encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+
+          git add .import-status/sheet1-live-canary.json
+          git commit -m "Record live sheet 1 canary result [skip ci]" || true
+          git push origin HEAD:main
+
+          test "$health_code" -ge 200 && test "$health_code" -lt 300
+          test "$http_code" -ge 200 && test "$http_code" -lt 300
