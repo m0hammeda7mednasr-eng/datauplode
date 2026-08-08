@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import axios from "axios";
 import crypto from "crypto";
 import { prisma } from "../db.js";
+import { runWithCatalogCanaryMutationGuard } from "../services/catalogCanaryMutationGuard.js";
 
 function enabled(value: unknown) {
   return String(value ?? "").trim().toLowerCase() === "true";
@@ -357,5 +358,19 @@ export async function catalogAuditSafety(req: Request, res: Response, next: Next
   res.setHeader("X-Catalog-Audit-Offset", "0");
   res.setHeader("X-Catalog-Audit-Max-Rows", "1");
   res.setHeader("X-Catalog-Audit-Sheet-Write", "disabled");
+
+  if (production) {
+    const expectedShopifyProductId = clean(req.body?.canaryExpectedShopifyProductId);
+    try {
+      return runWithCatalogCanaryMutationGuard(expectedShopifyProductId, () => next());
+    } catch (error: any) {
+      return res.status(error?.statusCode || 412).json({
+        success: false,
+        code: error?.code || "CATALOG_AUDIT_CANARY_MUTATION_GUARD_INVALID",
+        error: error?.message || "Catalog canary mutation guard could not be established.",
+      });
+    }
+  }
+
   return next();
 }
