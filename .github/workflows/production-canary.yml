@@ -1,0 +1,198 @@
+name: Production One-Product Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_revision:
+        description: "Exact 40-character Git SHA deployed on Railway"
+        required: true
+        type: string
+      dry_run_batch_id:
+        description: "Exact persisted production dry-run batch ID authorizing this canary"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-production-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+      CANARY_EXPECTED_REVISION: ${{ inputs.canary_revision }}
+      CANARY_DRY_RUN_BATCH_ID: ${{ inputs.dry_run_batch_id }}
+
+    steps:
+      - name: Validate immutable canary inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "canary_revision must be an exact 40-character Git SHA." >&2
+            exit 2
+          fi
+          if [[ -z "$(printf '%s' "${CANARY_DRY_RUN_BATCH_ID}" | tr -d '[:space:]')" ]]; then
+            echo "dry_run_batch_id must be the exact persisted production dry-run batch ID." >&2
+            exit 2
+          fi
+          if [[ -z "${RAILWAY_SMOKE_BASE_URL}" || ! "${RAILWAY_SMOKE_BASE_URL}" =~ ^https:// ]]; then
+            echo "RAILWAY_SMOKE_BASE_URL must be configured and use HTTPS." >&2
+            exit 2
+          fi
+          if [[ -z "${CATALOG_AUDIT_WRITE_TOKEN}" ]]; then
+            echo "CATALOG_AUDIT_WRITE_TOKEN repository secret is required for the one-product canary." >&2
+            exit 2
+          fi
+
+      - name: Checkout exact deployed revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.canary_revision }}
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Checkout ${actual} does not match deployed canary revision ${expected}." >&2
+            exit 2
+          fi
+
+      - name: Verify live Railway, Supabase, queue and exact dry-run provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output readiness-before.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('readiness-before.json', 'utf8'));
+          const expectedRevision = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
+          const expectedDryRun = String(process.env.CANARY_DRY_RUN_BATCH_ID || '').trim();
+          const fail = (message) => { console.error(message); process.exit(2); };
+          const actualRevision = String(body?.deployment?.revision || '').trim().toLowerCase();
+
+          if (body?.ok !== true) fail('Railway /api/ready is not ready; canary blocked.');
+          if (body?.database?.ok !== true || body?.database?.target !== 'supabase') fail('Live Supabase readiness is required; canary blocked.');
+          if (body?.deployment?.revisionVerified !== true || actualRevision !== expectedRevision) fail(`Railway revision ${actualRevision || '<unknown>'} does not match ${expectedRevision}.`);
+          if (body?.platform?.ready !== true || body?.platform?.writeSafetyReady !== true) fail('Platform write-safety readiness is not satisfied.');
+          if (body?.configuration?.runtimeWriteGateEnabled !== false) fail('Runtime broad-write gate must remain disabled during catalog canary.');
+          if (body?.configuration?.inventoryAutostartEnabled !== false) fail('Inventory autostart must remain disabled during catalog canary.');
+          if (body?.configuration?.catalogWriteGateEnabled !== true) fail('Catalog write gate must be enabled explicitly for the canary.');
+          if (body?.configuration?.catalogSheetWriteGateEnabled !== false) fail('Google Sheet write gate must remain disabled during Shopify canary.');
+          if (Number(body?.configuration?.catalogCanaryMaxRows) !== 1) fail('Catalog canary max rows must equal exactly 1.');
+
+          const jobs = body?.jobs || {};
+          for (const key of ['pending', 'running', 'staleRunning', 'recentFailed']) {
+            if (Number(jobs[key]) !== 0) fail(`Canary requires jobs.${key}=0, received ${String(jobs[key])}.`);
+          }
+
+          const dryRun = body?.rollout?.latestDryRun;
+          if (!dryRun) fail('No persisted production dry run is visible in readiness.');
+          if (String(dryRun.id || '').trim() !== expectedDryRun) fail(`Latest dry-run batch ${dryRun.id || '<unknown>'} does not match requested batch ${expectedDryRun}.`);
+          if (body?.rollout?.latestDryRunCanaryReady !== true || body?.rollout?.latestDryRunExpired === true) fail('Requested dry run is not currently canary-ready.');
+          if (dryRun.status !== 'COMPLETED' || dryRun.dryRun !== true || dryRun.writeSheet !== false) fail('Persisted dry run is not a completed no-write dry run.');
+          if (Number(dryRun.uniqueProductsProcessed) !== 1 || Number(dryRun.verified) !== 1 || Number(dryRun.missing) !== 0 || Number(dryRun.ambiguous) !== 0 || Number(dryRun.errors) !== 0) fail('Persisted dry run is not a clean one-product verification.');
+          if (!/^gid:\/\/shopify\/Product\/\d+$/.test(String(dryRun.shopifyProductId || ''))) fail('Dry run does not expose one exact Shopify Product GID.');
+
+          console.log(JSON.stringify({ ok: true, revision: actualRevision, dryRunBatchId: expectedDryRun, productId: dryRun.shopifyProductId }, null, 2));
+          NODE
+
+      - name: Execute exactly one Shopify canary with Sheet writes disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          canary_url="${RAILWAY_SMOKE_BASE_URL%/}/api/catalog-audit/run"
+          http_code="$(curl --silent --show-error --location --max-redirs 0 --max-time 60 \
+            --output canary-response.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'accept: application/json' \
+            --header 'content-type: application/json' \
+            --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+            --header "x-catalog-audit-dry-run-batch-id: ${CANARY_DRY_RUN_BATCH_ID}" \
+            --data '{"dryRun":false,"writeSheet":false,"offset":0,"maxRows":1}' \
+            "${canary_url}")"
+          if [[ "${http_code}" -lt 200 || "${http_code}" -ge 300 ]]; then
+            echo "One-product canary failed with HTTP ${http_code}. No retry is performed automatically." >&2
+            cat canary-response.json >&2 || true
+            exit 1
+          fi
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('canary-response.json', 'utf8'));
+          const expectedDryRun = String(process.env.CANARY_DRY_RUN_BATCH_ID || '').trim();
+          const fail = (message) => { console.error(message); process.exit(2); };
+          const summary = body?.summary || {};
+          if (body?.success !== true) fail('Canary response does not report success=true.');
+          if (!String(body?.batchId || '').trim()) fail('Canary response did not return a persisted batchId.');
+          if (summary.dryRun !== false || summary.writeSheet !== false) fail('Canary response attempted an unsafe mode.');
+          if (Number(summary.uniqueProductsProcessed) !== 1 || Number(summary.verified) !== 1 || Number(summary.missing) !== 0 || Number(summary.ambiguous) !== 0 || Number(summary.errors) !== 0) fail('Canary response is not a clean one-product verification.');
+          if (String(body?.provenance?.dryRunBatchId || '').trim() !== expectedDryRun) fail('Canary response provenance does not match the authorizing dry-run batch.');
+          const productId = String(body?.provenance?.shopifyProductId || '').trim();
+          if (!/^gid:\/\/shopify\/Product\/\d+$/.test(productId)) fail('Canary response provenance does not contain an exact Shopify Product GID.');
+          fs.writeFileSync('canary-result.env', `CANARY_BATCH_ID=${String(body.batchId).trim()}\nCANARY_PRODUCT_ID=${productId}\n`);
+          console.log(JSON.stringify({ ok: true, batchId: body.batchId, dryRunBatchId: expectedDryRun, productId, shopifyMutationsScope: 1, googleSheetWrites: 0 }, null, 2));
+          NODE
+
+      - name: Read back the exact persisted canary from Supabase readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          source canary-result.env
+          ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output readiness-after.json \
+            "${ready_url}"
+          CANARY_BATCH_ID="${CANARY_BATCH_ID}" CANARY_PRODUCT_ID="${CANARY_PRODUCT_ID}" node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('readiness-after.json', 'utf8'));
+          const expectedRevision = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
+          const expectedDryRun = String(process.env.CANARY_DRY_RUN_BATCH_ID || '').trim();
+          const expectedCanary = String(process.env.CANARY_BATCH_ID || '').trim();
+          const expectedProduct = String(process.env.CANARY_PRODUCT_ID || '').trim();
+          const fail = (message) => { console.error(message); process.exit(2); };
+          if (body?.ok !== true || body?.database?.ok !== true || body?.database?.target !== 'supabase') fail('Live Railway/Supabase readiness failed after canary.');
+          if (String(body?.deployment?.revision || '').trim().toLowerCase() !== expectedRevision) fail('Railway revision changed during canary; rollout blocked.');
+          const canary = body?.rollout?.latestCanary;
+          if (!canary || String(canary.id || '').trim() !== expectedCanary) fail('Exact canary batch is not persisted as latestCanary.');
+          if (canary.status !== 'COMPLETED' || canary.dryRun !== false || canary.writeSheet !== false) fail('Persisted canary mode/status is unsafe or incomplete.');
+          if (Number(canary.uniqueProductsProcessed) !== 1 || Number(canary.verified) !== 1 || Number(canary.missing) !== 0 || Number(canary.ambiguous) !== 0 || Number(canary.errors) !== 0) fail('Persisted canary counters are not clean.');
+          if (canary.canaryProvenanceValid !== true) fail('Persisted canary provenance is not internally valid.');
+          if (String(canary.dryRunBatchId || '').trim() !== expectedDryRun) fail('Persisted canary is not tied to the exact authorizing dry run.');
+          if (String(canary.shopifyProductId || '').trim() !== expectedProduct || String(canary.provenanceShopifyProductId || '').trim() !== expectedProduct) fail('Persisted canary product identity changed.');
+          console.log(JSON.stringify({ ok: true, revision: expectedRevision, dryRunBatchId: expectedDryRun, canaryBatchId: expectedCanary, productId: expectedProduct, nextGate: 'Shopify read-back required before any broader write' }, null, 2));
+          NODE
+
+      - name: Publish canary summary
+        if: always()
+        shell: bash
+        run: |
+          source canary-result.env 2>/dev/null || true
+          {
+            echo "## Dabdoob one-product production canary"
+            echo
+            echo "- Expected revision: \`${CANARY_EXPECTED_REVISION}\`"
+            echo "- Authorizing dry-run batch: \`${CANARY_DRY_RUN_BATCH_ID}\`"
+            echo "- Canary batch: \`${CANARY_BATCH_ID:-not-created}\`"
+            echo "- Shopify product: \`${CANARY_PRODUCT_ID:-not-written}\`"
+            echo "- Maximum product scope: \`1\`"
+            echo "- Google Sheet writes: \`0\`"
+            echo "- Runtime broad-write gate required disabled: \`true\`"
+            echo "- Exact Supabase persisted-canary read-back required: \`true\`"
+            echo "- Automatic retry after a write attempt: \`false\`"
+            echo "- Next required gate: Shopify read-back for the exact revision + dry-run batch + canary batch + product."
+            echo "- HTTP 403/CAPTCHA/timeout classification: blocked/unknown, never out-of-stock."
+          } >> "$GITHUB_STEP_SUMMARY"
