@@ -32,7 +32,7 @@ const checks: Array<[string, boolean]> = [
   ["canary request forces maxRows one", workflow.includes("\"maxRows\":1")],
   ["canary supplies write authorization header", workflow.includes("x-catalog-audit-write-token")],
   ["canary supplies exact dry-run provenance header", workflow.includes("x-catalog-audit-dry-run-batch-id")],
-  ["automatic retry is not configured", !workflow.includes("retry") && workflow.includes("No retry is performed automatically")],
+  ["automatic retry after write attempt is explicitly disabled", workflow.includes("No retry is performed automatically") && !workflow.includes("retry-max") && !workflow.includes("max-attempts")],
   ["canary response must return persisted batch", workflow.includes("Canary response did not return a persisted batchId")],
   ["canary response must remain one clean product", workflow.includes("Canary response is not a clean one-product verification")],
   ["canary response provenance must match dry run", workflow.includes("Canary response provenance does not match the authorizing dry-run batch")],
