@@ -1,7 +1,7 @@
 import axios, { type AxiosResponse } from "axios";
 
 type ExpectedVariant = {
-  id?: string;
+  id: string;
   sku: string;
   price: string | number;
 };
@@ -76,7 +76,11 @@ function parseExpectedVariants(): ExpectedVariant[] {
   return parsed.map((entry, index) => {
     const sku = String((entry as any)?.sku || "").trim();
     const price = (entry as any)?.price;
-    const id = String((entry as any)?.id || "").trim() || undefined;
+    const id = String((entry as any)?.id || "").trim();
+    if (!id) throw new Error(`Expected variant ${index + 1} is missing Shopify variant id`);
+    if (!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(id)) {
+      throw new Error(`Expected variant ${index + 1} has an invalid Shopify variant GID`);
+    }
     if (!sku) throw new Error(`Expected variant ${index + 1} is missing sku`);
     if (price === undefined || price === null || String(price).trim() === "") {
       throw new Error(`Expected variant ${index + 1} is missing price`);
@@ -84,13 +88,10 @@ function parseExpectedVariants(): ExpectedVariant[] {
     if (!Number.isFinite(Number(price)) || Number(price) < 0) {
       throw new Error(`Expected variant ${index + 1} has an invalid price`);
     }
-    if (id && !/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(id)) {
-      throw new Error(`Expected variant ${index + 1} has an invalid Shopify variant GID`);
-    }
     if (skus.has(sku)) throw new Error(`Duplicate expected SKU: ${sku}`);
-    if (id && ids.has(id)) throw new Error(`Duplicate expected variant ID: ${id}`);
+    if (ids.has(id)) throw new Error(`Duplicate expected variant ID: ${id}`);
     skus.add(sku);
-    if (id) ids.add(id);
+    ids.add(id);
     return { id, sku, price };
   });
 }
@@ -208,6 +209,7 @@ async function main() {
   const failures: string[] = [];
   const matchedIds = new Set<string>();
   const actualIds = new Set(actual.map((variant) => variant.id));
+  const expectedIds = new Set(expected.map((variant) => variant.id));
 
   if (hasNextVariantPage) {
     failures.push("Variant read-back was truncated after 250 variants; exact variant-set verification is impossible");
@@ -218,14 +220,24 @@ async function main() {
   if (actualIds.size !== actual.length) {
     failures.push(`Shopify read-back returned duplicate variant IDs: ${actual.length - actualIds.size} duplicate(s)`);
   }
+  if (expectedIds.size !== expected.length) {
+    failures.push("Expected read-back payload contains duplicate Shopify variant IDs");
+  }
+
+  const missingExpectedIds = [...expectedIds].filter((id) => !actualIds.has(id));
+  const unexpectedActualIds = [...actualIds].filter((id) => !expectedIds.has(id));
+  if (missingExpectedIds.length > 0) {
+    failures.push(`Missing expected Shopify variant IDs: ${missingExpectedIds.join(", ")}`);
+  }
+  if (unexpectedActualIds.length > 0) {
+    failures.push(`Unexpected Shopify variant IDs: ${unexpectedActualIds.join(", ")}`);
+  }
 
   for (const expectedVariant of expected) {
-    const match = expectedVariant.id
-      ? actual.find((variant) => variant.id === expectedVariant.id)
-      : actual.find((variant) => (variant.sku || variant.inventoryItem?.sku || "") === expectedVariant.sku);
+    const match = actual.find((variant) => variant.id === expectedVariant.id);
 
     if (!match) {
-      failures.push(`Missing expected variant sku=${expectedVariant.sku}${expectedVariant.id ? ` id=${expectedVariant.id}` : ""}`);
+      failures.push(`Missing expected variant sku=${expectedVariant.sku} id=${expectedVariant.id}`);
       continue;
     }
 
@@ -247,6 +259,7 @@ async function main() {
     ok: failures.length === 0,
     readOnly: true,
     exactVariantSetRequired: true,
+    exactVariantIdsRequired: true,
     completeVariantSetObserved: !hasNextVariantPage,
     attempts,
     shopDomain,
@@ -267,6 +280,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, readOnly: true, exactVariantSetRequired: true, error: error instanceof Error ? error.message : String(error) }, null, 2));
+  console.error(JSON.stringify({ ok: false, readOnly: true, exactVariantSetRequired: true, exactVariantIdsRequired: true, error: error instanceof Error ? error.message : String(error) }, null, 2));
   process.exitCode = 1;
 });
