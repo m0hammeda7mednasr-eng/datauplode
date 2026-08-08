@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ShopifyService } from "./shopify.js";
+import {
+  catalogCanaryQueueIsQuiescent,
+  verifyCatalogCanaryQueueQuiescence,
+} from "./catalogCanaryQueueGuard.js";
 
 type CanaryMutationContext = {
   expectedShopifyProductId: string;
@@ -34,6 +38,34 @@ function installGuard() {
           {
             code: "CATALOG_AUDIT_CANARY_MUTATION_PRODUCT_MISMATCH",
             statusCode: 412,
+          },
+        );
+      }
+
+      let queueState;
+      try {
+        queueState = await verifyCatalogCanaryQueueQuiescence();
+      } catch {
+        throw Object.assign(
+          new Error(
+            "Catalog canary queue verification is unavailable immediately before Shopify mutation; no write was attempted.",
+          ),
+          {
+            code: "CATALOG_AUDIT_CANARY_QUEUE_CHECK_UNAVAILABLE",
+            statusCode: 503,
+          },
+        );
+      }
+
+      if (!catalogCanaryQueueIsQuiescent(queueState)) {
+        throw Object.assign(
+          new Error(
+            `Catalog canary requires a quiescent sync queue immediately before Shopify mutation (pending=${queueState.pending}, running=${queueState.running}, staleRunning=${queueState.staleRunning}, recentFailed=${queueState.recentFailed}).`,
+          ),
+          {
+            code: "CATALOG_AUDIT_CANARY_QUEUE_NOT_QUIESCENT",
+            statusCode: 409,
+            queueState,
           },
         );
       }
