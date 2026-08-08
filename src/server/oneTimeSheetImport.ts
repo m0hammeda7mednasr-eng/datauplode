@@ -31,6 +31,18 @@ type ImportResult = Record<string, unknown> & {
   published?: number;
 };
 
+function envFlag(name: string, defaultValue = false) {
+  const fallback = defaultValue ? "true" : "false";
+  return envString(name, fallback).trim().toLowerCase() === "true";
+}
+
+function sheetImportAutostartEnabled() {
+  return (
+    envFlag("SYNC_RUNTIME_WRITE_ENABLED") &&
+    envFlag("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED")
+  );
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -225,6 +237,17 @@ export function startOneTimeSheetImport(port: number) {
     );
     return;
   }
+
+  if (!sheetImportAutostartEnabled()) {
+    console.log(
+      "[one-time-import] blocked unless SYNC_RUNTIME_WRITE_ENABLED=true and SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=true",
+    );
+    return;
+  }
+
+  console.warn(
+    "[one-time-import] explicit runtime-write and sheet-import autostart gates are ENABLED",
+  );
 
   setTimeout(() => {
     void runOneTimeSheetImport(port).catch((error) => {
