@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import axios from "axios";
 import crypto from "crypto";
 import { prisma } from "../db.js";
 
@@ -15,6 +16,59 @@ function spreadsheetId(value: unknown) {
   return match?.[1] || "";
 }
 
+function canonicalSourceUrl(value: unknown) {
+  const input = clean(value).replace(/[\t\r\n]+/g, "");
+  try {
+    const parsed = new URL(input);
+    parsed.hash = "";
+    parsed.search = "";
+    parsed.hostname = parsed.hostname.toLowerCase();
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return input;
+  }
+}
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"') {
+      if (quoted && next === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+
+  row.push(cell);
+  if (row.length > 1 || row.some((value) => clean(value))) rows.push(row);
+  return rows;
+}
+
 function safeEqual(left: string, right: string) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
@@ -25,6 +79,76 @@ function canaryDryRunMaxAgeMinutes() {
   const configured = Number(process.env.CATALOG_AUDIT_CANARY_DRY_RUN_MAX_AGE_MINUTES || 30);
   if (!Number.isFinite(configured)) return 30;
   return Math.min(120, Math.max(1, Math.floor(configured)));
+}
+
+async function verifyCurrentCanarySource(
+  configuredSheetId: string,
+  verifiedResult: any,
+  expectedShopifyProductId: string,
+) {
+  const expectedSheetId = Number(verifiedResult?.sheetId);
+  const expectedRowNumber = Number(verifiedResult?.rowNumber);
+  const expectedSourceUrl = canonicalSourceUrl(verifiedResult?.url);
+  if (
+    !Number.isSafeInteger(expectedSheetId) ||
+    expectedSheetId < 0 ||
+    !Number.isSafeInteger(expectedRowNumber) ||
+    expectedRowNumber < 1 ||
+    !expectedSourceUrl
+  ) {
+    return { ok: false as const, code: "CATALOG_AUDIT_CANARY_DRY_RUN_IDENTITY_INVALID" };
+  }
+
+  const exportUrl = `https://docs.google.com/spreadsheets/d/${configuredSheetId}/export?format=csv&gid=${expectedSheetId}`;
+  let csv = "";
+  try {
+    const response = await axios.get(exportUrl, {
+      timeout: Number(process.env.GOOGLE_SHEET_FETCH_TIMEOUT_MS || 30000),
+      responseType: "text",
+    });
+    csv = String(response.data || "");
+  } catch {
+    return { ok: false as const, code: "CATALOG_AUDIT_CANARY_SOURCE_REVALIDATION_UNAVAILABLE" };
+  }
+
+  const currentRow = parseCsv(csv)[expectedRowNumber - 1] || [];
+  const rowStillMatches = currentRow.some(
+    (cell) => canonicalSourceUrl(cell) === expectedSourceUrl,
+  );
+  if (!rowStillMatches) {
+    return { ok: false as const, code: "CATALOG_AUDIT_CANARY_SOURCE_CHANGED" };
+  }
+
+  const sourceProducts = await prisma.sourceProduct.findMany({
+    where: {
+      shopifyProduct: { isNot: null },
+      OR: [
+        { url: { equals: clean(verifiedResult?.url), mode: "insensitive" } },
+        { url: { equals: expectedSourceUrl, mode: "insensitive" } },
+      ],
+    } as any,
+    include: { shopifyProduct: true },
+    take: 10,
+  });
+  const exactMappings = sourceProducts.filter(
+    (product) => canonicalSourceUrl(product.url) === expectedSourceUrl,
+  );
+  if (exactMappings.length !== 1) {
+    return { ok: false as const, code: "CATALOG_AUDIT_CANARY_PRODUCT_MAPPING_NOT_UNIQUE" };
+  }
+
+  const currentShopifyProductId = clean(exactMappings[0]?.shopifyProduct?.shopifyId);
+  if (!currentShopifyProductId || currentShopifyProductId !== expectedShopifyProductId) {
+    return { ok: false as const, code: "CATALOG_AUDIT_CANARY_PRODUCT_IDENTITY_CHANGED" };
+  }
+
+  return {
+    ok: true as const,
+    expectedSourceUrl,
+    expectedSheetId,
+    expectedRowNumber,
+    expectedShopifyProductId,
+  };
 }
 
 async function verifyCanaryDryRunBatch(req: Request, res: Response, configuredSheetId: string) {
@@ -70,10 +194,11 @@ async function verifyCanaryDryRunBatch(req: Request, res: Response, configuredSh
 
   const summary = payload?.summary || {};
   const results = Array.isArray(payload?.results) ? payload.results : [];
+  const verifiedResults = results.filter(
+    (entry: any) => entry?.status === "verified" && clean(entry?.shopifyProductId),
+  );
   const verifiedProducts = new Set(
-    results
-      .filter((entry: any) => entry?.status === "verified" && clean(entry?.shopifyProductId))
-      .map((entry: any) => clean(entry.shopifyProductId)),
+    verifiedResults.map((entry: any) => clean(entry.shopifyProductId)),
   );
   const batchSheetId = spreadsheetId(payload?.spreadsheetUrl);
   const valid =
@@ -84,6 +209,7 @@ async function verifyCanaryDryRunBatch(req: Request, res: Response, configuredSh
     Number(summary.missing) === 0 &&
     Number(summary.ambiguous) === 0 &&
     Number(summary.errors) === 0 &&
+    verifiedResults.length === 1 &&
     verifiedProducts.size === 1 &&
     batchSheetId === configuredSheetId;
 
@@ -96,8 +222,33 @@ async function verifyCanaryDryRunBatch(req: Request, res: Response, configuredSh
     return false;
   }
 
-  req.body = { ...req.body, dryRunBatchId };
+  const verifiedResult = verifiedResults[0];
+  const expectedShopifyProductId = clean(verifiedResult.shopifyProductId);
+  const identity = await verifyCurrentCanarySource(
+    configuredSheetId,
+    verifiedResult,
+    expectedShopifyProductId,
+  );
+  if (!identity.ok) {
+    const unavailable = identity.code === "CATALOG_AUDIT_CANARY_SOURCE_REVALIDATION_UNAVAILABLE";
+    res.status(unavailable ? 503 : 412).json({
+      success: false,
+      code: identity.code,
+      error: unavailable
+        ? "Canary source revalidation is unavailable; no Shopify write was attempted."
+        : "The current production source no longer proves the exact dry-run product identity; no Shopify write was attempted.",
+    });
+    return false;
+  }
+
+  req.body = {
+    ...req.body,
+    dryRunBatchId,
+    canaryExpectedShopifyProductId: identity.expectedShopifyProductId,
+  };
   res.setHeader("X-Catalog-Audit-Dry-Run-Batch", dryRunBatchId);
+  res.setHeader("X-Catalog-Audit-Canary-Product", identity.expectedShopifyProductId);
+  res.setHeader("X-Catalog-Audit-Canary-Source-Row", String(identity.expectedRowNumber));
   return true;
 }
 
