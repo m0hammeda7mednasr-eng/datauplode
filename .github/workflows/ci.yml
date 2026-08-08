@@ -73,6 +73,9 @@ jobs:
       - name: Enforce production smoke target safety contract
         run: npx tsx scripts/production-smoke-target-safety-contract.ts
 
+      - name: Enforce production dry-run read-back safety contract
+        run: npx tsx scripts/production-smoke-dry-run-readback-safety-contract.ts
+
       - name: Enforce database preflight schema drift contract
         run: npx tsx scripts/database-preflight-safety-contract.ts
 
