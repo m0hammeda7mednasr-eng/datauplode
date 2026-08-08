@@ -5,20 +5,20 @@ import { prisma } from "./db.js";
 
 const SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const SHEET_GID = 0;
-const SHEET_ID = 0;
 const RUN_CONFIRMATION = "2026-08-09-sheet1-reconcile-v1";
 const MARKER_TYPE = `ONE_TIME_SHEET1_RECONCILE:${RUN_CONFIRMATION}`;
-const START_DELAY_MS = 20_000;
-const BETWEEN_GROUPS_MS = 3_500;
-const RETRY_DELAYS_MS = [0, 15_000, 45_000] as const;
-const CONSECUTIVE_ERROR_LIMIT = 4;
-const RECENT_RUNNING_MS = 45 * 60 * 1000;
-const KNOWN_CANARY_ROWS = [5, 6, 7, 8];
 
-type PlanGroup = {
+const START_DELAY_MS = 20_000;
+const BETWEEN_ROWS_MS = 2_500;
+const BETWEEN_PASSES_MS = 5 * 60 * 1000;
+const FAILED_PASS_RETRY_MS = 60_000;
+const RETRY_DELAYS_MS = [0, 10_000, 30_000] as const;
+
+type SheetRow = {
+  rowNumber: number;
   url: string;
-  rows: number[];
-  multipliers: number[];
+  multiplier: number;
+  sku: string;
 };
 
 type ReconcileResponse = {
@@ -29,21 +29,20 @@ type ReconcileResponse = {
   error?: string;
 };
 
-type RunTotals = {
-  groupsAttempted: number;
+type WorkerTotals = {
+  attempted: number;
   verified: number;
-  rows: number;
+  rowsProcessed: number;
   missing: number;
   ambiguous: number;
   conflicts: number;
-  coreErrors: number;
+  errors: number;
   retries: number;
-  sheetCells: number;
-  sheetErrors: number;
-  skippedPreviouslyVerifiedRows: number;
+  alreadyMarkedInSheet: number;
+  previouslyVerified: number;
 };
 
-let googleTokenCache: { token: string; expiresAt: number } | null = null;
+let workerStarted = false;
 
 function clean(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -51,20 +50,6 @@ function clean(value: unknown) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function canonicalizeUrl(value: string) {
-  const raw = String(value || "").replace(/[\t\r\n]+/g, "").trim();
-  try {
-    const parsed = new URL(raw);
-    parsed.hash = "";
-    parsed.search = "";
-    parsed.hostname = parsed.hostname.toLowerCase();
-    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    return raw;
-  }
 }
 
 function parseCsv(text: string): string[][] {
@@ -109,8 +94,8 @@ function parseCsv(text: string): string[][] {
 function parseMultiplier(value: unknown) {
   const normalized = clean(value).replace(/,/g, ".");
   if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
-  const number = Number(normalized);
-  return Number.isFinite(number) && number >= 1 && number <= 100 ? number : null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 100 ? parsed : null;
 }
 
 function readJson(value: string | null | undefined) {
@@ -123,73 +108,53 @@ function readJson(value: string | null | undefined) {
   }
 }
 
+async function loadSheetRows(): Promise<SheetRow[]> {
+  const csvUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
+  const response = await axios.get(csvUrl, {
+    timeout: Number(process.env.GOOGLE_SHEET_FETCH_TIMEOUT_MS || 30_000),
+    responseType: "text",
+  });
+
+  return parseCsv(String(response.data || ""))
+    .map((cells, index): SheetRow | null => {
+      const url = clean(cells[0]);
+      const multiplier = parseMultiplier(cells[1]);
+      if (!/^https?:\/\//i.test(url) || multiplier === null) return null;
+      return {
+        rowNumber: index + 1,
+        url,
+        multiplier,
+        sku: clean(cells[3]),
+      };
+    })
+    .filter((row): row is SheetRow => Boolean(row))
+    .sort((a, b) => a.rowNumber - b.rowNumber);
+}
+
 async function loadPreviouslyVerifiedRows() {
-  const rows = new Set<number>();
+  const verified = new Set<number>();
   const runs = await prisma.importBatch.findMany({
     where: { target: "sheet1_reconcile" },
     orderBy: { createdAt: "desc" },
-    take: 5000,
+    take: 10_000,
     select: { payloadJson: true },
   });
 
   for (const run of runs) {
-    const payload = readJson(run.payloadJson);
-    const summary = (payload as any)?.summary || {};
-    if (summary?.dryRun === true) continue;
-    const results = Array.isArray((payload as any)?.results)
-      ? (payload as any).results
-      : [];
+    const payload = readJson(run.payloadJson) as any;
+    if (payload?.summary?.dryRun === true) continue;
+    const results = Array.isArray(payload?.results) ? payload.results : [];
     for (const result of results) {
       if (result?.status !== "verified" || result?.readbackVerified !== true) continue;
       if (!Array.isArray(result?.rows)) continue;
-      for (const value of result.rows) {
-        const rowNumber = Number(value);
-        if (Number.isSafeInteger(rowNumber) && rowNumber > 0) rows.add(rowNumber);
+      for (const rawRow of result.rows) {
+        const rowNumber = Number(rawRow);
+        if (Number.isSafeInteger(rowNumber) && rowNumber > 0) verified.add(rowNumber);
       }
     }
   }
 
-  return rows;
-}
-
-async function buildFrozenPlan(previouslyVerifiedRows: Set<number>): Promise<PlanGroup[]> {
-  const csvUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
-  const response = await axios.get(csvUrl, {
-    timeout: Number(process.env.GOOGLE_SHEET_FETCH_TIMEOUT_MS || 30000),
-    responseType: "text",
-  });
-
-  const grouped = new Map<
-    string,
-    Array<{ rowNumber: number; multiplier: number; sku: string }>
-  >();
-
-  parseCsv(String(response.data || "")).forEach((cells, index) => {
-    const rawUrl = clean(cells[0]);
-    const multiplier = parseMultiplier(cells[1]);
-    const sku = clean(cells[3]);
-    if (!/^https?:\/\//i.test(rawUrl) || multiplier === null) return;
-    const url = canonicalizeUrl(rawUrl);
-    const list = grouped.get(url) || [];
-    list.push({ rowNumber: index + 1, multiplier, sku });
-    grouped.set(url, list);
-  });
-
-  const plan: PlanGroup[] = [];
-  for (const [url, rows] of grouped) {
-    const pendingRows = rows.filter(
-      (row) => !row.sku && !previouslyVerifiedRows.has(row.rowNumber),
-    );
-    if (!pendingRows.length) continue;
-    plan.push({
-      url,
-      rows: pendingRows.map((row) => row.rowNumber),
-      multipliers: [...new Set(pendingRows.map((row) => row.multiplier))].sort(
-        (a, b) => a - b,
-      ),
-    });
-  }
-  return plan;
+  return verified;
 }
 
 function ensureInternalWriteToken() {
@@ -197,168 +162,86 @@ function ensureInternalWriteToken() {
   if (!token) {
     token = crypto.randomBytes(32).toString("hex");
     process.env.CATALOG_AUDIT_WRITE_TOKEN = token;
-    console.warn(
-      "[sheet1-reconcile] generated an ephemeral in-process write token for the guarded loopback one-time run",
-    );
+    console.warn("[sheet1-worker] generated ephemeral in-process catalog write token");
   }
   return token;
 }
 
-async function postLocal(
-  port: number,
-  payload: Record<string, any>,
-  write: boolean,
-): Promise<ReconcileResponse> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (write) {
-    const token = ensureInternalWriteToken();
-    headers["x-catalog-audit-write-token"] = token;
-    headers["x-sheet1-reconcile-run"] = RUN_CONFIRMATION;
-  }
-
+async function postReconcile(port: number, rowNumber: number): Promise<ReconcileResponse> {
   const response = await axios.post(
     `http://127.0.0.1:${port}/api/sheet1-reconcile/run`,
-    payload,
     {
-      headers,
-      timeout: write ? 15 * 60 * 1000 : 5 * 60 * 1000,
+      dryRun: false,
+      writeSheet: false,
+      rowNumbers: [rowNumber],
+    },
+    {
+      timeout: 8 * 60 * 1000,
       validateStatus: () => true,
+      headers: {
+        "Content-Type": "application/json",
+        "x-catalog-audit-write-token": ensureInternalWriteToken(),
+        "x-sheet1-reconcile-run": RUN_CONFIRMATION,
+      },
     },
   );
 
   const body = response.data && typeof response.data === "object"
     ? (response.data as ReconcileResponse)
     : { error: clean(response.data) };
+
   if (response.status < 200 || response.status >= 300 || body.success !== true) {
-    throw new Error(
-      body.error || `Sheet 1 reconcile API returned HTTP ${response.status}`,
-    );
+    throw new Error(body.error || `Sheet1 reconcile returned HTTP ${response.status}`);
   }
   return body;
 }
 
-function googleWriterConfigured() {
-  if (clean(process.env.GOOGLE_SHEETS_ACCESS_TOKEN)) return true;
-  const email = clean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
-  const privateKey = clean(
-    process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64 ||
-      process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY,
-  );
-  return Boolean(email && privateKey);
+function resultStatus(response: ReconcileResponse) {
+  const results = Array.isArray(response.results) ? response.results : [];
+  if (!results.length) return "error";
+  if (results.every((result) => result?.status === "verified" && result?.readbackVerified === true)) {
+    return "verified";
+  }
+  if (results.some((result) => result?.status === "conflict")) return "conflict";
+  if (results.some((result) => result?.status === "ambiguous")) return "ambiguous";
+  if (results.some((result) => result?.status === "missing")) return "missing";
+  return "error";
 }
 
-function base64Url(value: string | Buffer) {
-  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
-  return buffer
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-}
-
-async function googleAccessToken() {
-  const direct = clean(process.env.GOOGLE_SHEETS_ACCESS_TOKEN);
-  if (direct) return direct;
-  if (googleTokenCache && googleTokenCache.expiresAt > Date.now() + 60_000) {
-    return googleTokenCache.token;
-  }
-
-  const email = clean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
-  const encodedKey = clean(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_BASE64);
-  const privateKey = encodedKey
-    ? Buffer.from(encodedKey, "base64").toString("utf8")
-    : String(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-  if (!email || !privateKey) {
-    throw new Error("Google Sheets writer credentials are missing in Railway");
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claim = base64Url(
-    JSON.stringify({
-      iss: email,
-      scope: "https://www.googleapis.com/auth/spreadsheets",
-      aud: "https://oauth2.googleapis.com/token",
-      iat: now,
-      exp: now + 3600,
-    }),
-  );
-  const unsigned = `${header}.${claim}`;
-  const signer = crypto.createSign("RSA-SHA256");
-  signer.update(unsigned);
-  signer.end();
-  const assertion = `${unsigned}.${base64Url(signer.sign(privateKey))}`;
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion,
-  });
-  const response = await axios.post("https://oauth2.googleapis.com/token", body, {
-    timeout: 20000,
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  });
-  const token = clean(response.data?.access_token);
-  if (!token) throw new Error("Google did not return an access token");
-  googleTokenCache = {
-    token,
-    expiresAt: Date.now() + Number(response.data?.expires_in || 3600) * 1000,
+function collectIssue(response: ReconcileResponse | null, row: SheetRow, error = "") {
+  const result = response?.results?.find((item) => item?.status !== "verified");
+  return {
+    row: row.rowNumber,
+    url: row.url,
+    status: clean(result?.status || "error"),
+    productCode: clean(result?.productCode || ""),
+    reason: clean(result?.reason || error || "Unknown reconcile error").slice(0, 2000),
   };
-  return token;
 }
 
-async function writeVerifiedSkusToSheet(results: Array<Record<string, any>>) {
-  const verified = results.filter(
-    (result) =>
-      result?.status === "verified" &&
-      result?.readbackVerified === true &&
-      clean(result?.expectedSku) &&
-      Array.isArray(result?.rows),
-  );
-  if (!verified.length) return { cellsWritten: 0, batches: 0 };
+async function processRow(port: number, row: SheetRow, totals: WorkerTotals) {
+  let lastResponse: ReconcileResponse | null = null;
+  let lastError = "";
 
-  const requests: any[] = [];
-  for (const result of verified) {
-    const sku = clean(result.expectedSku);
-    for (const rawRowNumber of result.rows) {
-      const rowNumber = Number(rawRowNumber);
-      if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) continue;
-      requests.push({
-        updateCells: {
-          range: {
-            sheetId: SHEET_ID,
-            startRowIndex: rowNumber - 1,
-            endRowIndex: rowNumber,
-            startColumnIndex: 3,
-            endColumnIndex: 4,
-          },
-          rows: [
-            { values: [{ userEnteredValue: { stringValue: sku } }] },
-          ],
-          fields: "userEnteredValue",
-        },
-      });
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+    const delay = RETRY_DELAYS_MS[attempt];
+    if (delay > 0) {
+      totals.retries += 1;
+      await sleep(delay);
+    }
+
+    try {
+      const response = await postReconcile(port, row.rowNumber);
+      lastResponse = response;
+      const status = resultStatus(response);
+      if (status !== "error") return { status, response, error: "" };
+      lastError = clean(response.results?.[0]?.reason || "Reconcile returned error status");
+    } catch (error: any) {
+      lastError = clean(error?.message || error).slice(0, 2000);
     }
   }
-  if (!requests.length) return { cellsWritten: 0, batches: 0 };
 
-  const token = await googleAccessToken();
-  let batches = 0;
-  for (let index = 0; index < requests.length; index += 300) {
-    await axios.post(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
-      { requests: requests.slice(index, index + 300) },
-      {
-        timeout: 30000,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-    batches += 1;
-  }
-  return { cellsWritten: requests.length, batches };
+  return { status: "error", response: lastResponse, error: lastError };
 }
 
 async function updateMarker(markerId: string, result: Record<string, any>) {
@@ -368,190 +251,76 @@ async function updateMarker(markerId: string, result: Record<string, any>) {
   });
 }
 
-async function existingHandledMarker() {
-  const latest = await prisma.syncJob.findFirst({
-    where: { type: MARKER_TYPE },
-    orderBy: { createdAt: "desc" },
-  });
-  if (!latest) return null;
-  if (latest.status === "completed") return latest;
-  if (latest.status === "running" && latest.startedAt) {
-    if (Date.now() - latest.startedAt.getTime() < RECENT_RUNNING_MS) return latest;
-  }
-  return null;
-}
-
-function resultStatus(response: ReconcileResponse) {
-  const results = Array.isArray(response.results) ? response.results : [];
-  if (!results.length) return "error";
-  if (results.every((result) => result?.status === "verified")) return "verified";
-  if (results.some((result) => result?.status === "error")) return "error";
-  if (results.some((result) => result?.status === "ambiguous")) return "ambiguous";
-  if (results.some((result) => result?.status === "conflict")) return "conflict";
-  if (results.some((result) => result?.status === "missing")) return "missing";
-  return clean(results[0]?.status) || "error";
-}
-
-function collectIssues(response: ReconcileResponse) {
-  return (response.results || [])
-    .filter((result) => result?.status !== "verified")
-    .map((result) => ({
-      status: clean(result?.status),
-      rows: result?.rows,
-      url: result?.url,
-      productCode: result?.productCode,
-      reason: clean(result?.reason).slice(0, 2000),
-    }));
-}
-
-async function findCanaryFromRows(port: number, rows: number[]) {
-  for (const rowNumber of rows) {
-    try {
-      const response = await postLocal(
-        port,
-        { dryRun: true, writeSheet: false, rowNumbers: [rowNumber] },
-        false,
-      );
-      const summary = response.summary || {};
-      const verified = (response.results || []).find(
-        (result) =>
-          result.status === "verified" &&
-          result.readbackVerified === true &&
-          clean(result.expectedSku) &&
-          Array.isArray(result.rows) &&
-          result.rows.length > 0,
-      );
-      if (
-        Number(summary.errors || 0) === 0 &&
-        Number(summary.ambiguous || 0) === 0 &&
-        Number(summary.conflicts || 0) === 0 &&
-        verified
-      ) {
-        return {
-          rowNumber: Number(verified.rows[0]),
-          expectedSku: clean(verified.expectedSku),
-          productId: clean(verified.shopifyProductId),
-          dryRunBatchId: clean(response.batchId),
-        };
-      }
-    } catch (error: any) {
-      console.warn("[sheet1-reconcile] known canary probe failed", {
-        rowNumber,
-        error: clean(error?.message || error),
-      });
-    }
-  }
-  return null;
-}
-
-async function processGroupWithRetries(
-  port: number,
-  group: PlanGroup,
-  totals: RunTotals,
-) {
-  let lastResponse: ReconcileResponse | null = null;
-  let lastTransportError = "";
-
-  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
-    const delay = RETRY_DELAYS_MS[attempt];
-    if (delay > 0) {
-      totals.retries += 1;
-      console.warn(
-        `[sheet1-reconcile] retrying rows ${group.rows.join(",")} after ${delay}ms`,
-      );
-      await sleep(delay);
-    }
-
-    try {
-      const response = await postLocal(
-        port,
-        { dryRun: false, writeSheet: false, rowNumbers: group.rows },
-        true,
-      );
-      lastResponse = response;
-      const status = resultStatus(response);
-      if (status !== "error") {
-        return { response, status, transportError: "" };
-      }
-    } catch (error: any) {
-      lastTransportError = clean(error?.message || error).slice(0, 2000);
-    }
-  }
-
-  return {
-    response: lastResponse,
-    status: "error",
-    transportError: lastTransportError,
-  };
-}
-
-async function runOneTimeSheet1Reconcile(port: number) {
-  const existing = await existingHandledMarker();
-  if (existing) {
-    console.log(
-      `[sheet1-reconcile] ${MARKER_TYPE} already ${existing.status}; startup run skipped`,
-    );
-    return;
-  }
-
+async function runPass(port: number) {
   const marker = await prisma.syncJob.create({
     data: {
       type: MARKER_TYPE,
       status: "running",
       startedAt: new Date(),
       payload: JSON.stringify({
-        runConfirmation: RUN_CONFIRMATION,
+        mode: "continuous_existing_products_only",
         spreadsheetId: SPREADSHEET_ID,
         sheetGid: SHEET_GID,
-        mode: "existing_products_only",
         createProducts: false,
         rebuildProducts: false,
-        pacingMs: BETWEEN_GROUPS_MS,
+        continueAfterRowErrors: true,
         retryDelaysMs: RETRY_DELAYS_MS,
-        resumeFromVerifiedImportBatches: true,
+        betweenRowsMs: BETWEEN_ROWS_MS,
       }),
     },
   });
 
-  const totals: RunTotals = {
-    groupsAttempted: 0,
+  const totals: WorkerTotals = {
+    attempted: 0,
     verified: 0,
-    rows: 0,
+    rowsProcessed: 0,
     missing: 0,
     ambiguous: 0,
     conflicts: 0,
-    coreErrors: 0,
+    errors: 0,
     retries: 0,
-    sheetCells: 0,
-    sheetErrors: 0,
-    skippedPreviouslyVerifiedRows: 0,
+    alreadyMarkedInSheet: 0,
+    previouslyVerified: 0,
   };
   const issues: Array<Record<string, any>> = [];
-  let sheetWriteEnabled = googleWriterConfigured();
-  let sheetWriteDisabledReason = sheetWriteEnabled
-    ? ""
-    : "Google writer credentials are not configured in Railway; external Sheet backfill is required.";
 
   try {
-    const previouslyVerifiedRows = await loadPreviouslyVerifiedRows();
-    totals.skippedPreviouslyVerifiedRows = previouslyVerifiedRows.size;
-    const plan = await buildFrozenPlan(previouslyVerifiedRows);
+    const [rows, previouslyVerified] = await Promise.all([
+      loadSheetRows(),
+      loadPreviouslyVerifiedRows(),
+    ]);
 
-    console.log(
-      `[sheet1-reconcile] resume plan has ${plan.length} URL groups; ` +
-        `${previouslyVerifiedRows.size} rows already have verified Shopify read-back`,
+    totals.previouslyVerified = previouslyVerified.size;
+    totals.alreadyMarkedInSheet = rows.filter((row) => Boolean(row.sku)).length;
+
+    // Start at the top of Sheet 1 every pass. Rows that already have a SKU in D,
+    // or already passed an exact Shopify read-back in a previous run, are checked
+    // off immediately; only unresolved rows hit the source/Shopify APIs.
+    const pending = rows.filter(
+      (row) => !row.sku && !previouslyVerified.has(row.rowNumber),
     );
 
     await updateMarker(marker.id, {
-      stage: "plan_ready",
-      planGroups: plan.length,
-      previouslyVerifiedRows: previouslyVerifiedRows.size,
-      sheetWriteEnabled,
-      sheetWriteDisabledReason,
+      stage: "full_run",
+      planGroups: pending.length,
+      totalBatches: pending.length,
+      batch: 0,
+      currentRow: null,
+      verified: 0,
+      rowsProcessed: 0,
+      sheetCellsWritten: 0,
+      missingMappings: 0,
+      ambiguous: 0,
+      multiplierConflicts: 0,
+      errors: 0,
+      createProducts: 0,
+      rebuildProducts: 0,
+      sheetBackfillRequired: true,
       totals,
+      issues: [],
     });
 
-    if (plan.length === 0) {
+    if (!pending.length) {
       await prisma.syncJob.update({
         where: { id: marker.id },
         data: {
@@ -560,9 +329,14 @@ async function runOneTimeSheet1Reconcile(port: number) {
           result: JSON.stringify({
             stage: "completed",
             planGroups: 0,
-            sheetWriteEnabled,
-            sheetWriteDisabledReason,
-            sheetBackfillRequired: !sheetWriteEnabled,
+            totalBatches: 0,
+            batch: 0,
+            verified: 0,
+            rowsProcessed: 0,
+            errors: 0,
+            createProducts: 0,
+            rebuildProducts: 0,
+            sheetBackfillRequired: true,
             totals,
             issues: [],
           }),
@@ -571,171 +345,55 @@ async function runOneTimeSheet1Reconcile(port: number) {
       return;
     }
 
-    let canary = await findCanaryFromRows(port, KNOWN_CANARY_ROWS);
-    if (!canary) {
-      for (const group of plan.slice(0, 50)) {
-        const response = await postLocal(
-          port,
-          { dryRun: true, writeSheet: false, rowNumbers: group.rows },
-          false,
-        );
-        const verified = (response.results || []).find(
-          (result) =>
-            result.status === "verified" &&
-            result.readbackVerified === true &&
-            clean(result.expectedSku),
-        );
-        if (verified) {
-          canary = {
-            rowNumber: Number(verified.rows?.[0]),
-            expectedSku: clean(verified.expectedSku),
-            productId: clean(verified.shopifyProductId),
-            dryRunBatchId: clean(response.batchId),
-          };
-          break;
-        }
-        await sleep(BETWEEN_GROUPS_MS);
-      }
-    }
+    for (let index = 0; index < pending.length; index += 1) {
+      const row = pending[index];
+      totals.attempted += 1;
+      const processed = await processRow(port, row, totals);
 
-    if (!canary) {
-      throw new Error("No clean canary candidate was found");
-    }
-
-    await updateMarker(marker.id, {
-      stage: "dry_run_passed",
-      planGroups: plan.length,
-      canary,
-      sheetWriteEnabled,
-      sheetWriteDisabledReason,
-      totals,
-    });
-
-    const canaryResponse = await postLocal(
-      port,
-      { dryRun: false, writeSheet: false, rowNumbers: [canary.rowNumber] },
-      true,
-    );
-    const canaryResults = canaryResponse.results || [];
-    const canaryVerified =
-      canaryResults.length > 0 &&
-      canaryResults.every(
-        (result) => result.status === "verified" && result.readbackVerified === true,
-      ) &&
-      canaryResults.some(
-        (result) => clean(result.expectedSku) === canary?.expectedSku,
-      );
-    if (!canaryVerified) {
-      throw new Error("One-product canary did not pass exact Shopify read-back");
-    }
-
-    await updateMarker(marker.id, {
-      stage: "canary_passed",
-      planGroups: plan.length,
-      canary: { ...canary, writeBatchId: canaryResponse.batchId || null },
-      sheetWriteEnabled,
-      sheetWriteDisabledReason,
-      totals,
-    });
-
-    let consecutiveCoreErrors = 0;
-
-    for (let groupIndex = 0; groupIndex < plan.length; groupIndex += 1) {
-      const group = plan[groupIndex];
-      totals.groupsAttempted += 1;
-      const processed = await processGroupWithRetries(port, group, totals);
-      const response = processed.response;
-      const status = processed.status;
-
-      if (status === "verified" && response) {
-        consecutiveCoreErrors = 0;
-        const summary = response.summary || {};
-        totals.verified += Number(summary.verified || 0);
-        totals.rows += Number(summary.rowsProcessed || 0);
-
-        if (sheetWriteEnabled) {
-          try {
-            const sheetWrite = await writeVerifiedSkusToSheet(response.results || []);
-            totals.sheetCells += sheetWrite.cellsWritten;
-          } catch (error: any) {
-            totals.sheetErrors += 1;
-            sheetWriteEnabled = false;
-            sheetWriteDisabledReason = clean(error?.message || error).slice(0, 2000);
-            issues.push({
-              type: "sheet_write_disabled",
-              group: groupIndex + 1,
-              rows: group.rows,
-              reason: sheetWriteDisabledReason,
-            });
-            console.error(
-              "[sheet1-reconcile] Google Sheet writeback disabled for the rest of this run:",
-              sheetWriteDisabledReason,
-            );
-          }
-        }
-      } else if (status === "conflict") {
-        consecutiveCoreErrors = 0;
-        totals.conflicts += 1;
-        if (response) issues.push(...collectIssues(response));
-      } else if (status === "ambiguous") {
-        consecutiveCoreErrors = 0;
-        totals.ambiguous += 1;
-        if (response) issues.push(...collectIssues(response));
-      } else if (status === "missing") {
-        consecutiveCoreErrors = 0;
+      if (processed.status === "verified") {
+        totals.verified += 1;
+        totals.rowsProcessed += 1;
+      } else if (processed.status === "missing") {
         totals.missing += 1;
-        if (response) issues.push(...collectIssues(response));
+        issues.push(collectIssue(processed.response, row));
+      } else if (processed.status === "ambiguous") {
+        totals.ambiguous += 1;
+        issues.push(collectIssue(processed.response, row));
+      } else if (processed.status === "conflict") {
+        totals.conflicts += 1;
+        issues.push(collectIssue(processed.response, row));
       } else {
-        consecutiveCoreErrors += 1;
-        totals.coreErrors += 1;
-        if (response) {
-          issues.push(...collectIssues(response));
-        } else {
-          issues.push({
-            status: "error",
-            rows: group.rows,
-            url: group.url,
-            reason: processed.transportError || "Unknown reconcile transport error",
-          });
-        }
+        totals.errors += 1;
+        issues.push(collectIssue(processed.response, row, processed.error));
       }
 
       await updateMarker(marker.id, {
         stage: "full_run",
-        planGroups: plan.length,
-        batch: groupIndex + 1,
-        totalBatches: plan.length,
-        currentRows: group.rows,
-        canary,
-        sheetWriteEnabled,
-        sheetWriteDisabledReason,
-        sheetBackfillRequired: !sheetWriteEnabled,
-        consecutiveCoreErrors,
+        planGroups: pending.length,
+        totalBatches: pending.length,
+        batch: index + 1,
+        currentRow: row.rowNumber,
+        verified: totals.verified,
+        rowsProcessed: totals.rowsProcessed,
+        sheetCellsWritten: 0,
+        missingMappings: totals.missing,
+        ambiguous: totals.ambiguous,
+        multiplierConflicts: totals.conflicts,
+        errors: totals.errors,
+        createProducts: 0,
+        rebuildProducts: 0,
+        sheetBackfillRequired: true,
         totals,
-        issues: issues.slice(-100),
+        issues: issues.slice(-200),
       });
 
       console.log(
-        `[sheet1-reconcile] group ${groupIndex + 1}/${plan.length} status=${status}`,
-        totals,
+        `[sheet1-worker] ${index + 1}/${pending.length} row=${row.rowNumber} status=${processed.status}`,
       );
 
-      if (consecutiveCoreErrors >= CONSECUTIVE_ERROR_LIMIT) {
-        throw new Error(
-          `Circuit breaker stopped the run after ${CONSECUTIVE_ERROR_LIMIT} consecutive core errors. ` +
-            "The last failed groups are recorded in SyncJob.result for diagnosis.",
-        );
-      }
-
-      await sleep(BETWEEN_GROUPS_MS);
+      // A bad product must never stop the rest of the sheet.
+      await sleep(BETWEEN_ROWS_MS);
     }
-
-    const completedWithIssues =
-      totals.missing +
-        totals.ambiguous +
-        totals.conflicts +
-        totals.coreErrors >
-        0;
 
     await prisma.syncJob.update({
       where: { id: marker.id },
@@ -744,19 +402,28 @@ async function runOneTimeSheet1Reconcile(port: number) {
         completedAt: new Date(),
         result: JSON.stringify({
           stage: "completed",
-          planGroups: plan.length,
-          canary,
-          sheetWriteEnabled,
-          sheetWriteDisabledReason,
-          sheetBackfillRequired: !sheetWriteEnabled,
+          planGroups: pending.length,
+          totalBatches: pending.length,
+          batch: pending.length,
+          verified: totals.verified,
+          rowsProcessed: totals.rowsProcessed,
+          sheetCellsWritten: 0,
+          missingMappings: totals.missing,
+          ambiguous: totals.ambiguous,
+          multiplierConflicts: totals.conflicts,
+          errors: totals.errors,
+          createProducts: 0,
+          rebuildProducts: 0,
+          sheetBackfillRequired: true,
+          completedWithIssues:
+            totals.errors + totals.missing + totals.ambiguous + totals.conflicts > 0,
           totals,
-          issues: issues.slice(0, 500),
-          completedWithIssues,
+          issues: issues.slice(-500),
         }),
       },
     });
   } catch (error: any) {
-    const message = clean(error?.message || error || "Unknown Sheet 1 reconcile failure");
+    const message = clean(error?.message || error || "Unknown Sheet1 worker failure");
     await prisma.syncJob.update({
       where: { id: marker.id },
       data: {
@@ -765,15 +432,30 @@ async function runOneTimeSheet1Reconcile(port: number) {
         result: JSON.stringify({
           stage: "failed",
           error: message.slice(0, 5000),
-          sheetWriteEnabled,
-          sheetWriteDisabledReason,
-          sheetBackfillRequired: !sheetWriteEnabled,
+          verified: totals.verified,
+          rowsProcessed: totals.rowsProcessed,
+          errors: totals.errors + 1,
+          createProducts: 0,
+          rebuildProducts: 0,
+          sheetBackfillRequired: true,
           totals,
-          issues: issues.slice(-200),
+          issues: issues.slice(-500),
         }),
       },
     });
-    console.error("[sheet1-reconcile] one-time run failed:", message);
+    throw error;
+  }
+}
+
+async function workerLoop(port: number) {
+  while (true) {
+    try {
+      await runPass(port);
+      await sleep(BETWEEN_PASSES_MS);
+    } catch (error: any) {
+      console.error("[sheet1-worker] pass failed; worker will retry without stopping:", clean(error?.message || error));
+      await sleep(FAILED_PASS_RETRY_MS);
+    }
   }
 }
 
@@ -782,13 +464,17 @@ export function startOneTimeSheet1Reconcile(port: number) {
     envString("RAILWAY_ENVIRONMENT") || envString("RAILWAY_PUBLIC_DOMAIN"),
   );
   if (!isProduction() || !isRailway) {
-    console.log("[sheet1-reconcile] one-time run disabled outside Railway production");
+    console.log("[sheet1-worker] disabled outside Railway production");
     return;
   }
+  if (workerStarted) return;
+  workerStarted = true;
 
   setTimeout(() => {
-    void runOneTimeSheet1Reconcile(port).catch((error) => {
-      console.error("[sheet1-reconcile] unexpected fatal startup error:", error);
+    void workerLoop(port).catch((error) => {
+      // The loop itself is designed not to exit; this is only a final guard.
+      workerStarted = false;
+      console.error("[sheet1-worker] unexpected fatal loop exit:", error);
     });
   }, START_DELAY_MS);
 }
