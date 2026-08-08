@@ -19,8 +19,32 @@ function isSupabaseHost(host: string): boolean {
   return normalizedHost.endsWith('.supabase.com') || normalizedHost.endsWith('.supabase.co');
 }
 
-function validateSupabaseDatabaseUrl(raw: string | undefined) {
+function deriveSupabaseProjectRef(url: URL): string | null {
+  const host = url.hostname.trim().toLowerCase().replace(/\.$/, '');
+  const direct = host.match(/^db\.([a-z0-9-]+)\.supabase\.(?:co|com)$/);
+  if (direct) return direct[1];
+
+  if (/\.pooler\.supabase\.(?:co|com)$/.test(host)) {
+    const username = decodeURIComponent(url.username || '').trim().toLowerCase();
+    const separator = username.lastIndexOf('.');
+    if (separator >= 0 && separator < username.length - 1) {
+      return username.slice(separator + 1);
+    }
+  }
+
+  return null;
+}
+
+function validateSupabaseDatabaseUrl(raw: string | undefined, expectedProjectRefRaw: string | undefined) {
   const value = String(raw ?? '').trim();
+  const expectedProjectRef = normalize(expectedProjectRefRaw);
+  if (!expectedProjectRef) {
+    return {
+      ok: false,
+      reason: 'SUPABASE_PROJECT_REF is required to pin the dedicated Dabdoob database project',
+      target: 'missing-project-pin',
+    } as const;
+  }
   if (!value) {
     return { ok: false, reason: 'DATABASE_URL is required', target: 'missing' } as const;
   }
@@ -40,6 +64,22 @@ function validateSupabaseDatabaseUrl(raw: string | undefined) {
     if (!isSupabaseHost(host)) {
       return { ok: false, reason: 'Production DATABASE_URL must target an official Supabase hostname', target: 'non-supabase' } as const;
     }
+
+    const projectRef = deriveSupabaseProjectRef(url);
+    if (!projectRef) {
+      return {
+        ok: false,
+        reason: 'Could not derive Supabase project ref from DATABASE_URL',
+        target: 'supabase',
+      } as const;
+    }
+    if (projectRef !== expectedProjectRef) {
+      return {
+        ok: false,
+        reason: 'DATABASE_URL Supabase project does not match SUPABASE_PROJECT_REF',
+        target: 'supabase',
+      } as const;
+    }
     if (port !== '5432') {
       return { ok: false, reason: 'Supabase Session pooler must use port 5432', target: 'supabase' } as const;
     }
@@ -56,6 +96,8 @@ function validateSupabaseDatabaseUrl(raw: string | undefined) {
     return {
       ok: true,
       target: 'supabase',
+      projectRefPinned: true,
+      projectRefMatched: true,
       port,
       sslMode,
       connectionLimit,
@@ -115,7 +157,10 @@ function main() {
     invalid.push({ name: 'CATALOG_AUDIT_DRY_RUN', value: dryRunRaw });
   }
 
-  const database = validateSupabaseDatabaseUrl(process.env.DATABASE_URL);
+  const database = validateSupabaseDatabaseUrl(
+    process.env.DATABASE_URL,
+    process.env.SUPABASE_PROJECT_REF,
+  );
   if (!database.ok) {
     invalid.push({ name: 'DATABASE_URL', value: database.reason });
   }
@@ -138,7 +183,7 @@ function main() {
 
   if (!report.ok) {
     throw new Error(
-      'Railway production deployment blocked: write gates must be explicitly closed, Supabase Session pooler configuration must be valid, dry-run enabled, and canary limited to one row.',
+      'Railway production deployment blocked: write gates must be explicitly closed, the dedicated Supabase project must be pinned and match DATABASE_URL, Session pooler configuration must be valid, dry-run enabled, and canary limited to one row.',
     );
   }
 }
