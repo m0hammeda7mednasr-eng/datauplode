@@ -31,6 +31,7 @@ jobs:
       EXISTING_PRODUCT_AUDIT_TIMEOUT_MS: "30000"
       EXISTING_PRODUCT_AUDIT_MAX_RETRIES: "2"
       AUDIT_REVISION: ${{ inputs.audit_revision }}
+      AUDIT_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
 
     steps:
       - name: Validate requested revision
@@ -62,7 +63,87 @@ jobs:
           fi
           echo "AUDIT_CHECKED_OUT_REVISION=${actual_revision}" >> "$GITHUB_ENV"
 
-      - name: Validate required secrets
+      - name: Validate live Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AUDIT_BASE_URL}" ]]; then
+            echo "Missing Railway target URL. Configure RAILWAY_SMOKE_BASE_URL." >&2
+            exit 2
+          fi
+          if [[ ! "${AUDIT_BASE_URL}" =~ ^https:// ]]; then
+            echo "Existing-product audit target must use HTTPS." >&2
+            exit 2
+          fi
+
+      - name: Verify live Railway and Supabase readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${AUDIT_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output existing-product-audit-readiness.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('existing-product-audit-readiness.json', 'utf8'));
+          const expectedRevision = String(process.env.AUDIT_REVISION || '').trim().toLowerCase();
+          const actualRevision = String(body?.deployment?.revision || '').trim().toLowerCase();
+          const fail = (message) => { console.error(message); process.exit(2); };
+
+          if (body?.ok !== true) fail('Live readiness must report ok=true before Shopify audit access.');
+          if (body?.database?.ok !== true) fail('Live production database readiness is not healthy.');
+          if (body?.database?.target !== 'supabase') fail('Live production database target must be Supabase.');
+          if (body?.database?.projectRefPinned !== true) fail('Supabase project ref is not explicitly pinned.');
+          if (body?.database?.projectRefMatched !== true) fail('Live DATABASE_URL does not match the pinned Supabase project ref.');
+          if (body?.deployment?.revisionVerified !== true || actualRevision !== expectedRevision) {
+            fail(`Live Railway revision ${actualRevision || '<unknown>'} does not match requested audit revision ${expectedRevision}.`);
+          }
+          if (body?.platform?.productionEnvironment !== true) fail('Audit target is not reporting production environment.');
+          if (body?.platform?.writeSafetyReady !== true || body?.platform?.ready !== true) {
+            fail('Live production write-safety/readiness is not satisfied.');
+          }
+
+          const configuration = body?.configuration || {};
+          const mustBeFalse = [
+            'runtimeWriteGateEnabled',
+            'inventoryAutostartConfigured',
+            'inventoryAutostartEnabled',
+            'jobRecoveryConfigured',
+            'jobRecoveryShopifyWritesConfigured',
+            'jobRecoveryEnabled',
+            'sheetImportAutostartConfigured',
+            'sheetImportAutostartEnabled',
+            'catalogWriteGateEnabled',
+            'catalogSheetWriteGateEnabled',
+          ];
+          for (const key of mustBeFalse) {
+            if (configuration[key] !== false) fail(`Existing-product audit requires configuration.${key}=false.`);
+          }
+
+          const jobs = body?.jobs || {};
+          for (const key of ['pending', 'running', 'staleRunning', 'recentFailed']) {
+            if (Number(jobs[key]) !== 0) fail(`Existing-product audit requires jobs.${key}=0, received ${String(jobs[key])}.`);
+          }
+
+          console.log(JSON.stringify({
+            ok: true,
+            revision: actualRevision,
+            databaseTarget: body.database.target,
+            projectRefPinned: body.database.projectRefPinned,
+            projectRefMatched: body.database.projectRefMatched,
+            writeSafetyReady: body.platform.writeSafetyReady,
+            queue: {
+              pending: jobs.pending,
+              running: jobs.running,
+              staleRunning: jobs.staleRunning,
+              recentFailed: jobs.recentFailed,
+            },
+            shopifyMutations: 0,
+          }, null, 2));
+          NODE
+
+      - name: Validate required Shopify read secrets
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +177,8 @@ jobs:
             echo
             echo "- Requested revision: \`${AUDIT_REVISION}\`"
             echo "- Checked-out revision: \`${AUDIT_CHECKED_OUT_REVISION:-unverified}\`"
+            echo "- Live Railway/Supabase readiness pinned to the same revision before Shopify access: \`true\`"
+            echo "- Broad/background write gates and job queue must be closed/quiet before Shopify access: \`true\`"
             echo "- Mode: read-only GraphQL queries"
             echo "- Maximum SKUs per run: \`50\`"
             echo "- Shopify mutations: \`0\`"
