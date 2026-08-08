@@ -22,7 +22,11 @@ const checks: Array<[string, boolean]> = [
   ["Google Sheet write gate remains disabled", workflow.includes("catalogSheetWriteGateEnabled !== false")],
   ["canary max rows exactly one", workflow.includes("catalogCanaryMaxRows) !== 1")],
   ["queue must be quiescent", ["pending", "running", "staleRunning", "recentFailed"].every((name) => workflow.includes(`'${name}'`))],
-  ["latest persisted dry run must equal requested batch", workflow.includes("latest dry-run batch") && workflow.includes("does not match requested batch")],
+  [
+    "latest persisted dry run must equal requested batch",
+    workflow.includes("String(dryRun.id || '').trim() !== expectedDryRun") &&
+      workflow.includes("does not match requested batch"),
+  ],
   ["dry run must currently be canary ready", workflow.includes("latestDryRunCanaryReady !== true") && workflow.includes("latestDryRunExpired === true")],
   ["dry run must prove exactly one existing product", workflow.includes("dryRun.uniqueProductsProcessed) !== 1") && workflow.includes("dryRun.verified) !== 1")],
   ["dry run product identity must be exact Shopify GID", workflow.includes("gid:\\/\\/shopify\\/Product\\/\\d+")],
