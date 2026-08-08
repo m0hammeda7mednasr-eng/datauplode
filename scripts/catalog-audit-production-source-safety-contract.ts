@@ -3,8 +3,10 @@ import path from "node:path";
 
 const middlewarePath = path.resolve("src/server/middleware/catalogAuditSafety.ts");
 const smokePath = path.resolve("scripts/production-smoke.ts");
+const guardPath = path.resolve("src/server/services/catalogCanaryMutationGuard.ts");
 const source = fs.readFileSync(middlewarePath, "utf8");
 const smoke = fs.readFileSync(smokePath, "utf8");
+const guard = fs.readFileSync(guardPath, "utf8");
 
 const checks: Array<[string, boolean]> = [
   [
@@ -36,7 +38,7 @@ const checks: Array<[string, boolean]> = [
   [
     "canary remains isolated from Google Sheet writes",
     source.includes("const writeSheet = false") &&
-      source.includes('X-Catalog-Audit-Sheet-Write", "disabled'),
+      source.includes('X-Catalog-Audit-Sheet-Write\", \"disabled'),
   ],
   [
     "production canary requires a persisted dry-run batch",
@@ -46,8 +48,8 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "canary dry-run batch must be completed catalog audit",
-    source.includes('batch.target !== "catalog_audit"') &&
-      source.includes('batch.status !== "COMPLETED"'),
+    source.includes('batch.target !== \"catalog_audit\"') &&
+      source.includes('batch.status !== \"COMPLETED\"'),
   ],
   [
     "canary rejects stale dry-run provenance",
@@ -94,6 +96,29 @@ const checks: Array<[string, boolean]> = [
     source.includes("canaryExpectedShopifyProductId") &&
       source.includes("X-Catalog-Audit-Canary-Product") &&
       source.includes("X-Catalog-Audit-Canary-Source-Row"),
+  ],
+  [
+    "production canary establishes request-scoped mutation guard",
+    source.includes("runWithCatalogCanaryMutationGuard") &&
+      source.includes("expectedShopifyProductId") &&
+      source.includes("() => next()"),
+  ],
+  [
+    "mutation guard uses AsyncLocalStorage so concurrent requests stay isolated",
+    guard.includes("AsyncLocalStorage") &&
+      guard.includes("canaryMutationContext.run") &&
+      guard.includes("canaryMutationContext.getStore"),
+  ],
+  [
+    "mutation guard blocks product ID drift immediately before Shopify bulk mutation",
+    guard.includes("CATALOG_AUDIT_CANARY_MUTATION_PRODUCT_MISMATCH") &&
+      guard.includes("actualProductId !== context.expectedShopifyProductId") &&
+      guard.includes("originalUpdateVariantsBulk"),
+  ],
+  [
+    "mutation guard requires an exact Shopify Product GID",
+    guard.includes("CATALOG_AUDIT_CANARY_MUTATION_PRODUCT_INVALID") &&
+      guard.includes("/^gid:\\/\\/shopify\\/Product\\/\\d+$/.test(expected)"),
   ],
   [
     "production smoke rejects missing existing Shopify product",
