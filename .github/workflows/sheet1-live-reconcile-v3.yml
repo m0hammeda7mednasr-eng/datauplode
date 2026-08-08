@@ -8,11 +8,11 @@ on:
         required: true
         type: string
       run_confirmation:
-        description: Type RUN_SHEET1_RECONCILE_V3 to acknowledge live canary intent
+        description: Type RUN_SHEET1_RECONCILE_V3 to acknowledge live reconcile intent
         required: true
         type: string
       run_full_reconcile:
-        description: After CI + dry run + canary + read-back, allow the broad existing-product Sheet 1 reconcile
+        description: After independent CI + dry run + canary + read-back, allow the broad existing-product Sheet 1 reconcile
         required: true
         default: false
         type: boolean
@@ -55,22 +55,31 @@ jobs:
           set -euo pipefail
           revision="$(printf '%s' "$EXPECTED_REVISION" | tr '[:upper:]' '[:lower:]')"
           runs="$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${revision}&status=completed&per_page=100")"
-          count="$(printf '%s' "$runs" | jq '[.workflow_runs[] | select(.name == "Production Build Check" and .head_sha == env.EXPECTED_REVISION and .conclusion == "success")] | length')"
+          count="$(printf '%s' "$runs" | jq --arg revision "$revision" '[.workflow_runs[] | select(.name == "Production Build Check" and (.head_sha | ascii_downcase) == $revision and .conclusion == "success")] | length')"
           test "$count" -ge 1 || { echo "No successful Production Build Check exists for exact revision ${revision}" >&2; exit 1; }
 
+      - name: Require explicit broad-write opt-in
+        if: ${{ inputs.run_full_reconcile != true }}
+        run: |
+          echo "Broad Sheet 1 reconcile is blocked by default."
+          echo "Run the independent dry-run/canary/read-back path first, then dispatch again with run_full_reconcile=true."
+
       - name: Checkout exact production revision
+        if: ${{ inputs.run_full_reconcile == true }}
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.production_revision }}
           fetch-depth: 1
 
       - name: Setup Node.js
+        if: ${{ inputs.run_full_reconcile == true }}
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
       - name: Verify exact code revision
+        if: ${{ inputs.run_full_reconcile == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -79,6 +88,7 @@ jobs:
           test "$actual" = "$expected"
 
       - name: Install, typecheck and build
+        if: ${{ inputs.run_full_reconcile == true }}
         run: |
           set -euo pipefail
           npm ci --include=dev
@@ -86,4 +96,5 @@ jobs:
           npm run build
 
       - name: Run live reconcile orchestrator
+        if: ${{ inputs.run_full_reconcile == true }}
         run: node scripts/run-sheet1-live-reconcile.mjs
