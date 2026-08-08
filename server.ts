@@ -174,6 +174,35 @@ async function startServer() {
     allowedHeaders: ["Content-Type", "Authorization", "X-Catalog-Audit-Write-Token"],
   };
 
+  // Emit CORS headers as early as possible for approved browser origins.
+  // This keeps even route-level 4xx/5xx responses readable by the Vercel UI
+  // instead of collapsing them into an opaque browser "Network Error".
+  app.use((req, res, next) => {
+    const requestOrigin = normalizeOrigin(req.get("origin"));
+    if (!requestOrigin || !allowedOrigins.has(requestOrigin)) {
+      return next();
+    }
+
+    res.setHeader("Access-Control-Allow-Origin", requestOrigin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Vary", "Origin");
+
+    if (req.method === "OPTIONS") {
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,PUT,DELETE,PATCH,OPTIONS",
+      );
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        req.get("access-control-request-headers") ||
+          "Content-Type,Authorization,X-Catalog-Audit-Write-Token",
+      );
+      return res.sendStatus(204);
+    }
+
+    next();
+  });
+
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
 
