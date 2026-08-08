@@ -1,8 +1,9 @@
 name: Diagnose Live Sheet1 Batch 3
 
 on:
-  push:
-    branches: [sheet1-live-diagnostics]
+  pull_request:
+    branches: [stabilize-supabase-railway]
+    types: [opened, synchronize, reopened]
     paths: [.github/workflows/live-batch3-diagnostic.yml]
 
 permissions:
