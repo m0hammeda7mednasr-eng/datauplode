@@ -6,7 +6,7 @@
   },
   "deploy": {
     "preDeployCommand": "echo '[predeploy] applying Prisma schema' && npm run db:deploy && echo '[predeploy] validating production safe mode' && NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts && echo '[predeploy] verifying database schema' && NODE_ENV=production npm run db:preflight",
-    "startCommand": "npm start",
+    "startCommand": "npm run railway:deploy",
     "healthcheckPath": "/api/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
