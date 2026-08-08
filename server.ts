@@ -20,6 +20,7 @@ import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.j
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
+import { startOneTimeSheet1Reconcile } from "./src/server/oneTimeSheet1Reconcile.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -180,9 +181,6 @@ async function startServer() {
     ],
   };
 
-  // Emit CORS headers as early as possible for approved browser origins.
-  // This keeps even route-level 4xx/5xx responses readable by the Vercel UI
-  // instead of collapsing them into an opaque browser "Network Error".
   app.use((req, res, next) => {
     const requestOrigin = normalizeOrigin(req.get("origin"));
     if (!requestOrigin || !allowedOrigins.has(requestOrigin)) {
@@ -301,6 +299,11 @@ async function startServer() {
     console.log(`Server running at http://${HOST}:${PORT}`);
     console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
+
+    // Explicit one-time production operation. It is independently guarded by
+    // an exact run key, a DB marker, a dry-run, and a one-product read-back.
+    // It never creates/rebuilds products and does not require broad runtime writes.
+    startOneTimeSheet1Reconcile(PORT);
 
     if (!runtimeWritesEnabled()) {
       console.log(
