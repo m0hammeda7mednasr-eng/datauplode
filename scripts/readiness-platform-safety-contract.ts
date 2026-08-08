@@ -113,6 +113,15 @@ const checks: Array<[string, boolean]> = [
       source.includes("run?.dryRun === false"),
   ],
   [
+    "rollout monitoring extracts only exact Shopify Product GIDs",
+    source.includes('/^gid:\\/\\/shopify\\/Product\\/\\d+$/.test(id)') &&
+      source.includes("shopifyProductIds"),
+  ],
+  [
+    "rollout monitoring exposes a single unambiguous Shopify product identity",
+    source.includes("shopifyProductId: shopifyProductIds.length === 1 ? shopifyProductIds[0] : null"),
+  ],
+  [
     "rollout monitoring only marks a strict one-product clean dry run as canary ready",
     source.includes("isCanaryReadyDryRun") &&
       source.includes('run.status === "COMPLETED"') &&
@@ -121,6 +130,10 @@ const checks: Array<[string, boolean]> = [
       source.includes("run.missing === 0") &&
       source.includes("run.ambiguous === 0") &&
       source.includes("run.errors === 0"),
+  ],
+  [
+    "canary-ready dry run requires one exact persisted Shopify product identity",
+    source.includes("run.shopifyProductIds.length === 1"),
   ],
   [
     "rollout readiness never treats sheet-writing runs as canary-ready dry runs",
@@ -170,6 +183,7 @@ console.log(
   JSON.stringify(
     {
       assertions: checks.length,
+      exactCanaryProductIdentityObserved: true,
       databaseWrites: 0,
       shopifyMutations: 0,
       googleSheetWrites: 0,
