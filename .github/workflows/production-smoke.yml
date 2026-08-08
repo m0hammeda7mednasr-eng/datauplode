@@ -66,7 +66,13 @@ jobs:
         run: npm ci
 
       - name: Run safe production smoke check
-        run: npm run smoke:production
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run smoke:production 2>&1 | tee production-smoke.log
+
+      - name: Read back persisted dry run from Supabase readiness
+        run: npx tsx scripts/production-smoke-dry-run-readback.ts production-smoke.log
 
       - name: Publish run summary
         if: always()
@@ -79,6 +85,8 @@ jobs:
             echo "- Expected deployed revision: \`${SMOKE_EXPECTED_REVISION}\`"
             echo "- Checkout pinned and verified against the expected full Git SHA: \`true\`"
             echo "- Catalog dry run required: \`true\`"
+            echo "- Persisted dry-run read-back from live \`/api/ready\` required before canary: \`true\`"
+            echo "- Read-back must match the exact dry-run batch ID and the exact deployed revision."
             echo "- No Shopify write token is supplied by this workflow."
             echo "- The smoke script forces \`dryRun=true\`, \`writeSheet=false\`, and \`maxRows=1\`."
             echo "- The run fails when Railway reports a stale or different Git revision."
