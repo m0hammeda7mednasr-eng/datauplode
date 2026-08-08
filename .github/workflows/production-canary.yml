@@ -73,26 +73,38 @@ jobs:
         run: |
           set -euo pipefail
           ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
-          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+          readiness_http_code="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
             --output readiness-before.json \
-            "${ready_url}"
-          node <<'NODE'
+            --write-out '%{http_code}' \
+            "${ready_url}")"
+          if [[ "${readiness_http_code}" != "200" && "${readiness_http_code}" != "503" ]]; then
+            echo "Railway readiness returned unexpected HTTP ${readiness_http_code}; canary blocked." >&2
+            exit 2
+          fi
+          READINESS_HTTP_CODE="${readiness_http_code}" node <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('readiness-before.json', 'utf8'));
           const expectedRevision = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
           const expectedDryRun = String(process.env.CANARY_DRY_RUN_BATCH_ID || '').trim();
+          const readinessHttpCode = String(process.env.READINESS_HTTP_CODE || '').trim();
           const fail = (message) => { console.error(message); process.exit(2); };
           const actualRevision = String(body?.deployment?.revision || '').trim().toLowerCase();
 
-          if (body?.ok !== true) fail('Railway /api/ready is not ready; canary blocked.');
           if (body?.database?.ok !== true || body?.database?.target !== 'supabase') fail('Live Supabase readiness is required; canary blocked.');
+          if (body?.database?.projectRefPinned !== true || body?.database?.projectRefMatched !== true) fail('Exact pinned Dabdoob Supabase project binding is required; canary blocked.');
           if (body?.deployment?.revisionVerified !== true || actualRevision !== expectedRevision) fail(`Railway revision ${actualRevision || '<unknown>'} does not match ${expectedRevision}.`);
-          if (body?.platform?.ready !== true || body?.platform?.writeSafetyReady !== true) fail('Platform write-safety readiness is not satisfied.');
+          if (body?.platform?.productionEnvironment !== true) fail('Canary requires the production Railway environment.');
           if (body?.configuration?.runtimeWriteGateEnabled !== false) fail('Runtime broad-write gate must remain disabled during catalog canary.');
-          if (body?.configuration?.inventoryAutostartEnabled !== false) fail('Inventory autostart must remain disabled during catalog canary.');
+          if (body?.configuration?.inventoryAutostartConfigured !== false || body?.configuration?.inventoryAutostartEnabled !== false) fail('Inventory autostart must remain disabled during catalog canary.');
+          if (body?.configuration?.jobRecoveryConfigured !== false || body?.configuration?.jobRecoveryShopifyWritesConfigured !== false || body?.configuration?.jobRecoveryEnabled !== false) fail('Recovered-job Shopify writes must remain disabled during catalog canary.');
+          if (body?.configuration?.sheetImportAutostartConfigured !== false || body?.configuration?.sheetImportAutostartEnabled !== false) fail('Sheet-import autostart must remain disabled during catalog canary.');
           if (body?.configuration?.catalogWriteGateEnabled !== true) fail('Catalog write gate must be enabled explicitly for the canary.');
+          if (body?.configuration?.catalogWriteTokenConfigured !== true) fail('Catalog write token must be configured for the canary.');
           if (body?.configuration?.catalogSheetWriteGateEnabled !== false) fail('Google Sheet write gate must remain disabled during Shopify canary.');
+          if (body?.configuration?.catalogAuditDryRunConfigured !== true) fail('Catalog dry-run safety must remain configured during canary.');
+          if (body?.configuration?.safeMode !== true) fail('Broad runtime safe mode must remain active during catalog canary.');
           if (Number(body?.configuration?.catalogCanaryMaxRows) !== 1) fail('Catalog canary max rows must equal exactly 1.');
+          if (readinessHttpCode === '503' && body?.platform?.writeSafetyReady === true) fail('503 readiness must not claim baseline writeSafetyReady during intentional canary gate mode.');
 
           const jobs = body?.jobs || {};
           for (const key of ['pending', 'running', 'staleRunning', 'recentFailed']) {
@@ -107,7 +119,7 @@ jobs:
           if (Number(dryRun.uniqueProductsProcessed) !== 1 || Number(dryRun.verified) !== 1 || Number(dryRun.missing) !== 0 || Number(dryRun.ambiguous) !== 0 || Number(dryRun.errors) !== 0) fail('Persisted dry run is not a clean one-product verification.');
           if (!/^gid:\/\/shopify\/Product\/\d+$/.test(String(dryRun.shopifyProductId || ''))) fail('Dry run does not expose one exact Shopify Product GID.');
 
-          console.log(JSON.stringify({ ok: true, revision: actualRevision, dryRunBatchId: expectedDryRun, productId: dryRun.shopifyProductId }, null, 2));
+          console.log(JSON.stringify({ ok: true, readinessHttpCode, revision: actualRevision, dryRunBatchId: expectedDryRun, productId: dryRun.shopifyProductId, broadWrites: false, sheetWrites: false }, null, 2));
           NODE
 
       - name: Execute exactly one Shopify canary with Sheet writes disabled
@@ -153,19 +165,28 @@ jobs:
           set -euo pipefail
           source canary-result.env
           ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
-          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+          readiness_http_code="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
             --output readiness-after.json \
-            "${ready_url}"
-          CANARY_BATCH_ID="${CANARY_BATCH_ID}" CANARY_PRODUCT_ID="${CANARY_PRODUCT_ID}" node <<'NODE'
+            --write-out '%{http_code}' \
+            "${ready_url}")"
+          if [[ "${readiness_http_code}" != "200" && "${readiness_http_code}" != "503" ]]; then
+            echo "Railway readiness returned unexpected HTTP ${readiness_http_code} after canary; rollout blocked." >&2
+            exit 2
+          fi
+          READINESS_HTTP_CODE="${readiness_http_code}" CANARY_BATCH_ID="${CANARY_BATCH_ID}" CANARY_PRODUCT_ID="${CANARY_PRODUCT_ID}" node <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('readiness-after.json', 'utf8'));
           const expectedRevision = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
           const expectedDryRun = String(process.env.CANARY_DRY_RUN_BATCH_ID || '').trim();
           const expectedCanary = String(process.env.CANARY_BATCH_ID || '').trim();
           const expectedProduct = String(process.env.CANARY_PRODUCT_ID || '').trim();
+          const readinessHttpCode = String(process.env.READINESS_HTTP_CODE || '').trim();
           const fail = (message) => { console.error(message); process.exit(2); };
-          if (body?.ok !== true || body?.database?.ok !== true || body?.database?.target !== 'supabase') fail('Live Railway/Supabase readiness failed after canary.');
-          if (String(body?.deployment?.revision || '').trim().toLowerCase() !== expectedRevision) fail('Railway revision changed during canary; rollout blocked.');
+          if (body?.database?.ok !== true || body?.database?.target !== 'supabase') fail('Live Supabase readiness failed after canary.');
+          if (body?.database?.projectRefPinned !== true || body?.database?.projectRefMatched !== true) fail('Exact pinned Dabdoob Supabase binding failed after canary.');
+          if (body?.deployment?.revisionVerified !== true || String(body?.deployment?.revision || '').trim().toLowerCase() !== expectedRevision) fail('Railway revision changed during canary; rollout blocked.');
+          if (body?.configuration?.runtimeWriteGateEnabled !== false || body?.configuration?.catalogSheetWriteGateEnabled !== false) fail('Broad or Sheet write safety changed during canary; rollout blocked.');
+          if (body?.configuration?.jobRecoveryEnabled !== false || body?.configuration?.sheetImportAutostartEnabled !== false || body?.configuration?.inventoryAutostartEnabled !== false) fail('Background write path became enabled during canary; rollout blocked.');
           const canary = body?.rollout?.latestCanary;
           if (!canary || String(canary.id || '').trim() !== expectedCanary) fail('Exact canary batch is not persisted as latestCanary.');
           if (canary.status !== 'COMPLETED' || canary.dryRun !== false || canary.writeSheet !== false) fail('Persisted canary mode/status is unsafe or incomplete.');
@@ -173,7 +194,7 @@ jobs:
           if (canary.canaryProvenanceValid !== true) fail('Persisted canary provenance is not internally valid.');
           if (String(canary.dryRunBatchId || '').trim() !== expectedDryRun) fail('Persisted canary is not tied to the exact authorizing dry run.');
           if (String(canary.shopifyProductId || '').trim() !== expectedProduct || String(canary.provenanceShopifyProductId || '').trim() !== expectedProduct) fail('Persisted canary product identity changed.');
-          console.log(JSON.stringify({ ok: true, revision: expectedRevision, dryRunBatchId: expectedDryRun, canaryBatchId: expectedCanary, productId: expectedProduct, nextGate: 'Shopify read-back required before any broader write' }, null, 2));
+          console.log(JSON.stringify({ ok: true, readinessHttpCode, revision: expectedRevision, dryRunBatchId: expectedDryRun, canaryBatchId: expectedCanary, productId: expectedProduct, nextGate: 'Shopify read-back required before any broader write' }, null, 2));
           NODE
 
       - name: Publish canary summary
@@ -191,6 +212,8 @@ jobs:
             echo "- Maximum product scope: \`1\`"
             echo "- Google Sheet writes: \`0\`"
             echo "- Runtime broad-write gate required disabled: \`true\`"
+            echo "- Intentional catalog canary gate may make baseline /api/ready return HTTP 503: \`true\`"
+            echo "- Exact Supabase project pin required: \`true\`"
             echo "- Exact Supabase persisted-canary read-back required: \`true\`"
             echo "- Automatic retry after a write attempt: \`false\`"
             echo "- Next required gate: Shopify read-back for the exact revision + dry-run batch + canary batch + product."
