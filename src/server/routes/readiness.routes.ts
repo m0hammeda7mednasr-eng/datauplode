@@ -85,6 +85,53 @@ function deploymentMetadata() {
   };
 }
 
+type CatalogAuditRun = {
+  id: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  payloadJson: string | null;
+};
+
+function catalogAuditObservation(run: CatalogAuditRun | undefined) {
+  if (!run) return null;
+  let payload: any = {};
+  try {
+    payload = JSON.parse(run.payloadJson || "{}");
+  } catch {
+    payload = {};
+  }
+  const summary = payload?.summary || {};
+  return {
+    id: run.id,
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    completedAt: payload?.completedAt || null,
+    dryRun: summary.dryRun === true,
+    writeSheet: summary.writeSheet === true,
+    uniqueProductsProcessed: Number(summary.uniqueProductsProcessed || 0),
+    verified: Number(summary.verified || 0),
+    missing: Number(summary.missing || 0),
+    ambiguous: Number(summary.ambiguous || 0),
+    errors: Number(summary.errors || 0),
+  };
+}
+
+function isCanaryReadyDryRun(run: ReturnType<typeof catalogAuditObservation>) {
+  return Boolean(
+    run &&
+      run.status === "COMPLETED" &&
+      run.dryRun === true &&
+      run.writeSheet === false &&
+      run.uniqueProductsProcessed === 1 &&
+      run.verified === 1 &&
+      run.missing === 0 &&
+      run.ambiguous === 0 &&
+      run.errors === 0,
+  );
+}
+
 router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
@@ -145,7 +192,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const startedAt = Date.now();
 
   try {
-    const [pendingJobs, runningJobs, failedJobs, recentFailedJobs, staleRunningJobs, latestAudit] = await withTimeout(
+    const [pendingJobs, runningJobs, failedJobs, recentFailedJobs, staleRunningJobs, recentAudits] = await withTimeout(
       Promise.all([
         prisma.$queryRaw`SELECT 1`.then(() => prisma.syncJob.count({ where: { status: "pending" } })),
         prisma.syncJob.count({ where: { status: "running" } }),
@@ -165,14 +212,27 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
             OR: [{ startedAt: null }, { startedAt: { lt: staleJobCutoff } }],
           },
         }),
-        prisma.importBatch.findFirst({
+        prisma.importBatch.findMany({
           where: { target: "catalog_audit" },
           orderBy: { createdAt: "desc" },
-          select: { id: true, status: true, createdAt: true, updatedAt: true },
+          take: 10,
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+            payloadJson: true,
+          },
         }),
       ]),
       databaseTimeoutMs,
     );
+
+    const observedAudits = recentAudits.map((run) => catalogAuditObservation(run));
+    const latestCatalogAudit = observedAudits[0] || null;
+    const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;
+    const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;
+    const latestDryRunCanaryReady = isCanaryReadyDryRun(latestDryRun);
 
     const productionMinimumReady =
       configuration.database &&
@@ -214,7 +274,13 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         staleRunning: staleRunningJobs,
         staleThresholdMinutes: staleJobThresholdMinutes,
       },
-      latestCatalogAudit: latestAudit,
+      rollout: {
+        recentAuditWindow: observedAudits.length,
+        latestDryRun,
+        latestDryRunCanaryReady,
+        latestCanary,
+      },
+      latestCatalogAudit,
       checkedAt: new Date().toISOString(),
     });
   } catch (error: any) {
@@ -249,6 +315,12 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       configuration: {
         ...configuration,
         safeMode,
+      },
+      rollout: {
+        recentAuditWindow: 0,
+        latestDryRun: null,
+        latestDryRunCanaryReady: false,
+        latestCanary: null,
       },
       error: "Database readiness check failed",
       checkedAt: new Date().toISOString(),
