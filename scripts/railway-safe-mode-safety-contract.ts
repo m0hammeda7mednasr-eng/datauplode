@@ -5,11 +5,13 @@ const preflightPath = 'scripts/railway-safe-mode-preflight.ts';
 const databaseTargetPreflightPath = 'scripts/railway-database-target-preflight.ts';
 const railwayConfigPath = 'railway.json';
 const runtimeDbPath = 'src/server/db.ts';
+const packagePath = 'package.json';
 
 const preflightSource = readFileSync(preflightPath, 'utf8');
 const databaseTargetPreflightSource = readFileSync(databaseTargetPreflightPath, 'utf8');
 const railwayConfig = JSON.parse(readFileSync(railwayConfigPath, 'utf8'));
 const runtimeDbSource = readFileSync(runtimeDbPath, 'utf8');
+const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
 
 const requiredClosedGates = [
   'SYNC_RUNTIME_WRITE_ENABLED',
@@ -60,14 +62,32 @@ const safeMode = preDeployCommand.indexOf(
   'NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts',
 );
 const dbVerify = preDeployCommand.indexOf('NODE_ENV=production npm run db:preflight');
+const runtimeStartCommand = String(railwayConfig?.deploy?.startCommand || '');
+const railwayDeployScript = String(packageJson?.scripts?.['railway:deploy'] || '');
 
 assert(
   preDeployCommand.startsWith("echo '[predeploy] applying Prisma schema' && npm run db:deploy &&"),
-  'Railway must retain the proven Prisma deployment sequence used by the successful production revision',
+  'Railway must retain the proven Prisma pre-deploy sequence',
 );
 assert(
   dbDeploy >= 0 && safeMode > dbDeploy && dbVerify > safeMode,
-  'Railway must validate full safe mode and schema before starting the application',
+  'Railway pre-deploy must validate full safe mode and schema',
+);
+assert(
+  runtimeStartCommand === 'npm run railway:deploy',
+  'Railway runtime must bootstrap and verify the schema before serving traffic',
+);
+assert(
+  railwayDeployScript.startsWith(
+    'NODE_ENV=production npx tsx scripts/railway-database-target-preflight.ts && npm run db:deploy &&',
+  ),
+  'Runtime bootstrap must validate the exact database target before Prisma schema writes',
+);
+assert(
+  railwayDeployScript.includes('NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts') &&
+    railwayDeployScript.includes('NODE_ENV=production npm run db:preflight') &&
+    railwayDeployScript.endsWith('&& npm start'),
+  'Runtime bootstrap must verify safe mode and required schema before starting Express',
 );
 assert(
   railwayConfig?.deploy?.healthcheckPath === '/api/health',
@@ -96,14 +116,9 @@ assert(preflightSource.includes('poolTimeout < 1 || poolTimeout > 60'), 'pool_ti
 assert(preflightSource.includes('shopifyMutationsPerformed: 0'), 'preflight must perform zero Shopify mutations');
 assert(preflightSource.includes('googleSheetWritesPerformed: 0'), 'preflight must perform zero Google Sheet writes');
 
-// Regression guard for the production incident: runtime must never silently turn
-// the approved Session Pooler URL into the transaction pooler.
 assert(!/url\.port\s*=\s*['"]6543['"]/.test(runtimeDbSource), 'runtime must never rewrite Supabase to port 6543');
 assert(!/searchParams\.set\(['"]pgbouncer['"]/.test(runtimeDbSource), 'runtime must never add pgbouncer=true');
 
-// Keep the read-only target validator tested even though the proven Railway
-// deployment sequence performs the full production validation immediately
-// after schema reconciliation.
 assert(databaseTargetPreflightSource.includes('SUPABASE_PROJECT_REF'), 'database target validator must pin project ref');
 assert(databaseTargetPreflightSource.includes("port !== '5432'"), 'database target validator must reject 6543');
 assert(databaseTargetPreflightSource.includes("sslMode !== 'require'"), 'database target validator must require TLS');
@@ -136,7 +151,7 @@ console.log(
     {
       ok: true,
       assertions,
-      provenRailwayFlow: true,
+      runtimeSchemaBootstrapRequired: true,
       runtimeSessionPoolerPreserved: true,
       requiredClosedGates: requiredClosedGates.length,
       shopifyMutationsPerformed: 0,
