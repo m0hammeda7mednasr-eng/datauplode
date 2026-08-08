@@ -1,0 +1,66 @@
+name: Live Sheet 1 Reconcile V3
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - src/server/routes/sheet1-reconcile.routes.ts
+      - server.ts
+      - scripts/run-sheet1-live-reconcile.mjs
+      - .github/workflows/sheet1-live-reconcile-v3.yml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dabdoob-live-sheet1-reconcile-v3
+  cancel-in-progress: true
+
+jobs:
+  reconcile:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+      EXPECTED_REVISION: ${{ github.event.pull_request.head.sha }}
+      RUN_CONFIRMATION: 2026-08-09-sheet1-reconcile-v1
+      SHEET_CSV: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/export?format=csv&gid=0
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact production branch head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify exact code revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_REVISION" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+
+      - name: Install, typecheck and build
+        run: |
+          set -euo pipefail
+          npm ci --include=dev
+          npm run lint
+          npm run build
+
+      - name: Run live reconcile orchestrator
+        run: node scripts/run-sheet1-live-reconcile.mjs
