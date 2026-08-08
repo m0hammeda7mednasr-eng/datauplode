@@ -122,6 +122,27 @@ const checks: Array<[string, boolean]> = [
     source.includes("shopifyProductId: shopifyProductIds.length === 1 ? shopifyProductIds[0] : null"),
   ],
   [
+    "rollout monitoring exposes exact persisted dry-run batch provenance for canaries",
+    source.includes("const dryRunBatchId = String(provenance?.dryRunBatchId") &&
+      source.includes("dryRunBatchId,"),
+  ],
+  [
+    "rollout monitoring exposes persisted provenance Shopify identity",
+    source.includes("provenanceShopifyProductId") &&
+      source.includes("provenance?.shopifyProductId"),
+  ],
+  [
+    "canary provenance is valid only when dry-run batch exists and product identities agree",
+    source.includes("canaryProvenanceValid") &&
+      source.includes("dryRunBatchId &&") &&
+      source.includes("provenanceShopifyProductId === shopifyProductIds[0]"),
+  ],
+  [
+    "dry runs never fabricate canary provenance validity",
+    source.includes("summary.dryRun === false") &&
+      source.includes(": null;"),
+  ],
+  [
     "rollout monitoring only marks a strict one-product clean dry run as canary ready",
     source.includes("isCanaryReadyDryRun") &&
       source.includes('run.status === "COMPLETED"') &&
@@ -176,14 +197,15 @@ if (failed.length > 0) {
   process.exit(1);
 }
 
-for (const [name] of checks) {
-  console.log(`PASS: ${name}`);
+for (const [name, ok] of checks) {
+  console.log(`${ok ? "PASS" : "FAIL"}: ${name}`);
 }
 console.log(
   JSON.stringify(
     {
       assertions: checks.length,
       exactCanaryProductIdentityObserved: true,
+      exactDryRunToCanaryProvenanceObserved: true,
       databaseWrites: 0,
       shopifyMutations: 0,
       googleSheetWrites: 0,
