@@ -61,15 +61,63 @@ function isSupabaseHost(host: string) {
   );
 }
 
-function databaseTarget() {
+function deriveSupabaseProjectRef(url: URL) {
+  const host = url.hostname.trim().toLowerCase().replace(/\.$/, "");
+  const direct = host.match(/^db\.([a-z0-9-]+)\.supabase\.(?:co|com)$/);
+  if (direct) return direct[1];
+
+  if (/\.pooler\.supabase\.(?:co|com)$/.test(host)) {
+    const username = decodeURIComponent(url.username || "").trim().toLowerCase();
+    const separator = username.lastIndexOf(".");
+    if (separator >= 0 && separator < username.length - 1) {
+      return username.slice(separator + 1);
+    }
+  }
+
+  return null;
+}
+
+function databaseBinding() {
   const value = String(process.env.DATABASE_URL || "").trim();
-  if (!value) return "missing";
+  const expectedProjectRef = String(process.env.SUPABASE_PROJECT_REF || "")
+    .trim()
+    .toLowerCase();
+  const projectRefPinned = Boolean(expectedProjectRef);
+
+  if (!value) {
+    return {
+      target: "missing",
+      projectRefPinned,
+      projectRefMatched: false,
+    };
+  }
+
   try {
     const url = new URL(value);
-    if (isSupabaseHost(url.hostname)) return "supabase";
-    return "configured";
+    if (!isSupabaseHost(url.hostname)) {
+      return {
+        target: "configured",
+        projectRefPinned,
+        projectRefMatched: false,
+      };
+    }
+
+    const databaseProjectRef = deriveSupabaseProjectRef(url);
+    return {
+      target: "supabase",
+      projectRefPinned,
+      projectRefMatched: Boolean(
+        projectRefPinned &&
+          databaseProjectRef &&
+          databaseProjectRef === expectedProjectRef,
+      ),
+    };
   } catch {
-    return "invalid";
+    return {
+      target: "invalid",
+      projectRefPinned,
+      projectRefMatched: false,
+    };
   }
 }
 
@@ -240,12 +288,16 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     !configuration.catalogWriteGateEnabled ||
     !configuration.catalogWriteTokenConfigured;
   const deployment = deploymentMetadata();
-  const databaseTargetValue = databaseTarget();
+  const databaseBindingValue = databaseBinding();
+  const databaseTargetValue = databaseBindingValue.target;
   const productionEnvironment =
     String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
   const productionPlatformReady =
     !productionEnvironment ||
-    (databaseTargetValue === "supabase" && deployment.revisionVerified === true);
+    (databaseTargetValue === "supabase" &&
+      databaseBindingValue.projectRefPinned === true &&
+      databaseBindingValue.projectRefMatched === true &&
+      deployment.revisionVerified === true);
   const productionWriteSafetyReady =
     !runtimeWriteGateEnabled &&
     !inventoryAutostartConfigured &&
@@ -321,12 +373,15 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       database: {
         ok: true,
         target: databaseTargetValue,
+        projectRefPinned: databaseBindingValue.projectRefPinned,
+        projectRefMatched: databaseBindingValue.projectRefMatched,
         latencyMs: Date.now() - startedAt,
         timeoutMs: databaseTimeoutMs,
       },
       platform: {
         productionEnvironment,
         supabaseRequired: productionEnvironment,
+        supabaseProjectPinRequired: productionEnvironment,
         railwayRevisionRequired: productionEnvironment,
         safeModeRequired: productionEnvironment,
         writeSafetyReady: productionWriteSafetyReady,
@@ -374,6 +429,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       database: {
         ok: false,
         target: databaseTargetValue,
+        projectRefPinned: databaseBindingValue.projectRefPinned,
+        projectRefMatched: databaseBindingValue.projectRefMatched,
         latencyMs: Date.now() - startedAt,
         timeoutMs: databaseTimeoutMs,
         failureCode,
@@ -381,6 +438,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       platform: {
         productionEnvironment,
         supabaseRequired: productionEnvironment,
+        supabaseProjectPinRequired: productionEnvironment,
         railwayRevisionRequired: productionEnvironment,
         safeModeRequired: productionEnvironment,
         writeSafetyReady: productionWriteSafetyReady,
