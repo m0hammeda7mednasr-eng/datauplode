@@ -17,9 +17,6 @@ const requiredColumnsMatch = preflight.match(
 assert(requiredColumnsMatch, "REQUIRED_COLUMNS declaration is missing or unreadable.");
 
 const requiredColumnsBody = requiredColumnsMatch[1];
-// Accept both compact one-line arrays and formatted multi-line arrays. The former
-// is used by SyncJob today; requiring a newline before `]` made the parser consume
-// following tables and report false duplicate columns.
 const tableEntries = [
   ...requiredColumnsBody.matchAll(
     /(?:^|\n)\s{2}([A-Za-z][A-Za-z0-9_]*)\s*:\s*\[([\s\S]*?)\],/g,
@@ -95,6 +92,36 @@ assert(
   "Production non-Supabase rejection must remain explicit and auditable.",
 );
 assert(
+  preflight.includes('process.env.SUPABASE_PROJECT_REF || ""'),
+  "Production preflight must read the dedicated SUPABASE_PROJECT_REF pin.",
+);
+assert(
+  preflight.includes("production && !expectedProjectRef"),
+  "Production preflight must fail closed when SUPABASE_PROJECT_REF is missing.",
+);
+assert(
+  preflight.includes("target.projectRef !== expectedProjectRef"),
+  "Production preflight must reject a DATABASE_URL for a different Supabase project.",
+);
+assert(
+  preflight.includes("Refusing to run against a different project"),
+  "Cross-project Supabase rejection must remain explicit and auditable.",
+);
+assert(
+  preflight.includes("/^db\\.([a-z0-9-]+)\\.supabase\\.(?:co|com)$/"),
+  "Preflight must derive a project ref from direct Supabase database hosts.",
+);
+assert(
+  preflight.includes("/\\.pooler\\.supabase\\.(?:co|com)$/") &&
+    preflight.includes("username.lastIndexOf(\".\")"),
+  "Preflight must derive a project ref from Supavisor Session-pooler usernames.",
+);
+assert(
+  preflight.includes("projectRefPinned: Boolean(expectedProjectRef)") &&
+    preflight.includes("projectRefMatched: Boolean(expectedProjectRef && target.projectRef === expectedProjectRef)"),
+  "Preflight report must expose project pinning state without printing credentials.",
+);
+assert(
   preflight.includes('target.sslMode !== "require"'),
   "Supabase preflight must require sslmode=require.",
 );
@@ -121,7 +148,7 @@ console.log(
       requiredColumns: requiredColumnCount,
       missingModels,
       staleColumns,
-      supabaseChecks: 8,
+      supabaseChecks: 14,
       databaseWrites: 0,
       shopifyMutations: 0,
       googleSheetWrites: 0,
