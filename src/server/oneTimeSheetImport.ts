@@ -10,6 +10,7 @@ const BETWEEN_BATCHES_MS = 1_500;
 const RECENT_RUNNING_MS = 45 * 60 * 1000;
 
 const SHEETS = [
+  { name: "الورقة1", gid: "0" },
   { name: "الورقة22", gid: "282692873" },
   { name: "الورقة23", gid: "770232216" },
   { name: "الورقة24", gid: "1210585516" },
