@@ -21,6 +21,7 @@ import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
 import { startOneTimeSheet1Reconcile } from "./src/server/oneTimeSheet1Reconcile.js";
+import { prepareSheet1ReconcileDeploymentTakeover } from "./src/server/sheet1ReconcileRecovery.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,7 +30,6 @@ const startedAt = new Date();
 
 function normalizeOrigin(value?: string | null) {
   if (!value) return null;
-
   try {
     const trimmed = value.trim();
     if (!trimmed || /^(MY_|YOUR[_-])/i.test(trimmed)) return null;
@@ -46,13 +46,11 @@ function getAllowedOrigins() {
     envString("APP_URL"),
     ...envString("CORS_ORIGINS", "").split(","),
   ];
-
   const defaults = [
     "https://datauplode.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
   ];
-
   return new Set(
     [...configuredOrigins, ...defaults]
       .map((origin) => normalizeOrigin(origin?.trim()))
@@ -65,11 +63,9 @@ function getListenHost() {
   const isRailway = Boolean(
     envString("RAILWAY_ENVIRONMENT") || envString("RAILWAY_PUBLIC_DOMAIN"),
   );
-
   if (isRailway && ["127.0.0.1", "localhost", "::1"].includes(configuredHost)) {
     return "0.0.0.0";
   }
-
   return configuredHost;
 }
 
@@ -186,11 +182,9 @@ async function startServer() {
     if (!requestOrigin || !allowedOrigins.has(requestOrigin)) {
       return next();
     }
-
     res.setHeader("Access-Control-Allow-Origin", requestOrigin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Vary", "Origin");
-
     if (req.method === "OPTIONS") {
       res.setHeader(
         "Access-Control-Allow-Methods",
@@ -203,13 +197,11 @@ async function startServer() {
       );
       return res.sendStatus(204);
     }
-
     next();
   });
 
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
-
   app.use(express.json({ limit: "10mb" }));
 
   app.get(["/health", "/api/health"], async (_req, res) => {
@@ -257,11 +249,9 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
-
     app.use("*", async (req, res, next) => {
       const url = req.originalUrl;
       if (url.startsWith("/api")) return next();
-
       try {
         let template = fs.readFileSync(
           path.resolve(__dirname, "index.html"),
@@ -277,7 +267,6 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     const indexPath = path.join(distPath, "index.html");
-
     if (fs.existsSync(indexPath)) {
       app.use(express.static(distPath));
       app.get("*", (_req, res) => {
@@ -300,10 +289,12 @@ async function startServer() {
     console.log(`Environment: ${envString("NODE_ENV", "development")}`);
     console.log(`Allowed origins: ${[...allowedOrigins].join(", ")}`);
 
-    // Explicit one-time production operation. It is independently guarded by
-    // an exact run key, a DB marker, a dry-run, and a one-product read-back.
-    // It never creates/rebuilds products and does not require broad runtime writes.
-    startOneTimeSheet1Reconcile(PORT);
+    // A fresh Railway process first takes over any marker left running by the
+    // process that was terminated during the deploy. The one-time runner then
+    // starts after its 20s delay and safely resumes from a fresh Sheet snapshot.
+    void prepareSheet1ReconcileDeploymentTakeover().finally(() => {
+      startOneTimeSheet1Reconcile(PORT);
+    });
 
     if (!runtimeWritesEnabled()) {
       console.log(
