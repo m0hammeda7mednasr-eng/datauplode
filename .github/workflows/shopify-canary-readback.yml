@@ -57,8 +57,13 @@ jobs:
             echo "canary_batch_id must be the exact persisted catalog-audit batch ID returned by the canary." >&2
             exit 2
           fi
+          if [[ ! "${CANARY_SHOPIFY_PRODUCT_ID}" =~ ^gid://shopify/Product/[0-9]+$ ]]; then
+            echo "product_id must be an exact Shopify Product GID." >&2
+            exit 2
+          fi
           echo "Requested canary revision: ${expected}"
           echo "Requested canary batch: ${CANARY_EXPECTED_BATCH_ID}"
+          echo "Requested canary product: ${CANARY_SHOPIFY_PRODUCT_ID}"
 
       - name: Checkout exact canary revision
         uses: actions/checkout@v4
@@ -115,6 +120,7 @@ jobs:
           const body = JSON.parse(fs.readFileSync('railway-readiness.json', 'utf8'));
           const expected = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
           const expectedBatchId = String(process.env.CANARY_EXPECTED_BATCH_ID || '').trim();
+          const expectedProductId = String(process.env.CANARY_SHOPIFY_PRODUCT_ID || '').trim();
           const actual = String(body?.deployment?.revision || '').trim().toLowerCase();
           const fail = (message) => { console.error(message); process.exit(2); };
           if (body?.ok !== true) fail('Railway /api/ready is not ready; Shopify read-back is blocked.');
@@ -137,6 +143,15 @@ jobs:
           if (Number(latestCanary.verified) !== 1 || Number(latestCanary.missing) !== 0 || Number(latestCanary.ambiguous) !== 0 || Number(latestCanary.errors) !== 0) {
             fail('Latest persisted canary is not a clean one-product verification.');
           }
+          const persistedProductIds = Array.isArray(latestCanary.shopifyProductIds)
+            ? latestCanary.shopifyProductIds.map((value) => String(value || '').trim()).filter(Boolean)
+            : [];
+          if (persistedProductIds.length !== 1 || String(latestCanary.shopifyProductId || '').trim() !== persistedProductIds[0]) {
+            fail('Latest persisted canary does not expose one unambiguous Shopify product identity.');
+          }
+          if (persistedProductIds[0] !== expectedProductId) {
+            fail(`Persisted canary product ${persistedProductIds[0]} does not match requested Shopify product ${expectedProductId}.`);
+          }
           console.log(JSON.stringify({
             ok: true,
             railwayRevision: actual,
@@ -144,6 +159,8 @@ jobs:
             writeSafetyReady: body.platform.writeSafetyReady,
             requestedCanaryBatchId: expectedBatchId,
             persistedCanaryBatchId: latestCanary.id,
+            requestedShopifyProductId: expectedProductId,
+            persistedShopifyProductId: persistedProductIds[0],
             persistedCanaryStatus: latestCanary.status,
             persistedCanaryProducts: latestCanary.uniqueProductsProcessed,
             persistedCanaryVerified: latestCanary.verified,
@@ -176,6 +193,7 @@ jobs:
             echo "- Checkout pinned to canary revision: \`true\`"
             echo "- Revision equality required before Shopify read-back: \`true\`"
             echo "- Exact persisted canary batch equality required before Shopify read-back: \`true\`"
+            echo "- Exact persisted canary product equality required before Shopify read-back: \`true\`"
             echo "- Live Railway /api/ready verification required before Shopify read-back: \`true\`"
             echo "- Live database target must be Supabase: \`true\`"
             echo "- Persisted clean one-product canary must exist in readiness: \`true\`"
