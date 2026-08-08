@@ -51,6 +51,7 @@ type ReconcileResult = {
   skuChanged?: boolean;
   sheetWritten?: boolean;
   readbackVerified?: boolean;
+  matchSource?: "database" | "shopify_fallback";
   reason?: string;
 };
 
@@ -61,10 +62,20 @@ type ReconcileUnit = {
   conflictMultipliers: number[];
 };
 
+type ExistingShopifyResolution = {
+  product: any | null;
+  ambiguous: boolean;
+  reason?: string;
+};
+
 let googleTokenCache: { token: string; expiresAt: number } | null = null;
 
 function clean(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function compactCode(value: unknown) {
+  return clean(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
 function canonicalizeUrl(value: string) {
@@ -308,8 +319,18 @@ function matchFreshVariant(dbVariant: any, freshVariants: any[]) {
     if (exactSku) return exactSku;
   }
 
-  const dbSize = normalizedMatchText(variantSize(dbVariant));
+  const dbSizeToken = normalizeSizeToken(variantSize(dbVariant));
   const dbColor = normalizedMatchText(variantColor(dbVariant));
+  if (dbSizeToken) {
+    const tokenMatches = freshVariants.filter((variant) => {
+      const token = normalizeSizeToken(variantSize(variant));
+      const color = normalizedMatchText(variantColor(variant));
+      return token === dbSizeToken && (!dbColor || !color || color === dbColor);
+    });
+    if (tokenMatches.length === 1) return tokenMatches[0];
+  }
+
+  const dbSize = normalizedMatchText(variantSize(dbVariant));
   const optionMatch = freshVariants.find((variant) => {
     const size = normalizedMatchText(variantSize(variant));
     const color = normalizedMatchText(variantColor(variant));
@@ -411,14 +432,145 @@ async function findMappedProduct(row: SheetRow, rawProductCode: string | null) {
   if (exact.length > 1) return { product: null, ambiguous: true };
 
   if (!rawProductCode) return { product: null, ambiguous: false };
-  const normalizedCode = rawProductCode.toLowerCase();
+  const normalizedCode = compactCode(rawProductCode);
   const codeMatches = candidates.filter((candidate) => {
-    if (clean(candidate.productId).toLowerCase().includes(normalizedCode)) return true;
-    return candidate.variants.some((variant) => clean(variant.sku).toLowerCase().includes(normalizedCode));
+    if (compactCode(candidate.productId).includes(normalizedCode)) return true;
+    return candidate.variants.some((variant) => compactCode(variant.sku).includes(normalizedCode));
   });
   return codeMatches.length === 1
     ? { product: codeMatches[0], ambiguous: false }
     : { product: null, ambiguous: codeMatches.length > 1 };
+}
+
+function selectedOptionValue(variant: any, wanted: string[]) {
+  for (const option of variant?.selectedOptions || []) {
+    const name = clean(option?.name).toLowerCase();
+    if (wanted.includes(name)) return clean(option?.value);
+  }
+  return "";
+}
+
+function syntheticSourceVariant(product: any, variant: any) {
+  const size = selectedOptionValue(variant, ["size", "age", "age/size"]) || clean(product.title);
+  const color = selectedOptionValue(variant, ["color", "colour"]);
+  const optionMap: Record<string, string> = {};
+  for (const option of variant?.selectedOptions || []) {
+    const name = clean(option?.name);
+    const value = clean(option?.value);
+    if (name && value && value.toLowerCase() !== "default title") optionMap[name] = value;
+  }
+  return {
+    id: `shopify-fallback:${variant.id}`,
+    sourceVariantId: null,
+    sku: clean(variant?.inventoryItem?.sku || variant?.sku),
+    color,
+    size,
+    price: positiveNumber(variant.price),
+    currency: null,
+    available: Number(variant.inventoryQuantity || 0) > 0,
+    stockStatus: Number(variant.inventoryQuantity || 0) > 0 ? "in_stock" : "out_of_stock",
+    imageUrl: null,
+    raw: JSON.stringify({ optionValues: optionMap, shopifyFallback: true }),
+    shopifyVariant: { shopifyId: variant.id },
+  };
+}
+
+async function findExistingShopifyFallback(
+  client: any,
+  row: SheetRow,
+  rawProductCode: string,
+): Promise<ExistingShopifyResolution> {
+  const formattedCode = formatProductCode(rawProductCode);
+  const queryText = [
+    `sku:${formattedCode}*`,
+    `sku:${rawProductCode}*`,
+    `handle:${rawProductCode.toLowerCase()}*`,
+  ].join(" OR ");
+  const query = `
+    query Sheet1FindExisting($query: String!) {
+      products(first: 50, query: $query) {
+        nodes {
+          id
+          title
+          handle
+          status
+          createdAt
+          updatedAt
+          variants(first: 250) {
+            nodes {
+              id
+              title
+              price
+              sku
+              inventoryQuantity
+              inventoryItem { id sku tracked }
+              selectedOptions { name value }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await client.request(query, { query: queryText });
+  const products = data?.products?.nodes || [];
+  if (!products.length) return { product: null, ambiguous: false };
+
+  const compactProductCode = compactCode(rawProductCode);
+  const expectedPrefix = `DAB-${brandCode(row.normalizedUrl)}-${formattedCode}-`.toUpperCase();
+  const strong = products.filter((product: any) => {
+    if (compactCode(product.handle).includes(compactProductCode)) return true;
+    return (product.variants?.nodes || []).some((variant: any) =>
+      compactCode(variant?.inventoryItem?.sku || variant?.sku).includes(compactProductCode),
+    );
+  });
+  const candidates = strong.length ? strong : products;
+
+  const scored = candidates.map((product: any) => {
+    const variants = product.variants?.nodes || [];
+    const skus = variants.map((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku));
+    let score = 0;
+    if (row.existingSku && skus.some((sku: string) => sku === row.existingSku)) score += 10000;
+    if (clean(product.status).toUpperCase() === "ACTIVE") score += 1000;
+    if (skus.some((sku: string) => sku.toUpperCase().startsWith(expectedPrefix))) score += 250;
+    if (variants.length === 1) score += 50;
+    return { product, score, skus };
+  }).sort((left: any, right: any) => right.score - left.score);
+
+  const top = scored[0];
+  if (!top) return { product: null, ambiguous: false };
+  const tied = scored.filter((entry: any) => entry.score === top.score);
+  if (tied.length !== 1) {
+    return {
+      product: null,
+      ambiguous: true,
+      reason: `More than one existing Shopify product tied for the safest match (${tied.length} candidates)`,
+    };
+  }
+
+  const selected = top.product;
+  const variants = selected.variants?.nodes || [];
+  if (!variants.length) return { product: null, ambiguous: false };
+
+  return {
+    product: {
+      id: `shopify-fallback:${selected.id}`,
+      title: selected.title,
+      description: null,
+      brand: "Next",
+      currency: "EGP",
+      price: positiveNumber(variants[0]?.price) || 0,
+      raw: null,
+      syncStatus: "active",
+      __shopifyFallback: true,
+      shopifyProduct: {
+        shopifyId: selected.id,
+        handle: selected.handle,
+        status: clean(selected.status).toLowerCase(),
+      },
+      variants: variants.map((variant: any) => syntheticSourceVariant(selected, variant)),
+    },
+    ambiguous: false,
+  };
 }
 
 async function shopifyReadback(client: any, productId: string) {
@@ -517,7 +669,7 @@ async function googleAccessToken() {
   signer.end();
   const assertion = `${unsigned}.${encode(signer.sign(privateKey))}`;
   const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    grant_type: "urn:ietf:params:oauth-type:jwt-bearer",
     assertion,
   });
   const response = await axios.post("https://oauth2.googleapis.com/token", body, {
@@ -608,25 +760,43 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
       reason: "More than one linked source product matched; no write was attempted",
     };
   }
-  if (!located.product?.shopifyProduct?.shopifyId) {
+
+  let sourceProduct: any = located.product;
+  let matchSource: "database" | "shopify_fallback" = "database";
+  if (!sourceProduct?.shopifyProduct?.shopifyId) {
+    const fallback = await findExistingShopifyFallback(client, row, rawProductCode);
+    if (fallback.ambiguous) {
+      return {
+        status: "ambiguous",
+        rows: unit.rows.map((entry) => entry.rowNumber),
+        url: row.normalizedUrl,
+        multiplier: row.multiplier,
+        productCode: rawProductCode,
+        reason: fallback.reason || "More than one existing Shopify product matched; no write was attempted",
+      };
+    }
+    sourceProduct = fallback.product;
+    matchSource = "shopify_fallback";
+  }
+
+  if (!sourceProduct?.shopifyProduct?.shopifyId) {
     return {
       status: "missing",
       rows: unit.rows.map((entry) => entry.rowNumber),
       url: row.normalizedUrl,
       multiplier: row.multiplier,
       productCode: rawProductCode,
-      reason: "No existing linked Shopify product was found; product creation is disabled",
+      reason: "No existing Shopify product was found; product creation is disabled",
     };
   }
 
-  const sourceProduct = located.product;
   const productId = sourceProduct.shopifyProduct.shopifyId;
   const fresh = await scraperService.scrape(row.url);
   const freshVariants = Array.isArray(fresh.variants) ? fresh.variants : [];
   if (!freshVariants.length) throw new Error("Fresh source scrape returned no variants");
 
   const before = await shopifyReadback(client, productId);
-  if (!before?.variants?.nodes?.length) throw new Error("Linked Shopify product has no readable variants");
+  if (!before?.variants?.nodes?.length) throw new Error("Existing Shopify product has no readable variants");
   const beforeById = new Map(before.variants.nodes.map((variant: any) => [variant.id, variant]));
 
   const mapped = sourceProduct.variants
@@ -635,13 +805,16 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
       const shopifyVariantId = dbVariant.shopifyVariant.shopifyId;
       const current = beforeById.get(shopifyVariantId);
       const freshVariant = matchFreshVariant(dbVariant, freshVariants);
-      const rawSize = variantSize(freshVariant) || variantSize(dbVariant) || clean(current?.title) || clean(before.title);
+      const rawSize = variantSize(freshVariant) || variantSize(dbVariant) || clean((current as any)?.title) || clean(before.title);
       const sizeToken = normalizeSizeToken(rawSize) || normalizeSizeToken(before.title);
       return { dbVariant, current, freshVariant, sizeToken };
     })
     .filter((entry: any) => entry.current && entry.freshVariant);
 
-  if (!mapped.length) throw new Error("No existing linked variant could be matched to the fresh source data");
+  if (!mapped.length) throw new Error("No existing Shopify variant could be matched to the fresh source data");
+  if (matchSource === "shopify_fallback" && mapped.length !== before.variants.nodes.length) {
+    throw new Error(`Existing Shopify fallback matched only ${mapped.length}/${before.variants.nodes.length} variants; no partial write was attempted`);
+  }
 
   const canonical = [...mapped]
     .filter((entry) => entry.sizeToken)
@@ -655,13 +828,13 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
   for (const entry of mapped) {
     const sourcePrice = freshVariantPrice(fresh, entry.freshVariant);
     const targetPrice = sourcePrice ? Number((sourcePrice * row.multiplier).toFixed(2)) : undefined;
-    const update: any = { id: entry.current.id };
+    const update: any = { id: (entry.current as any).id };
     if (targetPrice) update.price = targetPrice.toFixed(2);
-    if (entry.current.id === canonical.current.id) update.inventoryItem = { sku };
+    if ((entry.current as any).id === (canonical.current as any).id) update.inventoryItem = { sku };
     variantUpdates.push(update);
-    expectedById.set(entry.current.id, {
+    expectedById.set((entry.current as any).id, {
       price: targetPrice,
-      sku: entry.current.id === canonical.current.id ? sku : undefined,
+      sku: (entry.current as any).id === (canonical.current as any).id ? sku : undefined,
       inventory: inventoryQuantity(entry.freshVariant),
     });
   }
@@ -674,9 +847,10 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
     const location = await ShopifyService.getInventoryLocation(client);
     const quantities = mapped
       .map((entry) => {
-        const quantity = expectedById.get(entry.current.id)?.inventory;
-        const itemId = clean(entry.current?.inventoryItem?.id);
-        const tracked = entry.current?.inventoryItem?.tracked === true;
+        const current: any = entry.current;
+        const quantity = expectedById.get(current.id)?.inventory;
+        const itemId = clean(current?.inventoryItem?.id);
+        const tracked = current?.inventoryItem?.tracked === true;
         return quantity !== null && quantity !== undefined && itemId && tracked
           ? { inventoryItemId: itemId, quantity }
           : null;
@@ -686,7 +860,7 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
       const inventoryResponse = await ShopifyService.setInventoryQuantities(client, {
         locationId: location.id,
         quantities,
-        referenceDocumentUri: `syncly://sheet1-reconcile/${RUN_CONFIRMATION}/${sourceProduct.id}`,
+        referenceDocumentUri: `syncly://sheet1-reconcile/${RUN_CONFIRMATION}/${rawProductCode}`,
       });
       const inventoryErrors = inventoryResponse?.inventorySetQuantities?.userErrors || [];
       if (inventoryErrors.length) throw new Error(`Shopify inventory update failed: ${inventoryErrors[0].message}`);
@@ -700,42 +874,44 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
   let inventoryChanged = 0;
 
   for (const entry of mapped) {
-    const actual: any = afterById.get(entry.current.id);
-    const expected = expectedById.get(entry.current.id)!;
+    const current: any = entry.current;
+    const actual: any = afterById.get(current.id);
+    const expected = expectedById.get(current.id)!;
     if (!actual) {
       readbackVerified = false;
       continue;
     }
     if (expected.price !== undefined) {
-      const expectedPrice = dryRun ? Number(entry.current.price) : expected.price;
+      const expectedPrice = dryRun ? Number(current.price) : expected.price;
       if (Math.abs(Number(actual.price) - expectedPrice) >= 0.01) readbackVerified = false;
-      if (Math.abs(Number(entry.current.price) - expected.price) >= 0.01) pricesChanged += 1;
+      if (Math.abs(Number(current.price) - expected.price) >= 0.01) pricesChanged += 1;
     }
-    if (entry.current.id === canonical.current.id) {
+    if (current.id === (canonical.current as any).id) {
       const actualSku = clean(actual?.inventoryItem?.sku || actual?.sku);
       const expectedCanonicalSku = dryRun
-        ? clean(entry.current?.inventoryItem?.sku || entry.current?.sku)
+        ? clean(current?.inventoryItem?.sku || current?.sku)
         : sku;
       if (actualSku !== expectedCanonicalSku) readbackVerified = false;
     }
-    if (expected.inventory !== null && expected.inventory !== undefined && entry.current?.inventoryItem?.tracked === true) {
-      const expectedInventory = dryRun ? Number(entry.current.inventoryQuantity ?? actual.inventoryQuantity) : expected.inventory;
+    if (expected.inventory !== null && expected.inventory !== undefined && current?.inventoryItem?.tracked === true) {
+      const expectedInventory = dryRun ? Number(current.inventoryQuantity ?? actual.inventoryQuantity) : expected.inventory;
       if (Number(actual.inventoryQuantity) !== expectedInventory) readbackVerified = false;
-      if (Number(entry.current.inventoryQuantity) !== expected.inventory) inventoryChanged += 1;
+      if (Number(current.inventoryQuantity) !== expected.inventory) inventoryChanged += 1;
     }
   }
 
   if (!dryRun && !readbackVerified) throw new Error("Shopify read-back did not match the expected price/SKU/inventory values");
 
-  if (!dryRun) {
+  if (!dryRun && matchSource === "database") {
     await updateDatabaseFromFresh(sourceProduct, fresh, mapped);
     for (const entry of mapped) {
-      const expected = expectedById.get(entry.current.id)!;
+      const current: any = entry.current;
+      const expected = expectedById.get(current.id)!;
       await prisma.shopifyVariant.updateMany({
-        where: { shopifyId: entry.current.id },
+        where: { shopifyId: current.id },
         data: {
           ...(expected.price !== undefined ? { price: expected.price } : {}),
-          ...(entry.current.id === canonical.current.id ? { sku } : {}),
+          ...(current.id === (canonical.current as any).id ? { sku } : {}),
         },
       });
     }
@@ -754,8 +930,9 @@ async function reconcileUnit(client: any, unit: ReconcileUnit, dryRun: boolean):
     variantsChecked: mapped.length,
     pricesChanged,
     inventoryChanged,
-    skuChanged: clean(canonical.current?.inventoryItem?.sku || canonical.current?.sku) !== sku,
+    skuChanged: clean((canonical.current as any)?.inventoryItem?.sku || (canonical.current as any)?.sku) !== sku,
     readbackVerified,
+    matchSource,
   };
 }
 
@@ -767,6 +944,7 @@ router.get("/sheet1-reconcile/config", (_req, res) => {
     gid: SHEET_GID,
     createProducts: false,
     rebuildProducts: false,
+    shopifyFallbackWhenDatabaseMappingMissing: true,
     skuFormat: "DAB-BRAND-PRODUCTCODE-CANONICALSIZE-MULTIPLIER",
     runConfirmation: RUN_CONFIRMATION,
   });
