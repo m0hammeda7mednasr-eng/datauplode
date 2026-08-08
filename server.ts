@@ -84,8 +84,20 @@ function pricingRuleSeedEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_PRICING_RULE_SEED_ENABLED");
 }
 
+function jobRecoveryConfigured() {
+  return envFlag("SYNC_JOB_RECOVERY_ENABLED");
+}
+
+function jobRecoveryShopifyWritesEnabled() {
+  return envFlag("SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED");
+}
+
 function jobRecoveryEnabled() {
-  return runtimeWritesEnabled() && envFlag("SYNC_JOB_RECOVERY_ENABLED");
+  return (
+    runtimeWritesEnabled() &&
+    jobRecoveryConfigured() &&
+    jobRecoveryShopifyWritesEnabled()
+  );
 }
 
 function inventoryAutostartEnabled() {
@@ -271,10 +283,18 @@ async function startServer() {
     }
 
     if (jobRecoveryEnabled()) {
-      console.warn("Interrupted-job recovery ENABLED");
+      console.warn(
+        "Interrupted-job recovery Shopify writes ENABLED by explicit recovery gate",
+      );
       void QueueService.recoverInterruptedJobs();
-    } else {
+    } else if (!jobRecoveryConfigured()) {
       console.log("Interrupted-job recovery disabled by SYNC_JOB_RECOVERY_ENABLED=false");
+    } else if (!jobRecoveryShopifyWritesEnabled()) {
+      console.log(
+        "Interrupted-job recovery blocked: SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false",
+      );
+    } else {
+      console.log("Interrupted-job recovery blocked because runtime writes are disabled");
     }
 
     if (inventoryAutostartEnabled()) {
