@@ -1,0 +1,59 @@
+name: Diagnose Live Sheet1 Batch 3
+
+on:
+  push:
+    branches: [sheet1-live-diagnostics]
+    paths: [.github/workflows/live-batch3-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Build first 30 missing groups and probe groups 21-30
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://datauplode-production.up.railway.app'
+          SHEET='https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/export?format=csv&gid=0'
+          curl --fail --silent --show-error --max-time 60 "$SHEET" -o sheet.csv
+          python3 <<'PY'
+import csv,json,re
+from collections import OrderedDict
+from urllib.parse import urlsplit,urlunsplit
+rows=[]
+with open('sheet.csv',newline='',encoding='utf-8-sig') as f:
+    for i,cells in enumerate(csv.reader(f),1):
+        cells += ['']*(4-len(cells))
+        u=cells[0].strip(); m=cells[1].strip().replace(',','.'); sku=cells[3].strip()
+        if not re.match(r'^https?://',u,re.I): continue
+        try: mult=float(m)
+        except: continue
+        if not 1<=mult<=100: continue
+        p=urlsplit(u.replace('\t','').replace('\r','').replace('\n','').strip())
+        u=urlunsplit((p.scheme,p.netloc.lower(),p.path.rstrip('/'),'',''))
+        rows.append({'row':i,'url':u,'multiplier':mult,'sku':sku})
+groups=OrderedDict()
+for row in rows: groups.setdefault(row['url'],[]).append(row)
+missing=[]
+for u,rs in groups.items():
+    if any(not r['sku'] for r in rs):
+        missing.append({'url':u,'rows':[r['row'] for r in rs],'multipliers':sorted(set(r['multiplier'] for r in rs))})
+json.dump(missing[20:30],open('batch3.json','w',encoding='utf-8'),ensure_ascii=False,indent=2)
+print(json.dumps({'allMissingGroups':len(missing),'batch3':missing[20:30]},ensure_ascii=False,indent=2))
+PY
+          python3 <<'PY'
+import json,subprocess
+base='https://datauplode-production.up.railway.app'
+groups=json.load(open('batch3.json',encoding='utf-8'))
+for index,g in enumerate(groups,21):
+    payload=json.dumps({'dryRun':True,'writeSheet':False,'rowNumbers':g['rows']})
+    p=subprocess.run(['curl','--silent','--show-error','--max-time','300','--header','content-type: application/json','--data',payload,f'{base}/api/sheet1-reconcile/run'],capture_output=True,text=True)
+    print(f'===== GROUP {index} rows={g["rows"]} url={g["url"]} multipliers={g["multipliers"]} =====')
+    print('curl_rc=',p.returncode)
+    print(p.stdout)
+    if p.stderr: print('stderr=',p.stderr)
+PY
