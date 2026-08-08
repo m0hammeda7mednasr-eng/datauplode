@@ -30,6 +30,7 @@ function runPreflight(overrides: Record<string, string | undefined>) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: 'production',
+    SUPABASE_PROJECT_REF: 'project',
     DATABASE_URL: validSupabaseUrl,
     CATALOG_AUDIT_DRY_RUN: 'true',
     CATALOG_AUDIT_CANARY_MAX_ROWS: '1',
@@ -75,6 +76,9 @@ assert(preflightSource.includes('CATALOG_AUDIT_DRY_RUN'), 'catalog audit dry-run
 assert(preflightSource.includes("endsWith('.supabase.com')"), 'Supabase .com host suffix must be allowlisted');
 assert(preflightSource.includes("endsWith('.supabase.co')"), 'Supabase .co host suffix must be allowlisted');
 assert(!preflightSource.includes("host.includes('supabase')"), 'substring-only Supabase hostname checks must remain forbidden');
+assert(preflightSource.includes('SUPABASE_PROJECT_REF'), 'dedicated Supabase project pin must be mandatory before deployment');
+assert(preflightSource.includes('deriveSupabaseProjectRef'), 'preflight must derive project identity from DATABASE_URL');
+assert(preflightSource.includes('projectRef !== expectedProjectRef'), 'DATABASE_URL project identity must exactly match the configured project pin');
 assert(preflightSource.includes("port !== '5432'"), 'Supabase Session pooler must use port 5432');
 assert(preflightSource.includes("sslMode !== 'require'"), 'Supabase database URL must require TLS');
 assert(preflightSource.includes('connectionLimit < 1 || connectionLimit > 20'), 'connection_limit must remain bounded');
@@ -101,6 +105,24 @@ assert(dryRunOff.status !== 0, 'disabled catalog dry-run must block deployment')
 
 const canaryTooWide = runPreflight({ CATALOG_AUDIT_CANARY_MAX_ROWS: '2' });
 assert(canaryTooWide.status !== 0, 'canary wider than one row must block deployment');
+
+const missingProjectPin = runPreflight({ SUPABASE_PROJECT_REF: undefined });
+assert(missingProjectPin.status !== 0, 'missing SUPABASE_PROJECT_REF must block deployment before schema changes');
+
+const wrongProjectPin = runPreflight({ SUPABASE_PROJECT_REF: 'different-project' });
+assert(wrongProjectPin.status !== 0, 'mismatched Supabase project pin must block deployment before schema changes');
+
+const directHostCorrectProject = runPreflight({
+  SUPABASE_PROJECT_REF: 'project',
+  DATABASE_URL: 'postgresql://postgres:password@db.project.supabase.co:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
+});
+assert(directHostCorrectProject.status === 0, 'direct Supabase host must support exact project-ref verification');
+
+const directHostWrongProject = runPreflight({
+  SUPABASE_PROJECT_REF: 'project',
+  DATABASE_URL: 'postgresql://postgres:password@db.other.supabase.co:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20',
+});
+assert(directHostWrongProject.status !== 0, 'direct Supabase host for another project must block deployment');
 
 const missingDatabase = runPreflight({ DATABASE_URL: undefined });
 assert(missingDatabase.status !== 0, 'missing DATABASE_URL must block deployment');
@@ -146,9 +168,10 @@ console.log(JSON.stringify({
   ok: true,
   assertions,
   testedClosedGates: requiredClosedGates.length,
-  safeModePassCases: 1,
-  blockedDeploymentCases: requiredClosedGates.length * 2 + 10,
-  supabaseDeploymentGuards: 7,
+  safeModePassCases: 2,
+  blockedDeploymentCases: requiredClosedGates.length * 2 + 13,
+  supabaseDeploymentGuards: 11,
+  preSchemaProjectPinVerified: true,
   shopifyMutationsPerformed: 0,
   googleSheetWritesPerformed: 0,
 }, null, 2));
