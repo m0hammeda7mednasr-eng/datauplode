@@ -121,6 +121,30 @@ const checks: Array<[string, boolean]> = [
       guard.includes("/^gid:\\/\\/shopify\\/Product\\/\\d+$/.test(expected)"),
   ],
   [
+    "successful production canary response is intercepted for provenance persistence",
+    source.includes("installCanaryProvenancePersistence") &&
+      source.includes("body?.success !== true") &&
+      source.includes("body?.batchId"),
+  ],
+  [
+    "persisted canary provenance records exact dry-run batch and Shopify product",
+    source.includes("payload.provenance") &&
+      source.includes("dryRunBatchId,") &&
+      source.includes("shopifyProductId: expectedShopifyProductId"),
+  ],
+  [
+    "canary provenance is persisted only after revalidating a clean one-product canary payload",
+    source.includes("Persisted canary payload does not match the verified one-product canary identity") &&
+      source.includes("productIds.length !== 1") &&
+      source.includes("productIds[0] !== expectedShopifyProductId"),
+  ],
+  [
+    "canary provenance persistence failure blocks rollout and automatic retry",
+    source.includes("CATALOG_AUDIT_CANARY_PROVENANCE_PERSIST_FAILED") &&
+      source.includes("Do not broaden writes or retry automatically") &&
+      source.includes("prisma.importBatch.update"),
+  ],
+  [
     "production smoke rejects missing existing Shopify product",
     smoke.includes("verified !== 1 || missing !== 0") &&
       smoke.includes("must prove one existing Shopify product before canary"),
