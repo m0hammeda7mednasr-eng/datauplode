@@ -11,20 +11,42 @@ import {
 } from "./firstFiveSheetsReconcile.js";
 
 const SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
-const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit?gid=0`;
+export const FIRST_EIGHT_CATALOG_SHEETS = [
+  { name: "\u0627\u0644\u0648\u0631\u0642\u06291", gid: 0, sheetId: 0 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u06292", gid: 531292068, sheetId: 531292068 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u062915", gid: 242585683, sheetId: 242585683 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u062910", gid: 1991302797, sheetId: 1991302797 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u06296", gid: 1951926772, sheetId: 1951926772 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u06297", gid: 93159589, sheetId: 93159589 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u06298", gid: 916372394, sheetId: 916372394 },
+  { name: "\u0627\u0644\u0648\u0631\u0642\u062920", gid: 202697256, sheetId: 202697256 },
+] as const;
 export const SHEET1_CATALOG_MARKER_TYPE =
-  "SHEET1_CATALOG_AUTO_SYNC:2026-08-09-v4-flattened-duplicate-priority";
+  "SHEET1_CATALOG_AUTO_SYNC:2026-08-09-v5-first-eight-5000-key-pool";
 const START_DELAY_MS = 20_000;
 const DEFAULT_POLL_MS = 30 * 60 * 1000;
-const DEFAULT_BATCH_SIZE = 20;
+const DEFAULT_BATCH_SIZE = 10;
+export const MAX_CATALOG_TARGET_ROWS = 5000;
 let started = false;
+
+type SheetConfig = (typeof FIRST_EIGHT_CATALOG_SHEETS)[number];
+type CatalogRow = {
+  sheet: SheetConfig;
+  row: GoogleSheetRow;
+  key: string;
+  fingerprint: string;
+};
 
 type WorkerState = {
   stage: string;
   cycle: number;
   fingerprints: Record<string, string>;
+  verifiedFingerprints: Record<string, string>;
   totalRows: number;
+  targetRows: number;
   candidateRows: number;
+  verifiedRows: number;
+  remainingRows: number;
   existingUpdated: number;
   published: number;
   failed: number;
@@ -94,6 +116,10 @@ function parseState(value: string | null | undefined): Partial<WorkerState> {
 }
 
 function initialState(previous?: Partial<WorkerState>): WorkerState {
+  const verifiedFingerprints =
+    previous?.verifiedFingerprints && typeof previous.verifiedFingerprints === "object"
+      ? previous.verifiedFingerprints
+      : {};
   return {
     stage: "starting",
     cycle: Number(previous?.cycle || 0),
@@ -101,8 +127,12 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
       previous?.fingerprints && typeof previous.fingerprints === "object"
         ? previous.fingerprints
         : {},
+    verifiedFingerprints,
     totalRows: 0,
+    targetRows: 0,
     candidateRows: 0,
+    verifiedRows: Object.keys(verifiedFingerprints).length,
+    remainingRows: 0,
     existingUpdated: Number(previous?.existingUpdated || 0),
     published: Number(previous?.published || 0),
     failed: Number(previous?.failed || 0),
@@ -131,7 +161,31 @@ function chunks<T>(items: T[], size: number) {
   return result;
 }
 
+function sheetUrl(sheet: SheetConfig) {
+  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit?gid=${sheet.gid}`;
+}
+
+function rowKey(sheet: SheetConfig, rowNumber: number) {
+  return `${sheet.sheetId}:${rowNumber}`;
+}
+
+function targetRowLimit() {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_TARGET_ROWS || MAX_CATALOG_TARGET_ROWS,
+  );
+  return Math.min(
+    MAX_CATALOG_TARGET_ROWS,
+    Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : MAX_CATALOG_TARGET_ROWS),
+  );
+}
+
+function refreshProgress(state: WorkerState) {
+  state.verifiedRows = Object.keys(state.verifiedFingerprints).length;
+  state.remainingRows = Math.max(0, state.targetRows - state.verifiedRows);
+}
+
 async function persist(markerId: string, state: WorkerState) {
+  refreshProgress(state);
   await prisma.syncJob.update({
     where: { id: markerId },
     data: { result: JSON.stringify(state) },
@@ -140,25 +194,29 @@ async function persist(markerId: string, state: WorkerState) {
 
 async function writeSuccessfulSkus(
   successful: Array<{ rowNumber: number; sku?: string }>,
+  sheet: SheetConfig,
   state: WorkerState,
 ) {
-  const updates = successful
-    .filter((entry) => entry.sku)
-    .map((entry) => ({ sheetId: 0, rowNumber: entry.rowNumber, sku: entry.sku! }));
-  if (!updates.length) return;
-  for (const update of updates) {
-    state.pendingSkuWrites[String(update.rowNumber)] = update.sku;
+  for (const entry of successful) {
+    if (!entry.sku) continue;
+    state.pendingSkuWrites[rowKey(sheet, entry.rowNumber)] = entry.sku;
   }
   state.sheetWritePending = Object.keys(state.pendingSkuWrites).length;
   await flushPendingSkuWrites(state);
 }
 
 async function flushPendingSkuWrites(state: WorkerState) {
-  const updates = Object.entries(state.pendingSkuWrites).map(([rowNumber, sku]) => ({
-    sheetId: 0,
-    rowNumber: Number(rowNumber),
-    sku,
-  }));
+  const updates = Object.entries(state.pendingSkuWrites)
+    .map(([key, sku]) => {
+      const [sheetId, rowNumber] = key.split(":").map(Number);
+      return { key, sheetId, rowNumber, sku };
+    })
+    .filter(
+      (entry) =>
+        Number.isSafeInteger(entry.sheetId) &&
+        Number.isSafeInteger(entry.rowNumber) &&
+        entry.rowNumber > 0,
+    );
   if (!updates.length) {
     state.sheetWritePending = 0;
     return;
@@ -170,9 +228,7 @@ async function flushPendingSkuWrites(state: WorkerState) {
   try {
     for (const batch of chunks(updates, 100)) {
       state.sheetCellsWritten += await writeSkuCellsToSheet(batch);
-      for (const entry of batch) {
-        delete state.pendingSkuWrites[String(entry.rowNumber)];
-      }
+      for (const entry of batch) delete state.pendingSkuWrites[entry.key];
     }
     state.sheetWritePending = Object.keys(state.pendingSkuWrites).length;
   } catch (error: any) {
@@ -187,119 +243,168 @@ async function flushPendingSkuWrites(state: WorkerState) {
 async function runPhase(params: {
   markerId: string;
   state: WorkerState;
-  rowNumbers: number[];
-  rowFingerprints: Record<string, string>;
-  rowsByNumber: Record<string, GoogleSheetRow>;
+  rows: CatalogRow[];
   createMissingProducts: boolean;
 }) {
-  const deferred: number[] = [];
+  const deferred: CatalogRow[] = [];
   const batchSize = Math.max(
     1,
-    Number(process.env.SYNC_SHEET1_CATALOG_BATCH_SIZE || DEFAULT_BATCH_SIZE) ||
-      DEFAULT_BATCH_SIZE,
+    Math.min(
+      50,
+      Number(process.env.SYNC_SHEET1_CATALOG_BATCH_SIZE || DEFAULT_BATCH_SIZE) ||
+        DEFAULT_BATCH_SIZE,
+    ),
   );
 
-  for (const rowNumbers of chunks(params.rowNumbers, batchSize)) {
-    const result = await processGoogleSheetBatch({
-      sheetUrl: SHEET_URL,
-      rowNumbers,
-      createManualReview: true,
-      processOnlyNewRows: false,
-      waitForPublishCompletion: true,
-      createMissingProducts: params.createMissingProducts,
-      mode: "auto_sync",
-    });
-    params.state.lastBatchId = result.batchId;
-    await writeSuccessfulSkus(result.successful, params.state);
+  for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
+    const sheetRows = params.rows.filter((entry) => entry.sheet.gid === sheet.gid);
+    for (const batchRows of chunks(sheetRows, batchSize)) {
+      const result = await processGoogleSheetBatch({
+        sheetUrl: sheetUrl(sheet),
+        rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
+        createManualReview: true,
+        processOnlyNewRows: false,
+        waitForPublishCompletion: true,
+        createMissingProducts: params.createMissingProducts,
+        mode: "auto_sync",
+      });
+      params.state.lastBatchId = result.batchId;
+      await writeSuccessfulSkus(result.successful, sheet, params.state);
+      const batchByRow = new Map(
+        batchRows.map((entry) => [entry.row.rowNumber, entry] as const),
+      );
 
-    for (const entry of result.successful) {
-      const originalRow = params.rowsByNumber[String(entry.rowNumber)];
-      const skuWasWritten =
-        Boolean(entry.sku) &&
-        !params.state.pendingSkuWrites[String(entry.rowNumber)];
-      const fingerprint = originalRow
-        ? googleSheetRowFingerprint({
-            ...originalRow,
-            sku: skuWasWritten ? entry.sku : originalRow.sku,
-          }).hash
-        : params.rowFingerprints[String(entry.rowNumber)];
-      if (fingerprint) {
-        params.state.fingerprints[String(entry.rowNumber)] = fingerprint;
-      }
-      if (entry.action === "reconciled_existing" || entry.action === "synced_existing") {
-        params.state.existingUpdated += 1;
-      } else {
-        params.state.published += 1;
-      }
-    }
-    for (const entry of result.skipped) {
-      if (entry.reason === "missing_product_deferred_for_publish_phase") {
-        deferred.push(entry.rowNumber);
-      } else {
-        params.state.skipped += 1;
-        params.state.issues.push({ stage: params.state.stage, ...entry });
-      }
-    }
-    for (const entry of result.failed) {
-      params.state.failed += 1;
-      params.state.issues.push({ stage: params.state.stage, ...entry });
-      if (/missing or invalid price multiplier/i.test(entry.reason)) {
-        const fingerprint = params.rowFingerprints[String(entry.rowNumber)];
-        if (fingerprint) {
-          params.state.fingerprints[String(entry.rowNumber)] = fingerprint;
+      for (const entry of result.successful) {
+        const original = batchByRow.get(entry.rowNumber);
+        if (!original) continue;
+        params.state.fingerprints[original.key] = original.fingerprint;
+        params.state.verifiedFingerprints[original.key] = original.fingerprint;
+        if (entry.action === "reconciled_existing" || entry.action === "synced_existing") {
+          params.state.existingUpdated += 1;
+        } else {
+          params.state.published += 1;
         }
       }
+      for (const entry of result.skipped) {
+        const original = batchByRow.get(entry.rowNumber);
+        if (entry.reason === "missing_product_deferred_for_publish_phase" && original) {
+          deferred.push(original);
+        } else {
+          params.state.skipped += 1;
+          params.state.issues.push({
+            stage: params.state.stage,
+            sheetId: sheet.sheetId,
+            sheetName: sheet.name,
+            ...entry,
+          });
+        }
+      }
+      for (const entry of result.failed) {
+        params.state.failed += 1;
+        params.state.issues.push({
+          stage: params.state.stage,
+          sheetId: sheet.sheetId,
+          sheetName: sheet.name,
+          ...entry,
+        });
+      }
+      params.state.issues = params.state.issues.slice(-200);
+      await persist(params.markerId, params.state);
+      await sleep(500);
     }
-    params.state.issues = params.state.issues.slice(-200);
-    await persist(params.markerId, params.state);
-    await sleep(500);
   }
   return deferred;
 }
 
-async function runCycle(markerId: string, state: WorkerState) {
-  await flushPendingSkuWrites(state);
-  const sheet = await loadGoogleSheetRows(SHEET_URL);
-  const uniqueRows: GoogleSheetRow[] = [];
-  const seenUrls = new Set<string>();
-  for (const row of sheet.rows) {
-    const fingerprint = googleSheetRowFingerprint(row);
-    if (!/^https?:\/\//i.test(fingerprint.normalizedUrl)) {
-      if (state.fingerprints[String(row.rowNumber)] !== fingerprint.hash) {
+async function loadTargetRows(state: WorkerState) {
+  const loaded = await Promise.all(
+    FIRST_EIGHT_CATALOG_SHEETS.map(async (sheet) => ({
+      sheet,
+      data: await loadGoogleSheetRows(sheetUrl(sheet)),
+    })),
+  );
+  const validBySheet = new Map<number, CatalogRow[]>();
+
+  for (const { sheet, data } of loaded) {
+    const validRows: CatalogRow[] = [];
+    for (const row of data.rows) {
+      const key = rowKey(sheet, row.rowNumber);
+      const fingerprint = googleSheetRowFingerprint(row);
+      const issueOnce = (reason: string) => {
+        if (state.fingerprints[key] === fingerprint.hash) return;
         state.failed += 1;
         state.issues.push({
           stage: "sheet_validation",
+          sheetId: sheet.sheetId,
+          sheetName: sheet.name,
           rowNumber: row.rowNumber,
           url: row.url,
-          reason: "Invalid product URL in Sheet 1",
+          reason,
         });
-        state.fingerprints[String(row.rowNumber)] = fingerprint.hash;
+        state.fingerprints[key] = fingerprint.hash;
+      };
+
+      if (!/^https?:\/\//i.test(fingerprint.normalizedUrl)) {
+        issueOnce("Invalid product URL");
+        continue;
       }
-      continue;
-    }
-    if (seenUrls.has(fingerprint.normalizedUrl)) {
-      if (state.fingerprints[String(row.rowNumber)] !== fingerprint.hash) {
-        state.skipped += 1;
-        state.issues.push({
-          stage: "sheet_validation",
-          rowNumber: row.rowNumber,
-          url: row.url,
-          reason: "Duplicate URL in Sheet 1",
-        });
-        state.fingerprints[String(row.rowNumber)] = fingerprint.hash;
+      if (row.priceMultiplier === null) {
+        issueOnce("Missing or invalid price multiplier; product was not published");
+        continue;
       }
-      continue;
+      validRows.push({ sheet, row, key, fingerprint: fingerprint.hash });
     }
-    seenUrls.add(fingerprint.normalizedUrl);
-    uniqueRows.push(row);
+    validBySheet.set(sheet.gid, validRows);
   }
-  const candidates = uniqueRows.filter(
-    (row) =>
-      state.fingerprints[String(row.rowNumber)] !==
-      googleSheetRowFingerprint(row).hash,
+
+  // Interleave rows so the 5000-product target genuinely covers all eight tabs
+  // instead of being consumed by the first large tab alone.
+  const selected: CatalogRow[] = [];
+  const seenUrls = new Set<string>();
+  const cursors = new Map<number, number>();
+  while (selected.length < targetRowLimit()) {
+    let advanced = false;
+    for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
+      const rows = validBySheet.get(sheet.gid) || [];
+      const cursor = cursors.get(sheet.gid) || 0;
+      if (cursor >= rows.length) continue;
+      advanced = true;
+      const entry = rows[cursor];
+      cursors.set(sheet.gid, cursor + 1);
+      const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
+      if (seenUrls.has(normalizedUrl)) {
+        if (state.fingerprints[entry.key] !== entry.fingerprint) {
+          state.skipped += 1;
+          state.issues.push({
+            stage: "sheet_validation",
+            sheetId: sheet.sheetId,
+            sheetName: sheet.name,
+            rowNumber: entry.row.rowNumber,
+            url: entry.row.url,
+            reason: "Duplicate URL across the first eight sheets",
+          });
+          state.fingerprints[entry.key] = entry.fingerprint;
+        }
+        continue;
+      }
+      seenUrls.add(normalizedUrl);
+      selected.push(entry);
+      if (selected.length >= targetRowLimit()) break;
+    }
+    if (!advanced) break;
+  }
+  return selected;
+}
+
+async function runCycle(markerId: string, state: WorkerState) {
+  await flushPendingSkuWrites(state);
+  const targetRows = await loadTargetRows(state);
+  const candidates = targetRows.filter(
+    (entry) => state.fingerprints[entry.key] !== entry.fingerprint,
   );
   state.cycle += 1;
-  state.totalRows = uniqueRows.length;
+  state.totalRows = targetRows.length;
+  state.targetRows = targetRows.length;
   state.candidateRows = candidates.length;
   state.lastRunAt = new Date().toISOString();
   state.stage = "update_existing_first";
@@ -308,13 +413,7 @@ async function runCycle(markerId: string, state: WorkerState) {
   const missingRows = await runPhase({
     markerId,
     state,
-    rowNumbers: candidates.map((row) => row.rowNumber),
-    rowFingerprints: Object.fromEntries(
-      candidates.map((row) => [String(row.rowNumber), googleSheetRowFingerprint(row).hash]),
-    ),
-    rowsByNumber: Object.fromEntries(
-      candidates.map((row) => [String(row.rowNumber), row]),
-    ),
+    rows: candidates,
     createMissingProducts: false,
   });
   state.stage = "publish_missing_products";
@@ -322,21 +421,29 @@ async function runCycle(markerId: string, state: WorkerState) {
   await runPhase({
     markerId,
     state,
-    rowNumbers: missingRows,
-    rowFingerprints: Object.fromEntries(
-      candidates.map((row) => [String(row.rowNumber), googleSheetRowFingerprint(row).hash]),
-    ),
-    rowsByNumber: Object.fromEntries(
-      candidates.map((row) => [String(row.rowNumber), row]),
-    ),
+    rows: missingRows,
     createMissingProducts: true,
   });
-  state.stage = "idle_monitoring";
+  state.stage = state.remainingRows === 0 ? "target_complete_monitoring" : "idle_monitoring";
   state.lastRunAt = new Date().toISOString();
   await persist(markerId, state);
 }
 
 async function runContinuousWorker() {
+  await prisma.syncJob.updateMany({
+    where: {
+      type: { startsWith: "SHEET1_CATALOG_AUTO_SYNC:", not: SHEET1_CATALOG_MARKER_TYPE },
+      status: { in: ["running", "pending"] },
+    },
+    data: {
+      status: "failed",
+      completedAt: new Date(),
+      result: JSON.stringify({
+        stage: "superseded_by_first_eight_worker",
+        reason: "A newer deployment safely took over the catalog worker.",
+      }),
+    },
+  });
   const previous = await prisma.syncJob.findFirst({
     where: { type: SHEET1_CATALOG_MARKER_TYPE },
     orderBy: { createdAt: "desc" },
@@ -363,7 +470,8 @@ async function runContinuousWorker() {
       startedAt: new Date(),
       payload: JSON.stringify({
         spreadsheetId: SPREADSHEET_ID,
-        gid: 0,
+        sheets: FIRST_EIGHT_CATALOG_SHEETS,
+        targetRows: targetRowLimit(),
         updateExistingFirst: true,
         createMissingProducts: true,
         deterministicSku: true,
@@ -404,7 +512,7 @@ export function startSheet1CatalogAutoSync() {
   if (started) return;
   started = true;
   console.warn(
-    "[sheet1-catalog] automatic update-existing-first, publish-missing, SKU-writeback worker ENABLED",
+    "[sheet1-catalog] first-eight-sheet worker ENABLED: 5000 unique rows, update existing first, publish verified missing products, deterministic SKU writeback",
   );
   setTimeout(() => {
     void runContinuousWorker().catch((error) => {

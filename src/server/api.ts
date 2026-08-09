@@ -117,6 +117,17 @@ export type GoogleSheetRow = {
   sku?: string;
 };
 
+export const APPROVED_CATALOG_SHEETS: Record<string, string> = {
+  "0": "\u0627\u0644\u0648\u0631\u0642\u06291",
+  "531292068": "\u0627\u0644\u0648\u0631\u0642\u06292",
+  "242585683": "\u0627\u0644\u0648\u0631\u0642\u062915",
+  "1991302797": "\u0627\u0644\u0648\u0631\u0642\u062910",
+  "1951926772": "\u0627\u0644\u0648\u0631\u0642\u06296",
+  "93159589": "\u0627\u0644\u0648\u0631\u0642\u06297",
+  "916372394": "\u0627\u0644\u0648\u0631\u0642\u06298",
+  "202697256": "\u0627\u0644\u0648\u0631\u0642\u062920",
+};
+
 let googleSheetAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
 const googleSheetAutoSyncState: GoogleSheetAutoSyncState = {
   running: false,
@@ -2044,6 +2055,60 @@ function toPositiveSheetNumber(value: any) {
   return toPriceNumber(value);
 }
 
+export function parseHeaderlessGoogleSheetRows(
+  matrix: string[][],
+  startIndex = 0,
+): GoogleSheetRow[] {
+  return matrix
+    .slice(startIndex)
+    .map((cells, offset) => {
+      const normalized = cells.map((cell) => String(cell || "").trim());
+      const urlIndex = normalized.findIndex((cell) => isHttpUrl(cell));
+      if (urlIndex < 0) return null;
+
+      let multiplierIndex = -1;
+      let priceMultiplier: number | null = null;
+      for (let index = urlIndex + 1; index < normalized.length; index += 1) {
+        const parsed = toPositiveSheetNumber(normalized[index]);
+        if (parsed !== null) {
+          multiplierIndex = index;
+          priceMultiplier = parsed;
+          break;
+        }
+      }
+      if (priceMultiplier === null) {
+        for (let index = 0; index < urlIndex; index += 1) {
+          const parsed = toPositiveSheetNumber(normalized[index]);
+          if (parsed !== null) {
+            multiplierIndex = index;
+            priceMultiplier = parsed;
+            break;
+          }
+        }
+      }
+
+      const sku =
+        normalized.find((cell) => /^DAB-[A-Z0-9-]+$/i.test(cell)) || "";
+      const collection =
+        normalized.find((cell, index) => {
+          if (!cell || index === urlIndex || index === multiplierIndex) return false;
+          if (isHttpUrl(cell) || toPositiveSheetNumber(cell) !== null) return false;
+          if (/^DAB-[A-Z0-9-]+$/i.test(cell)) return false;
+          return !/^(price|multiplier|collection|sku)$/i.test(cell);
+        }) || "";
+
+      return {
+        rowNumber: startIndex + offset + 1,
+        url: normalized[urlIndex],
+        price: null,
+        priceMultiplier,
+        collection,
+        sku,
+      } satisfies GoogleSheetRow;
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
 export function googleSheetRowFingerprint(row: GoogleSheetRow) {
   const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
   const value = [
@@ -2103,23 +2168,16 @@ export async function loadGoogleSheetRows(sheetUrl: string) {
 
   const firstRow = matrix[0].map((cell) => String(cell || "").trim());
   const firstRowLooksLikeData = firstRow.some((cell) => isHttpUrl(cell));
+  const normalizedFirstRow = firstRow.map((cell) => toSheetHeaderKey(cell));
+  const firstRowLooksLikeHeader = normalizedFirstRow.some((cell) =>
+    /(^|[^a-z])(url|link)($|[^a-z])/i.test(cell),
+  );
 
-  if (firstRowLooksLikeData) {
-    const rows = matrix
-      .map((row, index) => ({
-        rowNumber: index + 1,
-        url: String(row[0] || "").trim(),
-        price: null,
-        priceMultiplier: toPositiveSheetNumber(row[1]),
-        collection: String(row[2] || "").trim(),
-        sku: String(row[3] || "").trim(),
-      }))
-      .filter((row) => row.url.length > 0);
-
+  if (firstRowLooksLikeData || !firstRowLooksLikeHeader) {
     return {
       csvUrl,
       headers: ["link", "multiplier", "collection", "sku"],
-      rows,
+      rows: parseHeaderlessGoogleSheetRows(matrix),
     };
   }
 
@@ -2382,7 +2440,7 @@ export async function processGoogleSheetBatch(params: {
   const approvedCatalogGid = (() => {
     try {
       const gid = new URL(sheetData.csvUrl).searchParams.get("gid") || "0";
-      return gid === "0" || gid === "93159589" ? gid : null;
+      return APPROVED_CATALOG_SHEETS[gid] ? gid : null;
     } catch {
       return null;
     }
@@ -2699,7 +2757,7 @@ export async function processGoogleSheetBatch(params: {
           multiplier: row.priceMultiplier || 1,
           collection: row.collection,
           sheetId: Number(approvedCatalogGid),
-          sheetName: approvedCatalogGid === "0" ? "الورقة1" : "الورقة7",
+          sheetName: APPROVED_CATALOG_SHEETS[approvedCatalogGid],
           existingSku: row.sku,
           fresh: analyzed,
         });

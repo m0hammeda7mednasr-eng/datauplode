@@ -55,6 +55,31 @@ export default function LinkedProducts() {
     }
   });
 
+  const { data: catalogStatus } = useQuery({
+    queryKey: ['catalog-worker-status'],
+    queryFn: async () => {
+      const { data } = await axios.get('/api/imports/excel/auto-sync/status');
+      return data?.worker;
+    },
+    refetchInterval: 5000,
+    refetchOnWindowFocus: true,
+    retry: false,
+  });
+
+  const catalogTotal = Number(catalogStatus?.total || 0);
+  const catalogVerified = Number(catalogStatus?.verified || 0);
+  const catalogPercent = catalogTotal > 0
+    ? Math.min(100, Math.round((catalogVerified / catalogTotal) * 100))
+    : 0;
+  const stageLabel: Record<string, string> = {
+    starting: 'Starting worker',
+    update_existing_first: 'Updating existing products first',
+    publish_missing_products: 'Publishing verified missing products',
+    idle_monitoring: 'Waiting for the next retry cycle',
+    target_complete_monitoring: 'Target complete — monitoring sheet changes',
+    cycle_failed_retrying: 'Retrying after a temporary error',
+  };
+
   const handleSyncNow = async (id: string) => {
     toast.promise(axios.post(`/api/products/${id}/sync`), {
       loading: 'Queuing sync job...',
@@ -103,6 +128,43 @@ export default function LinkedProducts() {
           <RefreshCw className={cn("h-5 w-5", isLoading && "animate-spin")} />
         </button>
       </div>
+
+      {catalogStatus && (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50/70 p-5 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                {catalogStatus.running ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-sky-600" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                )}
+                <p className="font-black text-slate-900">First 8 sheets · 5,000-product run</p>
+              </div>
+              <p className="mt-1 text-xs font-medium text-slate-600">
+                {stageLabel[catalogStatus.stage] || catalogStatus.stage}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-black text-slate-900">{catalogVerified.toLocaleString()} / {catalogTotal.toLocaleString()}</p>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">verified products</p>
+            </div>
+          </div>
+          <div className="mt-4 h-2 overflow-hidden rounded-full bg-white">
+            <div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${catalogPercent}%` }} />
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-5">
+            <WorkerMetric label="Updated" value={catalogStatus.existingUpdated} />
+            <WorkerMetric label="Published" value={catalogStatus.published} />
+            <WorkerMetric label="Remaining" value={catalogStatus.remaining} />
+            <WorkerMetric label="Retry events" value={catalogStatus.errors} />
+            <WorkerMetric label="SKU pending" value={catalogStatus.sheetWritePending} />
+          </div>
+          <p className="mt-3 text-[11px] text-slate-500">
+            Retry events are cumulative attempts, not incomplete products. Products missing a valid multiplier or full source data are not published.
+          </p>
+        </div>
+      )}
 
       <div className="flex flex-col gap-4">
         <div className="flex gap-4">
@@ -321,6 +383,15 @@ export default function LinkedProducts() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function WorkerMetric({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div className="rounded-lg border border-sky-100 bg-white/80 px-3 py-2">
+      <p className="font-black text-slate-900">{Number(value || 0).toLocaleString()}</p>
+      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
     </div>
   );
 }

@@ -185,6 +185,10 @@ async function safeSheet1WorkerSnapshot() {
       conflicts: 0,
       sheetCellsWritten: 0,
       sheetWritePending: 0,
+      existingUpdated: 0,
+      published: 0,
+      remaining: 0,
+      candidateRows: 0,
       cycle: 0,
       lastRunAt: null,
       issues: [],
@@ -198,10 +202,13 @@ async function safeSheet1WorkerSnapshot() {
     jobId: job.id,
     status: job.status,
     stage: result.stage || "starting",
-    progress: Number(result.candidateRows ?? result.batch ?? totals.attempted ?? 0) || 0,
-    total: Number(result.totalRows ?? result.totalBatches ?? result.planGroups ?? 0) || 0,
-    verified: Number(result.existingUpdated ?? totals.verified ?? result.verified ?? 0) || 0,
+    progress: Number(result.verifiedRows ?? totals.verified ?? result.verified ?? 0) || 0,
+    total: Number(result.targetRows ?? result.totalRows ?? result.totalBatches ?? result.planGroups ?? 0) || 0,
+    verified: Number(result.verifiedRows ?? totals.verified ?? result.verified ?? 0) || 0,
+    existingUpdated: Number(result.existingUpdated ?? 0) || 0,
     published: Number(result.published ?? 0) || 0,
+    remaining: Number(result.remainingRows ?? 0) || 0,
+    candidateRows: Number(result.candidateRows ?? 0) || 0,
     errors: Number(result.failed ?? totals.errors ?? result.errors ?? 0) || 0,
     missing: Number(totals.missing ?? result.missingMappings ?? 0) || 0,
     ambiguous: Number(totals.ambiguous ?? result.ambiguous ?? 0) || 0,
@@ -404,7 +411,9 @@ async function startServer() {
       const worker = await safeSheet1WorkerSnapshot();
       res.json({
         running: worker.running,
-        inProgress: worker.running && worker.stage !== "idle_monitoring",
+        inProgress:
+          worker.running &&
+          !["idle_monitoring", "target_complete_monitoring"].includes(worker.stage),
         sheetUrl: SAFE_SHEET1_URL,
         lastRunAt: worker.lastRunAt,
         lastError:
