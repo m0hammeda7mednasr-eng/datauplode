@@ -111,13 +111,17 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Install and validate
+      - name: Install and validate TypeScript/build/safety
         run: |
           npm ci --include=dev
           npx prisma generate
+          npx tsc --noEmit
           npm run lint
           npm run build
           npm run safety:production
+
+      - name: Validate production Docker image
+        run: docker build --pull -t datauplode:first5-strict-gate .
 
       - name: Commit runtime only after all gates pass
         shell: bash
