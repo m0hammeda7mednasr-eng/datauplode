@@ -24,6 +24,8 @@ jobs:
           set -euo pipefail
           BASE='https://datauplode-production.up.railway.app'
           mkdir -p .import-status
+          curl --silent --show-error --max-time 30 "$BASE/" -o root.txt || true
+          curl --silent --show-error --max-time 30 "$BASE/api/health" -o health.json || true
           curl --silent --show-error --max-time 30 "$BASE/api/ready" -o ready.json || true
           curl --silent --show-error --max-time 30 "$BASE/api/sync-jobs" -o jobs.json || true
           curl --silent --show-error --max-time 30 "$BASE/api/sheet1-reconcile/runs?take=10" -o runs.json || true
@@ -34,25 +36,44 @@ def load(path):
     try:
         return json.load(open(path,encoding='utf-8'))
     except Exception as e:
-        return {'readError':str(e)}
+        try:
+            return {'raw':open(path,encoding='utf-8',errors='replace').read()[:4000], 'readError':str(e)}
+        except Exception as e2:
+            return {'readError':str(e2)}
+
+def parse_job(job):
+    if not isinstance(job, dict): return job
+    out=dict(job)
+    try:
+        out['parsedResult']=json.loads(job.get('result') or '{}')
+    except Exception:
+        pass
+    return out
+
+root=load('root.txt')
+health=load('health.json')
 ready=load('ready.json')
 jobs=load('jobs.json')
 runs=load('runs.json')
-marker='ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1'
-latest=None
+old_marker='ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1'
+first5_marker='CONTINUOUS_FIRST5_RECONCILE:2026-08-09-first-five-v1'
+old=None
+first5=None
 if isinstance(jobs,list):
-    matches=[j for j in jobs if str(j.get('type',''))==marker]
-    if matches:
-        latest=matches[0]
-        try:
-            latest=dict(latest)
-            latest['parsedResult']=json.loads(latest.get('result') or '{}')
-        except Exception:
-            pass
+    for job in jobs:
+        t=str(job.get('type',''))
+        if old is None and t==old_marker: old=parse_job(job)
+        if first5 is None and t==first5_marker: first5=parse_job(job)
+    if first5 is None:
+        candidates=[j for j in jobs if 'FIRST5' in str(j.get('type','')).upper() or 'FIRST_FIVE' in str(j.get('type','')).upper()]
+        if candidates: first5=parse_job(candidates[0])
 out={
   'capturedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  'root':root,
+  'health':health,
   'ready':ready,
-  'latestMarker':latest,
+  'oldSheet1Marker':old,
+  'firstFiveMarker':first5,
   'reconcileRuns':runs,
 }
 with open('.import-status/live-sheet1-status.json','w',encoding='utf-8') as f:
@@ -67,5 +88,5 @@ PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .import-status/live-sheet1-status.json
-          git commit -m 'status: live Sheet1 reconcile snapshot [skip ci]' || true
+          git commit -m 'status: live Railway probe [skip ci]' || true
           git push origin HEAD:main
