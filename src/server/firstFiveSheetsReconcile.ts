@@ -54,6 +54,7 @@ type PlanGroup = {
 
 type GroupStatus =
   | "verified"
+  | "rebuild_required"
   | "error"
   | "missing"
   | "ambiguous"
@@ -67,6 +68,7 @@ type GroupResult = {
   multiplier: number | null;
   productCode?: string;
   shopifyProductId?: string;
+  shopifyHandle?: string;
   shopifyTitle?: string;
   expectedSku?: string;
   canonicalSize?: string;
@@ -835,9 +837,21 @@ async function reconcileGroup(
     fresh.raw?.repairedFlattenedNextVariants === true &&
     product.variants.length < sourceVariants.length
   ) {
-    throw new Error(
-      `Shopify variant structure is incomplete (${product.variants.length}/${sourceVariants.length}). A linked-product rebuild is required before price and inventory reconciliation.`,
-    );
+    return {
+      status: "rebuild_required",
+      url: group.url,
+      rows: resultRows(group),
+      multiplier: group.multiplier,
+      productCode,
+      shopifyProductId: product.id,
+      shopifyHandle: clean(product.handle),
+      shopifyTitle: clean(product.title),
+      variantsChecked: product.variants.length,
+      matchSource: located.matchSource,
+      reason:
+        `Shopify variant structure is incomplete (${product.variants.length}/${sourceVariants.length}) ` +
+        "and was matched safely for a handle-preserving rebuild.",
+    };
   }
 
   const singleVariant = product.variants.length === 1;
