@@ -64,6 +64,9 @@ jobs:
       - name: Enforce runtime autostart safety contract
         run: npx tsx scripts/runtime-autostart-safety-contract.ts
 
+      - name: Enforce first-five exact-revision safety contract
+        run: npx tsx scripts/first5-reconcile-revision-safety-contract.ts
+
       - name: Enforce pre-canary queue safety contract
         run: npx tsx scripts/pre-canary-queue-safety-contract.ts
 
