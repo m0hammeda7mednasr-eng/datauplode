@@ -1,6 +1,6 @@
 name: Repair Strict First5 Runtime V3
 
-# Safe rerun marker: production build #385 green; runtime gate #27 still fail-closed.
+# Safe rerun marker: production build #386 green; runtime gate #28 still fail-closed at 3/9.
 on:
   pull_request:
     branches: [main]
