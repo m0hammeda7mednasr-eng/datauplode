@@ -6,6 +6,7 @@ const expectedRevision = String(process.env.EXPECTED_REVISION || '').toLowerCase
 const baseUrl = 'https://datauplode-production.up.railway.app';
 const markerType = 'ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1';
 const issueTitle = 'Sheet1 Railway reconcile status';
+const DEPLOYMENT_MARKER_GRACE_MS = 120_000;
 
 if (!repo || !token || !/^[0-9a-f]{40}$/.test(expectedRevision)) {
   throw new Error('Watcher is missing repo/token/exact expected revision.');
@@ -62,22 +63,50 @@ async function fetchJson(path, timeoutMs = 25000) {
   return { status: response.status, body };
 }
 
-function parseJobResult(job) {
-  if (!job?.result) return {};
-  try { return JSON.parse(job.result); } catch { return { raw: String(job.result).slice(0, 5000) }; }
+function parseJson(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(String(value)); } catch { return {}; }
 }
 
-function jobTimestamp(job) {
-  for (const value of [job?.createdAt, job?.startedAt, job?.updatedAt, job?.completedAt]) {
+function parseJobResult(job) {
+  return parseJson(job?.result);
+}
+
+function markerStartTimestamp(job) {
+  for (const value of [job?.createdAt, job?.startedAt]) {
     const time = Date.parse(String(value || ''));
     if (Number.isFinite(time)) return time;
   }
   return 0;
 }
 
-function selectNewestMarker(jobs) {
+function markerRevision(job) {
+  const payload = parseJson(job?.payload);
+  const result = parseJobResult(job);
+  for (const value of [
+    payload?.deploymentRevision,
+    payload?.revision,
+    result?.deploymentRevision,
+    result?.revision,
+  ]) {
+    const revision = String(value || '').trim().toLowerCase();
+    if (/^[0-9a-f]{40}$/.test(revision)) return revision;
+  }
+  return '';
+}
+
+function markerBelongsToDeployment(job, minimumMarkerTime) {
+  const revision = markerRevision(job);
+  if (revision) return revision === expectedRevision;
+  const startedAt = markerStartTimestamp(job);
+  return startedAt > 0 && startedAt >= minimumMarkerTime;
+}
+
+function selectNewestMarker(jobs, minimumMarkerTime) {
   const markers = jobs
     .filter((entry) => String(entry?.type || '') === markerType)
+    .filter((entry) => markerBelongsToDeployment(entry, minimumMarkerTime))
     .map((entry, index) => ({ entry, index, result: parseJobResult(entry) }));
   if (!markers.length) return null;
 
@@ -86,28 +115,48 @@ function selectNewestMarker(jobs) {
   );
   const pool = live.length ? live : markers;
   pool.sort((left, right) => {
-    const timeDelta = jobTimestamp(right.entry) - jobTimestamp(left.entry);
+    const timeDelta = markerStartTimestamp(right.entry) - markerStartTimestamp(left.entry);
     if (timeDelta) return timeDelta;
     return right.index - left.index;
   });
   return pool[0]?.entry || null;
 }
 
+function renderDiagnostics(result) {
+  const rows = [];
+  const candidates = [
+    ...(Array.isArray(result?.lastResults) ? result.lastResults : []),
+    ...(Array.isArray(result?.issues) ? result.issues.slice(-10) : []),
+  ];
+  for (const entry of candidates.slice(-10)) {
+    if (!entry || entry.status === 'verified') continue;
+    const rowNumbers = Array.isArray(entry.rows)
+      ? entry.rows.map((row) => typeof row === 'object' ? row?.rowNumber : row).filter(Boolean).join(',')
+      : '';
+    const reason = String(entry.reason || entry.error || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    rows.push(`- ${entry.status || 'error'}${rowNumbers ? ` rows ${rowNumbers}` : ''}${reason ? `: ${reason}` : ''}`);
+  }
+  return [...new Set(rows)].slice(-5);
+}
+
 function renderJob(job) {
   const result = parseJobResult(job);
   const totals = result?.totals || {};
   const statusIcon = job.status === 'completed' ? '✅' : job.status === 'failed' ? '❌' : '🔄';
+  const diagnostics = renderDiagnostics(result);
+  const recordedRevision = markerRevision(job);
   return [
     `RAILWAY RECONCILE ${statusIcon}`,
     '',
     `Revision: \`${expectedRevision}\``,
+    `Marker revision: \`${recordedRevision || '<time-bound legacy marker>'}\``,
     `Job: \`${job.id}\``,
     `Status: **${job.status}**`,
     `Stage: **${result.stage || 'starting'}**`,
     `Plan groups: ${result.planGroups ?? '-'}`,
     `Batch: ${result.batch ?? '-'} / ${result.totalBatches ?? '-'}`,
-    `Verified: ${totals.verified ?? 0}`,
-    `Rows processed: ${totals.rows ?? 0}`,
+    `Verified: ${totals.verified ?? totals.verifiedRows ?? 0}`,
+    `Rows processed: ${totals.rows ?? totals.verifiedRows ?? 0}`,
     `Sheet cells written: ${totals.sheetCells ?? 0}`,
     `Missing mappings: ${totals.missing ?? 0}`,
     `Ambiguous: ${totals.ambiguous ?? 0}`,
@@ -115,6 +164,7 @@ function renderJob(job) {
     `Errors: ${totals.errors ?? 0}`,
     `Create/rebuild products: **0**`,
     result.error ? `Error: ${result.error}` : '',
+    diagnostics.length ? `Diagnostics:\n${diagnostics.join('\n')}` : '',
   ].filter(Boolean).join('\n');
 }
 
@@ -122,6 +172,7 @@ await ensureIssue();
 await updateIssue(`WAITING FOR RAILWAY DEPLOYMENT\n\nExpected revision: \`${expectedRevision}\`\nWatcher is read-only.`);
 
 let deployed = false;
+let deploymentObservedAt = 0;
 for (let attempt = 1; attempt <= 90; attempt += 1) {
   try {
     const { body } = await fetchJson('/api/ready');
@@ -134,6 +185,7 @@ for (let attempt = 1; attempt <= 90; attempt += 1) {
       body?.platform?.productionEnvironment === true
     ) {
       deployed = true;
+      deploymentObservedAt = Date.now();
       break;
     }
     if (attempt === 1 || attempt % 12 === 0) {
@@ -152,13 +204,17 @@ if (!deployed) {
   throw new Error('Railway did not deploy the exact expected revision in time.');
 }
 
-await updateIssue(`DEPLOYED ✅\n\nRevision: \`${expectedRevision}\`\nWaiting for newest reconcile marker \`${markerType}\`.`);
+const minimumMarkerTime = deploymentObservedAt - DEPLOYMENT_MARKER_GRACE_MS;
+await updateIssue(
+  `DEPLOYED ✅\n\nRevision: \`${expectedRevision}\`\n` +
+  `Waiting only for reconcile markers belonging to this deployment window. Legacy markers from older deployments are ignored.`,
+);
 
 let lastRendered = '';
 for (let attempt = 1; attempt <= 360; attempt += 1) {
   const { status, body } = await fetchJson('/api/sync-jobs', 30000);
   if (status >= 200 && status < 300 && Array.isArray(body)) {
-    const job = selectNewestMarker(body);
+    const job = selectNewestMarker(body, minimumMarkerTime);
     if (job) {
       const rendered = renderJob(job);
       if (rendered !== lastRendered) {
@@ -172,5 +228,5 @@ for (let attempt = 1; attempt <= 360; attempt += 1) {
   await sleep(10000);
 }
 
-await updateIssue(`WATCHER TIMEOUT ⚠️\n\nRevision: \`${expectedRevision}\`\nThe newest reconcile job did not reach completed/failed during the watch window.`);
+await updateIssue(`WATCHER TIMEOUT ⚠️\n\nRevision: \`${expectedRevision}\`\nNo reconcile marker belonging to the verified deployment reached completed/failed during the watch window.`);
 throw new Error('Reconcile watch timed out.');
