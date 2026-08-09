@@ -23,12 +23,15 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
+          import re
+
           p = Path('src/server/firstFiveSheetsReconcile.ts')
           s = p.read_text(encoding='utf-8')
+          original = s
 
-          option_marker = '''function optionKey(values: Record<string, string>) {'''
           if 'function explicitTitleSizeToken' not in s:
-              assert option_marker in s, 'optionKey marker missing'
+              marker = 'function optionKey(values: Record<string, string>) {'
+              assert marker in s, 'optionKey marker missing'
               helper = '''function explicitTitleSizeToken(value: unknown): string | null {
             const title = clean(value);
             const match = title.match(/\\s-\\sSize\\s+(.+)$/i);
@@ -38,26 +41,30 @@ jobs:
           }
 
           '''
-              s = s.replace(option_marker, helper + option_marker, 1)
+              s = s.replace(marker, helper + marker, 1)
 
-          ledger_old = '''    if (result?.status !== "verified" || result?.readbackVerified !== true) continue;
-            for (const row of Array.isArray(result?.rows) ? result.rows : []) {'''
-          ledger_new = '''    if (result?.status !== "verified" || result?.readbackVerified !== true) continue;
-            const explicitSize = explicitTitleSizeToken(result?.shopifyTitle);
+          if 'staleFlattenedOneSku' not in s:
+              pattern = re.compile(
+                  r'(    if \(result\?\.status !== "verified" \|\| result\?\.readbackVerified !== true\) continue;\n)'
+                  r'(    for \(const row of Array\.isArray\(result\?\.rows\) \? result\.rows : \[\]\) \{)'
+              )
+              replacement = r'''\1    const explicitSize = explicitTitleSizeToken(result?.shopifyTitle);
             const staleFlattenedOneSku = Boolean(
               explicitSize && /-ONE-(?:\\d+(?:\\.\\d+)?)$/i.test(String(result?.expectedSku || "")),
             );
             if (staleFlattenedOneSku) continue;
-            for (const row of Array.isArray(result?.rows) ? result.rows : []) {'''
-          if 'staleFlattenedOneSku' not in s:
-              assert ledger_old in s, 'verified-ledger block missing'
-              s = s.replace(ledger_old, ledger_new, 1)
+          \2'''
+              s, count = pattern.subn(replacement, s, count=1)
+              assert count == 1, f'verified-ledger patch count={count}'
 
-          mapped_old = '''  const mapped = product.variants.map((current: any) => ({
-            current,
-            source: matchSourceVariant(current, sourceVariants),
-          }));'''
-          mapped_new = '''  const singleDefaultVariant =
+          if 'const singleDefaultVariant =' not in s:
+              pattern = re.compile(
+                  r'  const mapped = product\.variants\.map\(\(current: any\) => \(\{\n'
+                  r'    current,\n'
+                  r'    source: matchSourceVariant\(current, sourceVariants\),\n'
+                  r'  \}\)\);'
+              )
+              replacement = '''  const singleDefaultVariant =
             product.variants.length === 1 &&
             Object.keys(shopifyOptions(product.variants[0])).length === 0;
           const titleSizeToken = singleDefaultVariant
@@ -84,18 +91,22 @@ jobs:
               forcedSizeToken: null,
             };
           });'''
-          if 'const singleDefaultVariant =' not in s:
-              assert mapped_old in s, 'variant mapping block missing'
-              s = s.replace(mapped_old, mapped_new, 1)
+              s, count = pattern.subn(replacement, s, count=1)
+              assert count == 1, f'variant-mapping patch count={count}'
 
-          size_old = '''      sizeToken: normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),'''
-          size_new = '''      sizeToken:
+          if 'entry.forcedSizeToken ||' not in s:
+              old = '      sizeToken: normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),'
+              new = '''      sizeToken:
                 entry.forcedSizeToken ||
                 normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),'''
-          if 'entry.forcedSizeToken ||' not in s:
-              assert size_old in s, 'canonical size block missing'
-              s = s.replace(size_old, size_new, 1)
+              assert old in s, 'canonical size line missing'
+              s = s.replace(old, new, 1)
 
+          assert s != original, 'hotfix made no changes'
+          assert 'function explicitTitleSizeToken' in s
+          assert 'staleFlattenedOneSku' in s
+          assert 'const singleDefaultVariant =' in s
+          assert 'entry.forcedSizeToken ||' in s
           p.write_text(s, encoding='utf-8')
           PY
           git diff --check
@@ -105,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
           git add src/server/firstFiveSheetsReconcile.ts
           git commit -m 'Fix flattened Shopify size mapping in first-five worker'
           git push origin HEAD:stabilize-supabase-railway
