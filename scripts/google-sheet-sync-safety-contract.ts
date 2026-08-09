@@ -6,6 +6,7 @@ import {
   normalizeGoogleSheetUrl,
   orderGoogleSheetRowsExistingFirst,
   parseHeaderlessGoogleSheetRows,
+  shouldDeferMissingCatalogRow,
   type GoogleSheetRow,
 } from "../src/server/api.js";
 import { applyDeterministicDabSkus } from "../src/server/services/dabSku.js";
@@ -29,6 +30,21 @@ assert.equal(
 assert.equal(Object.keys(APPROVED_CATALOG_SHEETS).length, 8, "only the approved first eight tabs may use catalog writes");
 assert.equal(FIRST_EIGHT_CATALOG_SHEETS.length, 8, "the continuous worker must cover eight tabs");
 assert.equal(MAX_CATALOG_TARGET_ROWS, 5000, "the approved run must be hard-capped at 5000 unique products");
+assert.equal(
+  shouldDeferMissingCatalogRow(true, false, false),
+  true,
+  "missing approved catalog rows must be deferred without scraping during the update-existing phase",
+);
+assert.equal(
+  shouldDeferMissingCatalogRow(true, false, true),
+  false,
+  "the publish-missing phase must still process deferred rows",
+);
+assert.equal(
+  shouldDeferMissingCatalogRow(true, true, false),
+  false,
+  "linked Shopify products must still refresh during the update-existing phase",
+);
 
 const sparseRows = parseHeaderlessGoogleSheetRows([
   [],

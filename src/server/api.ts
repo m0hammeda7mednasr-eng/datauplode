@@ -2151,6 +2151,18 @@ export function orderGoogleSheetRowsExistingFirst(
     .map((entry) => entry.row);
 }
 
+export function shouldDeferMissingCatalogRow(
+  isApprovedCatalogSheet: boolean,
+  isLinkedToShopify: boolean,
+  createMissingProducts: boolean | undefined,
+) {
+  return (
+    isApprovedCatalogSheet &&
+    !isLinkedToShopify &&
+    createMissingProducts === false
+  );
+}
+
 export async function loadGoogleSheetRows(sheetUrl: string) {
   const csvUrl = normalizeGoogleSheetUrl(sheetUrl);
   const response = await axios.get(csvUrl, {
@@ -2704,6 +2716,21 @@ export async function processGoogleSheetBatch(params: {
         );
         continue;
       }
+    }
+
+    if (
+      shouldDeferMissingCatalogRow(
+        isApprovedCatalogSheet,
+        linkedUrls.has(normalizedUrl),
+        params.createMissingProducts,
+      )
+    ) {
+      skipped.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        reason: "missing_product_deferred_for_publish_phase",
+      });
+      continue;
     }
 
     try {
