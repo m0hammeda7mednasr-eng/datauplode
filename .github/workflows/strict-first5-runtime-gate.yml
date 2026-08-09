@@ -1,0 +1,27 @@
+name: Strict First5 Runtime Gate
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - src/server/firstFiveSheetsReconcile.ts
+      - scripts/strict-first5-runtime-safety-contract.mjs
+      - .github/workflows/strict-first5-runtime-gate.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - src/server/firstFiveSheetsReconcile.ts
+      - scripts/strict-first5-runtime-safety-contract.mjs
+      - .github/workflows/strict-first5-runtime-gate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  strict-runtime-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify strict first-five runtime matching
+        run: node scripts/strict-first5-runtime-safety-contract.mjs
