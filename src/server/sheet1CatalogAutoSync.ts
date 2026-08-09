@@ -439,6 +439,28 @@ async function loadTargetRows(state: WorkerState) {
   return selected;
 }
 
+async function findLinkedCatalogUrls(rows: CatalogRow[]) {
+  const urls = [
+    ...new Set(
+      rows.map(
+        (entry) => googleSheetRowFingerprint(entry.row).normalizedUrl,
+      ),
+    ),
+  ];
+  const found = await Promise.all(
+    chunks(urls, 500).map((urlBatch) =>
+      prisma.sourceProduct.findMany({
+        where: {
+          url: { in: urlBatch },
+          shopifyProduct: { isNot: null },
+        },
+        select: { url: true },
+      }),
+    ),
+  );
+  return new Set(found.flat().map((entry) => entry.url));
+}
+
 async function runCycle(markerId: string, state: WorkerState) {
   await flushPendingSkuWrites(state);
   const targetRows = await loadTargetRows(state);
@@ -461,12 +483,28 @@ async function runCycle(markerId: string, state: WorkerState) {
   state.stage = "update_existing_first";
   await persist(markerId, state);
 
-  const missingRows = await runPhase({
+  const linkedUrls = await findLinkedCatalogUrls(candidates);
+  const existingRows = candidates.filter((entry) =>
+    linkedUrls.has(googleSheetRowFingerprint(entry.row).normalizedUrl),
+  );
+  const initiallyMissingRows = candidates.filter(
+    (entry) =>
+      !linkedUrls.has(googleSheetRowFingerprint(entry.row).normalizedUrl),
+  );
+  const newlyDeferredRows = await runPhase({
     markerId,
     state,
-    rows: candidates,
+    rows: existingRows,
     createMissingProducts: false,
   });
+  const missingRows = [
+    ...new Map(
+      [...initiallyMissingRows, ...newlyDeferredRows].map((entry) => [
+        entry.key,
+        entry,
+      ]),
+    ).values(),
+  ];
   state.stage = "publish_missing_products";
   await persist(markerId, state);
   await runPhase({
