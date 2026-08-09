@@ -39,7 +39,6 @@ function isolatedFirstFiveWorkerEnabled() {
     nodeEnv === "production" &&
     isRailway &&
     branch === "stabilize-supabase-railway" &&
-    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
     enabled("SYNC_FIRST5_RECONCILE_ENABLED") &&
     !enabled("SYNC_FIRST5_RECONCILE_DISABLED") &&
     revisionAuthorized()
@@ -49,13 +48,13 @@ function isolatedFirstFiveWorkerEnabled() {
 export function startOneTimeSheet1Reconcile(port: number) {
   if (!isolatedFirstFiveWorkerEnabled()) {
     console.log(
-      "[first5-reconcile] isolated worker blocked: requires Railway production branch stabilize-supabase-railway, SYNC_RUNTIME_WRITE_ENABLED=true, SYNC_FIRST5_RECONCILE_ENABLED=true, and exact SYNC_FIRST5_RECONCILE_REVISION matching the deployed 40-char revision; SYNC_FIRST5_RECONCILE_DISABLED=true is the emergency kill switch",
+      "[first5-reconcile] isolated worker blocked: requires Railway production branch stabilize-supabase-railway, SYNC_FIRST5_RECONCILE_ENABLED=true, and exact SYNC_FIRST5_RECONCILE_REVISION matching the deployed 40-char revision; SYNC_FIRST5_RECONCILE_DISABLED=true is the emergency kill switch",
     );
     return;
   }
 
   console.warn(
-    "[first5-reconcile] isolated existing-products-only worker ENABLED for the explicitly authorized deployed revision",
+    "[first5-reconcile] isolated existing-products-only worker ENABLED for the explicitly authorized deployed revision while global runtime writes remain independently closed",
   );
   startFirstFiveSheetsReconcile(port);
 }
