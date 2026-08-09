@@ -2725,6 +2725,58 @@ export async function processGoogleSheetBatch(params: {
           continue;
         }
 
+        if (
+          reconciliation.status === "rebuild_required" &&
+          reconciliation.shopifyProductId &&
+          reconciliation.shopifyHandle
+        ) {
+          const publishResult = await publishPreparedProductToQueue({
+            productData: analyzed,
+            pricingRuleId: selectedPricingRuleId,
+            collections: selectedCollectionIds,
+            priceMultiplier: row.priceMultiplier,
+            replaceShopifyProductId: reconciliation.shopifyProductId,
+            replaceShopifyHandle: reconciliation.shopifyHandle,
+          });
+          const publishJob = await waitForSyncJobCompletion(publishResult.jobId);
+          if (publishJob.status === "failed") {
+            const reason =
+              String(publishJob.parsedResult?.error || "").trim() ||
+              `Shopify rebuild job failed (${publishResult.jobId})`;
+            throw new Error(reason);
+          }
+          verifyPublishJobResult(publishJob.parsedResult || {});
+          successful.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            action: "reconciled_existing",
+            sku: skuPlan?.canonicalSku,
+            priceOverride: row.price,
+            priceMultiplier: row.priceMultiplier,
+            collection: row.collection,
+            sourceProductId: publishResult.sourceProductId,
+            jobId: publishResult.jobId,
+            verification: {
+              shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+              variantsExpected: Number(publishJob.parsedResult?.variantsExpected),
+              variantsCreated: Number(publishJob.parsedResult?.variantsCreated),
+              variantsLinked: Number(publishJob.parsedResult?.variantsLinked),
+              variantImagesRequested: Number(
+                publishJob.parsedResult?.variantImagesRequested,
+              ),
+              variantImagesLinked: Number(
+                publishJob.parsedResult?.variantImagesLinked,
+              ),
+              salesChannelsPublished: Number(
+                publishJob.parsedResult?.salesChannelsPublished,
+              ),
+            },
+          });
+          syncedExistingRows += 1;
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+
         if (reconciliation.status !== "missing") {
           await registerFailure(
             reconciliation.reason ||
@@ -3084,8 +3136,17 @@ async function publishPreparedProductToQueue(params: {
   pricingRuleId?: string | null;
   collections?: string[];
   priceMultiplier?: number | null;
+  replaceShopifyProductId?: string;
+  replaceShopifyHandle?: string;
 }) {
-  const { productData, pricingRuleId, collections, priceMultiplier } = params;
+  const {
+    productData,
+    pricingRuleId,
+    collections,
+    priceMultiplier,
+    replaceShopifyProductId,
+    replaceShopifyHandle,
+  } = params;
   const sourceUrl = String(productData?.source?.url || "").trim();
   if (!sourceUrl || !isHttpUrl(sourceUrl)) {
     throw Object.assign(new Error("Product source URL is missing or invalid"), {
@@ -3282,6 +3343,13 @@ async function publishPreparedProductToQueue(params: {
     sourceProductId: sourceProduct.id,
     pricingRuleId: selectedPricingRuleId,
     collections: collectionIds,
+    ...(replaceShopifyProductId && replaceShopifyHandle
+      ? {
+          replaceShopifyProductId,
+          replaceShopifyHandle,
+          handle: replaceShopifyHandle,
+        }
+      : {}),
     ...(selectedPriceMultiplier ? { priceMultiplier: selectedPriceMultiplier } : {}),
   });
 

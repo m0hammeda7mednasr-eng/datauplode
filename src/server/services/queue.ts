@@ -1543,9 +1543,18 @@ export class QueueService {
 
         switch (job.type) {
           case 'PUBLISH_TO_SHOPIFY': {
-            const { sourceProductId, pricingRuleId, collections, priceMultiplier, handle } = payload;
+            const {
+              sourceProductId,
+              pricingRuleId,
+              collections,
+              priceMultiplier,
+              handle,
+              replaceShopifyProductId,
+              replaceShopifyHandle,
+            } = payload;
             let createdShopifyProductId: string | null = null;
             let client: any = null;
+            let replacementProductIdToDelete: string | null = null;
             
             // 1. Fetch source product
             const product = await prisma.sourceProduct.findUnique({
@@ -1556,6 +1565,26 @@ export class QueueService {
 
             // 2. Prepare Shopify Input
             client = await ShopifyService.getClientFromDb(prisma);
+
+            if (replaceShopifyProductId || replaceShopifyHandle) {
+              const replacementId = cleanOptionText(replaceShopifyProductId);
+              const expectedHandle = cleanOptionText(replaceShopifyHandle);
+              if (!replacementId || !expectedHandle) {
+                throw new Error('Safe Shopify replacement requires both product id and exact handle');
+              }
+              const linkedReplacement = await prisma.shopifyProduct.findFirst({
+                where: { shopifyId: replacementId },
+                select: { id: true },
+              });
+              if (linkedReplacement) {
+                throw new Error('Safe Shopify replacement refused because the target is already database-linked');
+              }
+              const replacement = await ShopifyService.getProductBasic(client, replacementId);
+              if (!replacement || cleanOptionText(replacement.handle) !== expectedHandle) {
+                throw new Error('Safe Shopify replacement identity check failed');
+              }
+              replacementProductIdToDelete = replacementId;
+            }
             
             // Apply pricing rule
             let rule: any = null;
@@ -1604,6 +1633,9 @@ export class QueueService {
 
             try {
               // 3. Create in Shopify
+              if (replacementProductIdToDelete) {
+                await ShopifyService.deleteProduct(client, replacementProductIdToDelete);
+              }
               const shopifyResponse = await ShopifyService.createProduct(client, input);
               const { product: shopifyProductResult, userErrors } = shopifyResponse.productCreate;
 
