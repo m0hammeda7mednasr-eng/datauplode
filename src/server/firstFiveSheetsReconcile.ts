@@ -733,7 +733,7 @@ const mapped = product.variants.map((current: any) => {
   if (singleDefaultVariant && titleSizeToken) {
     const sizeMatches = sourceVariants.filter((variant) => {
       const source = sourceOptions(variant);
-      return normalizeSizeToken(source.size || variant?.size || "") === titleSizeToken;
+      return normalizeSizeToken(source.size || (variant as any)?.size || "") === titleSizeToken;
     });
     if (sizeMatches.length === 1) {
       return { current, source: sizeMatches[0], forcedSizeToken: titleSizeToken };
