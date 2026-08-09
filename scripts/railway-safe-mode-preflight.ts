@@ -2,7 +2,9 @@ const REQUIRED_CLOSED_GATES = [
   'SYNC_RUNTIME_WRITE_ENABLED',
   'SYNC_INVENTORY_AUTOSTART',
   'SYNC_JOB_RECOVERY_ENABLED',
+  'SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED',
   'SYNC_SHEET_IMPORT_AUTOSTART_ENABLED',
+  'SYNC_FIRST5_RECONCILE_ENABLED',
   'CATALOG_AUDIT_WRITE_ENABLED',
   'CATALOG_AUDIT_SHEET_WRITE_ENABLED',
 ] as const;
@@ -142,6 +144,14 @@ function main() {
     }
   }
 
+  const first5Revision = String(process.env.SYNC_FIRST5_RECONCILE_REVISION ?? '').trim();
+  if (first5Revision) {
+    invalid.push({
+      name: 'SYNC_FIRST5_RECONCILE_REVISION',
+      value: 'must be empty in production safe mode',
+    });
+  }
+
   const canaryMaxRowsRaw = normalize(process.env.CATALOG_AUDIT_CANARY_MAX_ROWS);
   const canaryMaxRows = Number(canaryMaxRowsRaw);
   if (!canaryMaxRowsRaw) {
@@ -169,6 +179,7 @@ function main() {
     ok: missing.length === 0 && invalid.length === 0 && open.length === 0,
     mode: 'production-safe-mode',
     requiredClosedGateCount: REQUIRED_CLOSED_GATES.length,
+    first5RevisionAuthorized: Boolean(first5Revision),
     missing,
     invalid,
     open,
@@ -183,7 +194,7 @@ function main() {
 
   if (!report.ok) {
     throw new Error(
-      'Railway production deployment blocked: write gates must be explicitly closed, the dedicated Supabase project must be pinned and match DATABASE_URL, Session pooler configuration must be valid, dry-run enabled, and canary limited to one row.',
+      'Railway production deployment blocked: write gates must be explicitly closed, first-five reconcile revision authorization must be empty, the dedicated Supabase project must be pinned and match DATABASE_URL, Session pooler configuration must be valid, dry-run enabled, and canary limited to one row.',
     );
   }
 }
