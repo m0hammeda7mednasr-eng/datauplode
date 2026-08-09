@@ -244,3 +244,5 @@ jobs:
           fi
           git commit -m 'Enforce strict supplier-aware first-five matching'
           git push origin HEAD:stabilize-supabase-railway
+
+# repair-trigger: 2026-08-09T11:37Z
