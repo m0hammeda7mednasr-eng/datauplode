@@ -278,3 +278,5 @@ jobs:
           git add src/server/firstFiveSheetsReconcile.ts
           git commit -m 'Harden first-five supplier-aware matching and color safety'
           git push origin HEAD:stabilize-supabase-railway
+
+# automation trigger: re-run gated supplier-aware safety patch
