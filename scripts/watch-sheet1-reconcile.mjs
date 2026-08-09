@@ -67,6 +67,32 @@ function parseJobResult(job) {
   try { return JSON.parse(job.result); } catch { return { raw: String(job.result).slice(0, 5000) }; }
 }
 
+function jobTimestamp(job) {
+  for (const value of [job?.createdAt, job?.startedAt, job?.updatedAt, job?.completedAt]) {
+    const time = Date.parse(String(value || ''));
+    if (Number.isFinite(time)) return time;
+  }
+  return 0;
+}
+
+function selectNewestMarker(jobs) {
+  const markers = jobs
+    .filter((entry) => String(entry?.type || '') === markerType)
+    .map((entry, index) => ({ entry, index, result: parseJobResult(entry) }));
+  if (!markers.length) return null;
+
+  const live = markers.filter(({ entry, result }) =>
+    entry?.status !== 'failed' || result?.stage !== 'deployment_takeover'
+  );
+  const pool = live.length ? live : markers;
+  pool.sort((left, right) => {
+    const timeDelta = jobTimestamp(right.entry) - jobTimestamp(left.entry);
+    if (timeDelta) return timeDelta;
+    return right.index - left.index;
+  });
+  return pool[0]?.entry || null;
+}
+
 function renderJob(job) {
   const result = parseJobResult(job);
   const totals = result?.totals || {};
@@ -126,13 +152,13 @@ if (!deployed) {
   throw new Error('Railway did not deploy the exact expected revision in time.');
 }
 
-await updateIssue(`DEPLOYED ✅\n\nRevision: \`${expectedRevision}\`\nWaiting for one-time reconcile marker \`${markerType}\`.`);
+await updateIssue(`DEPLOYED ✅\n\nRevision: \`${expectedRevision}\`\nWaiting for newest reconcile marker \`${markerType}\`.`);
 
 let lastRendered = '';
 for (let attempt = 1; attempt <= 360; attempt += 1) {
   const { status, body } = await fetchJson('/api/sync-jobs', 30000);
   if (status >= 200 && status < 300 && Array.isArray(body)) {
-    const job = body.find((entry) => String(entry?.type || '') === markerType);
+    const job = selectNewestMarker(body);
     if (job) {
       const rendered = renderJob(job);
       if (rendered !== lastRendered) {
@@ -146,5 +172,5 @@ for (let attempt = 1; attempt <= 360; attempt += 1) {
   await sleep(10000);
 }
 
-await updateIssue(`WATCHER TIMEOUT ⚠️\n\nRevision: \`${expectedRevision}\`\nThe reconcile job did not reach completed/failed during the watch window.`);
+await updateIssue(`WATCHER TIMEOUT ⚠️\n\nRevision: \`${expectedRevision}\`\nThe newest reconcile job did not reach completed/failed during the watch window.`);
 throw new Error('Reconcile watch timed out.');
