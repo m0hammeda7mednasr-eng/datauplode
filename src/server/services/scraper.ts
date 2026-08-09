@@ -8730,6 +8730,9 @@ export class NextScraper implements SupplierScraper {
               url,
             );
           } catch (bypassError: any) {
+            if (bypassError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+              throw bypassError;
+            }
             bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
           }
         }
@@ -8763,6 +8766,9 @@ export class NextScraper implements SupplierScraper {
             url,
           );
         } catch (htmlError: any) {
+          if (htmlError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+            throw htmlError;
+          }
           lastError = htmlError;
           htmlErrors.push(`${pageUrl}: ${htmlError.message}`);
         }
@@ -8800,6 +8806,9 @@ export class NextScraper implements SupplierScraper {
             url,
           );
         } catch (playwrightError: any) {
+          if (playwrightError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+            throw playwrightError;
+          }
           const message = String(playwrightError?.message || "");
           if (
             /Executable doesn't exist|playwright install|chrome-headless-shell/i.test(
@@ -8856,6 +8865,9 @@ export class NextScraper implements SupplierScraper {
               url,
             );
           } catch (bypassError: any) {
+            if (bypassError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+              throw bypassError;
+            }
             bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
           }
         }
