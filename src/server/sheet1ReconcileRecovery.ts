@@ -41,6 +41,7 @@ function isolatedFirstFiveWorkerEnabled() {
     nodeEnv === "production" &&
     isRailway &&
     branch === "stabilize-supabase-railway" &&
+    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
     enabled("SYNC_FIRST5_RECONCILE_ENABLED") &&
     !enabled("SYNC_FIRST5_RECONCILE_DISABLED") &&
     revisionAuthorized()
@@ -60,7 +61,7 @@ function readResult(value: string | null | undefined) {
 export async function prepareSheet1ReconcileDeploymentTakeover() {
   if (!isolatedFirstFiveWorkerEnabled()) {
     console.log(
-      "[sheet1-reconcile] deployment takeover skipped: requires dedicated first-five authorization and exact deployed revision pin on the Railway production branch",
+      "[sheet1-reconcile] deployment takeover skipped: requires global runtime write authorization, dedicated first-five authorization, and exact deployed revision pin on the Railway production branch",
     );
     return;
   }
