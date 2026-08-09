@@ -11,12 +11,22 @@ permissions:
 jobs:
   repair-source:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
+    env:
+      NODE_ENV: development
     steps:
       - uses: actions/checkout@v4
         with:
           ref: stabilize-supabase-railway
           fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=dev
 
       - name: Patch runtime fail-closed
         shell: bash
@@ -120,7 +130,39 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Commit strict runtime source
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Enforce production safety contracts
+        run: |
+          npm run safety:production
+          npx tsx scripts/existing-product-audit-safety-contract.ts
+          npx tsx scripts/railway-safe-mode-safety-contract.ts
+          npx tsx scripts/runtime-autostart-safety-contract.ts
+          npx tsx scripts/first5-reconcile-revision-safety-contract.ts
+          npx tsx scripts/sheet1-watcher-provenance-safety-contract.ts
+          npx tsx scripts/pre-canary-queue-safety-contract.ts
+          npx tsx scripts/catalog-canary-queue-mutation-safety-contract.ts
+          npx tsx scripts/production-smoke-target-safety-contract.ts
+          npx tsx scripts/production-smoke-dry-run-readback-safety-contract.ts
+          npx tsx scripts/production-canary-safety-contract.ts
+          npx tsx scripts/database-preflight-safety-contract.ts
+          npx tsx scripts/readiness-platform-safety-contract.ts
+          npx tsx scripts/shopify-canary-readback-safety-contract.ts
+          npx tsx scripts/canary-sheet-isolation-safety-contract.ts
+          npx tsx scripts/sheet1-live-reconcile-retry-safety-contract.ts
+          npx tsx scripts/catalog-audit-production-source-safety-contract.ts
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Railway Docker image
+        run: docker build --tag dabdoob-strict-repair:${{ github.sha }} .
+
+      - name: Commit strict runtime source only after all gates pass
         shell: bash
         run: |
           set -euo pipefail
