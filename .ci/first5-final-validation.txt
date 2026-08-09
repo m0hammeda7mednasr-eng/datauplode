@@ -1,0 +1,11 @@
+Final validation marker for the first-five production worker.
+
+Code under validation includes:
+- isolated first-five Railway worker gate
+- existing-products-only mutations
+- source-confirmed inventory handling
+- flattened Shopify title-size mapping
+- stale -ONE- SKU reprocessing
+- Shopify mutation read-back
+
+No runtime behavior is defined by this file.
