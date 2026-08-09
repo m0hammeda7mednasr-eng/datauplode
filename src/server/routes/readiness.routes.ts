@@ -245,6 +245,16 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     "SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED",
   );
   const sheetImportAutostartConfigured = enabled("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
+  const sheet7CatalogConfigured = enabled("SYNC_SHEET7_CATALOG_ENABLED");
+  const sheet1CatalogAutostartConfigured = enabled(
+    "SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED",
+  );
+  const sheet1CatalogKillSwitch = enabled(
+    "SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED",
+  );
+  const sheet1CatalogExpectedRevision = String(
+    process.env.SYNC_SHEET1_CATALOG_REVISION || "",
+  ).trim();
   const catalogAuditDryRunConfigured = enabled("CATALOG_AUDIT_DRY_RUN");
   const databaseTimeoutMs = readinessTimeoutMs();
   const staleJobThresholdMinutes = staleRunningJobMinutes();
@@ -281,6 +291,18 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     sheetImportAutostartConfigured,
     sheetImportAutostartEnabled:
       runtimeWriteGateEnabled && sheetImportAutostartConfigured,
+    sheet7CatalogConfigured,
+    sheet7CatalogEnabled: runtimeWriteGateEnabled && sheet7CatalogConfigured,
+    sheet1CatalogAutostartConfigured,
+    sheet1CatalogKillSwitch,
+    sheet1CatalogRevisionAuthorized:
+      /^[0-9a-f]{40}$/i.test(sheet1CatalogExpectedRevision) &&
+      sheet1CatalogExpectedRevision.toLowerCase() ===
+        String(deploymentMetadata().revision || "").toLowerCase(),
+    sheet1CatalogAutostartEnabled:
+      runtimeWriteGateEnabled &&
+      sheet1CatalogAutostartConfigured &&
+      !sheet1CatalogKillSwitch,
   };
 
   const safeMode =

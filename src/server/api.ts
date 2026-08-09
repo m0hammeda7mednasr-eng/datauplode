@@ -17,6 +17,8 @@ import { QueueService } from "./services/queue.js";
 import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
 import { PersistentJsonCache } from "./services/persistentCache.js";
+import { reconcileExistingShopifyProductForImport } from "./firstFiveSheetsReconcile.js";
+import { applyDeterministicDabSkus } from "./services/dabSku.js";
 import scraperRoutes from "./routes/scraper.routes.js";
 import sourceCapabilityRoutes from "./routes/source-capability.routes.js";
 import { CategoryDiscoveryService } from "./scraper/services/CategoryDiscoveryService.js";
@@ -92,6 +94,8 @@ const DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS = Number.isFinite(
 
 type GoogleSheetAutoSyncState = {
   running: boolean;
+  inProgress: boolean;
+  currentRunStartedAt: string | null;
   sheetUrl: string | null;
   csvUrl: string | null;
   intervalSeconds: number;
@@ -104,17 +108,20 @@ type GoogleSheetAutoSyncState = {
   lastBatchId: string | null;
 };
 
-type GoogleSheetRow = {
+export type GoogleSheetRow = {
   rowNumber: number;
   url: string;
   price: number | null;
   priceMultiplier: number | null;
   collection: string;
+  sku?: string;
 };
 
 let googleSheetAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
 const googleSheetAutoSyncState: GoogleSheetAutoSyncState = {
   running: false,
+  inProgress: false,
+  currentRunStartedAt: null,
   sheetUrl: null,
   csvUrl: null,
   intervalSeconds: DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS,
@@ -1930,7 +1937,7 @@ async function ensureShopifyConnection() {
   }
 }
 
-function normalizeGoogleSheetUrl(sheetUrl: any) {
+export function normalizeGoogleSheetUrl(sheetUrl: any) {
   const input = String(sheetUrl || "").trim();
   if (!input) {
     throw Object.assign(new Error("Google Sheet URL is required"), {
@@ -1959,7 +1966,8 @@ function normalizeGoogleSheetUrl(sheetUrl: any) {
   }
 
   const fileId = fileMatch[1];
-  const gid = parsed.searchParams.get("gid") || "0";
+  const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+  const gid = parsed.searchParams.get("gid") || hashParams.get("gid") || "0";
   return `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv&gid=${encodeURIComponent(gid)}`;
 }
 
@@ -2036,7 +2044,49 @@ function toPositiveSheetNumber(value: any) {
   return toPriceNumber(value);
 }
 
-async function loadGoogleSheetRows(sheetUrl: string) {
+export function googleSheetRowFingerprint(row: GoogleSheetRow) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
+  const value = [
+    normalizedUrl,
+    row.price === null ? "" : row.price.toFixed(2),
+    row.priceMultiplier === null ? "" : row.priceMultiplier.toFixed(4),
+    normalizeLabel(row.collection),
+    String(row.sku || "").trim().toUpperCase(),
+  ].join("|");
+
+  return {
+    normalizedUrl,
+    hash: crypto.createHash("sha1").update(value).digest("hex"),
+  };
+}
+
+export function filterUnseenGoogleSheetRows(
+  rows: GoogleSheetRow[],
+  seenMap: Record<string, number>,
+  processOnlyNewRows: boolean,
+) {
+  if (!processOnlyNewRows) return [...rows];
+  return rows.filter((row) => !seenMap[googleSheetRowFingerprint(row).hash]);
+}
+
+export function orderGoogleSheetRowsExistingFirst(
+  rows: GoogleSheetRow[],
+  linkedUrls: Set<string>,
+  maxRows: number,
+) {
+  return rows
+    .map((row, position) => ({ row, position }))
+    .sort((left, right) => {
+      const leftLinked = linkedUrls.has(normalizeAnalyzeCacheUrl(left.row.url));
+      const rightLinked = linkedUrls.has(normalizeAnalyzeCacheUrl(right.row.url));
+      if (leftLinked === rightLinked) return left.position - right.position;
+      return leftLinked ? -1 : 1;
+    })
+    .slice(0, Math.max(1, maxRows))
+    .map((entry) => entry.row);
+}
+
+export async function loadGoogleSheetRows(sheetUrl: string) {
   const csvUrl = normalizeGoogleSheetUrl(sheetUrl);
   const response = await axios.get(csvUrl, {
     timeout: Math.max(5000, envNumber("GOOGLE_SHEET_FETCH_TIMEOUT_MS", 20000)),
@@ -2062,12 +2112,13 @@ async function loadGoogleSheetRows(sheetUrl: string) {
         price: null,
         priceMultiplier: toPositiveSheetNumber(row[1]),
         collection: String(row[2] || "").trim(),
+        sku: String(row[3] || "").trim(),
       }))
       .filter((row) => row.url.length > 0);
 
     return {
       csvUrl,
-      headers: ["link", "multiplier", "collection"],
+      headers: ["link", "multiplier", "collection", "sku"],
       rows,
     };
   }
@@ -2098,11 +2149,13 @@ async function loadGoogleSheetRows(sheetUrl: string) {
     /^collection$/i,
     /shopify[\s_-]*collection/i,
   ]);
+  const skuColumn = detectSheetColumn(headers, [/^sku$/i, /product[\s_-]*sku/i]);
 
   const urlIndex = headers.indexOf(urlColumn);
   const priceIndex = priceColumn ? headers.indexOf(priceColumn) : -1;
   const multiplierIndex = multiplierColumn ? headers.indexOf(multiplierColumn) : -1;
   const collectionIndex = collectionColumn ? headers.indexOf(collectionColumn) : -1;
+  const skuIndex = skuColumn ? headers.indexOf(skuColumn) : -1;
 
   const rows = matrix
     .slice(1)
@@ -2113,6 +2166,7 @@ async function loadGoogleSheetRows(sheetUrl: string) {
       priceMultiplier:
         multiplierIndex >= 0 ? toPositiveSheetNumber(row[multiplierIndex]) : null,
       collection: collectionIndex >= 0 ? String(row[collectionIndex] || "").trim() : "",
+      sku: skuIndex >= 0 ? String(row[skuIndex] || "").trim() : "",
     }))
     .filter((row) => row.url.length > 0);
 
@@ -2210,7 +2264,7 @@ async function buildBlockedSheetFallbackProduct(params: {
   csvUrl: string;
   mode: "sheet_link" | "auto_sync" | "file_upload";
   collection: string;
-}) {
+}): Promise<NormalizedProduct> {
   const normalizedUrl = normalizeAnalyzeCacheUrl(params.url);
   const existing = await prisma.sourceProduct.findUnique({
     where: { url: normalizedUrl },
@@ -2249,7 +2303,7 @@ async function buildBlockedSheetFallbackProduct(params: {
       position: img.position,
     })) || [];
 
-  const variants =
+  const variants: NormalizedProduct["variants"] =
     existing?.variants && existing.variants.length > 0
       ? existing.variants.map((variant: any, index: number) => ({
           sourceVariantId:
@@ -2308,7 +2362,7 @@ async function buildBlockedSheetFallbackProduct(params: {
   };
 }
 
-async function processGoogleSheetBatch(params: {
+export async function processGoogleSheetBatch(params: {
   sheetUrl: string;
   pricingRuleId?: string | null;
   defaultCollections?: string[];
@@ -2317,6 +2371,7 @@ async function processGoogleSheetBatch(params: {
   rowNumbers?: number[];
   waitForPublishCompletion?: boolean;
   mode?: "sheet_link" | "auto_sync";
+  createMissingProducts?: boolean;
 }) {
   await ensureShopifyConnection();
   const selectedPricingRuleId = asOptionalString(params.pricingRuleId);
@@ -2324,6 +2379,15 @@ async function processGoogleSheetBatch(params: {
   const waitForPublishCompletion = params.waitForPublishCompletion !== false;
   const sheetData = await loadGoogleSheetRows(params.sheetUrl);
   const sheetKey = normalizeAnalyzeCacheUrl(sheetData.csvUrl);
+  const approvedCatalogGid = (() => {
+    try {
+      const gid = new URL(sheetData.csvUrl).searchParams.get("gid") || "0";
+      return gid === "0" || gid === "93159589" ? gid : null;
+    } catch {
+      return null;
+    }
+  })();
+  const isApprovedCatalogSheet = approvedCatalogGid !== null;
   const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
   const requestedRowNumbers = Array.isArray(params.rowNumbers)
     ? params.rowNumbers
@@ -2335,7 +2399,38 @@ async function processGoogleSheetBatch(params: {
   const filteredRows = rowFilterSet.size
     ? sheetData.rows.filter((row) => rowFilterSet.has(row.rowNumber))
     : sheetData.rows;
-  const processRows = filteredRows.slice(0, maxRows);
+  const seenMap = getProcessedSheetRowsMap(sheetKey);
+  const eligibleRows = filterUnseenGoogleSheetRows(
+    filteredRows,
+    seenMap,
+    params.processOnlyNewRows === true,
+  );
+
+  // Run linked Shopify products first. Besides matching the requested business
+  // order, this avoids spending scraper capacity on rows that can be refreshed
+  // through their existing database link.
+  const candidateUrls = [
+    ...new Set(
+      eligibleRows
+        .map((row) => normalizeAnalyzeCacheUrl(row.url))
+        .filter((url) => isHttpUrl(url)),
+    ),
+  ];
+  const linkedProducts = candidateUrls.length
+    ? await prisma.sourceProduct.findMany({
+        where: {
+          url: { in: candidateUrls },
+          shopifyProduct: { isNot: null },
+        },
+        select: { url: true },
+      })
+    : [];
+  const linkedUrls = new Set(linkedProducts.map((product) => product.url));
+  const processRows = orderGoogleSheetRowsExistingFirst(
+    eligibleRows,
+    linkedUrls,
+    maxRows,
+  );
 
   if (selectedPricingRuleId) {
     const ruleExists = await prisma.pricingRule.findUnique({
@@ -2350,6 +2445,12 @@ async function processGoogleSheetBatch(params: {
   }
 
   const shopifyClient = await ShopifyService.getClientFromDb(prisma);
+  const shopifyInventoryLocation = isApprovedCatalogSheet
+    ? await ShopifyService.getInventoryLocation(shopifyClient)
+    : null;
+  if (isApprovedCatalogSheet && !shopifyInventoryLocation?.id) {
+    throw new Error("Shopify inventory location is required for safe catalog reconciliation");
+  }
   const shopifyCollections = await ShopifyService.getCollections(shopifyClient);
   const collectionByName = new Map<string, string>(
     shopifyCollections
@@ -2357,16 +2458,16 @@ async function processGoogleSheetBatch(params: {
       .filter((entry) => Boolean(entry[0] && entry[1])),
   );
 
-  const seenMap = getProcessedSheetRowsMap(sheetKey);
   const successful: Array<{
     rowNumber: number;
     url: string;
-    action?: "published" | "synced_existing";
+    action?: "published" | "synced_existing" | "reconciled_existing";
+    sku?: string;
     priceOverride: number | null;
     priceMultiplier: number | null;
     collection: string;
-    sourceProductId: string;
-    jobId: string;
+    sourceProductId?: string;
+    jobId?: string;
     verification?: {
       shopifyId: string;
       variantsExpected?: number;
@@ -2395,21 +2496,10 @@ async function processGoogleSheetBatch(params: {
   let syncedExistingRows = 0;
 
   for (const row of processRows) {
-    const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
-    const fingerprint = [
-      normalizedUrl,
-      row.price === null ? "" : row.price.toFixed(2),
-      row.priceMultiplier === null ? "" : row.priceMultiplier.toFixed(4),
-      normalizeLabel(row.collection),
-    ].join("|");
-    const fingerprintHash = crypto
-      .createHash("sha1")
-      .update(fingerprint)
-      .digest("hex");
-
-    if (params.processOnlyNewRows && seenMap[fingerprintHash]) {
-      continue;
-    }
+    const fingerprint = googleSheetRowFingerprint(row);
+    const normalizedUrl = fingerprint.normalizedUrl;
+    const fingerprintHash = fingerprint.hash;
+    processedNewRows += 1;
 
     if (processedUrls.has(normalizedUrl)) {
       skipped.push({
@@ -2418,7 +2508,6 @@ async function processGoogleSheetBatch(params: {
         reason: "Duplicate URL inside the same Google Sheet batch",
       });
       seenMap[fingerprintHash] = Date.now();
-      processedNewRows += 1;
       continue;
     }
     processedUrls.add(normalizedUrl);
@@ -2451,8 +2540,6 @@ async function processGoogleSheetBatch(params: {
 
     if (!isHttpUrl(normalizedUrl)) {
       await registerFailure("Invalid product URL");
-      seenMap[fingerprintHash] = Date.now();
-      processedNewRows += 1;
       continue;
     }
 
@@ -2470,7 +2557,7 @@ async function processGoogleSheetBatch(params: {
       ? rowCollectionIds
       : fallbackCollectionIds;
 
-    const queueExistingLinkedProductSync = async (reason: string) => {
+    const queueExistingLinkedProductSync = async (reason: string, sku?: string) => {
       const existing = await prisma.sourceProduct.findUnique({
         where: { url: normalizedUrl },
         select: {
@@ -2510,13 +2597,25 @@ async function processGoogleSheetBatch(params: {
           mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
           sheetCollection: row.collection || null,
           sheetPriceMultiplier: row.priceMultiplier,
+          sheetSku: row.sku || null,
         },
       });
+
+      if (waitForPublishCompletion) {
+        const completedSyncJob = await waitForSyncJobCompletion(syncJob.id);
+        if (completedSyncJob.status === "failed") {
+          const syncError =
+            String(completedSyncJob.parsedResult?.error || "").trim() ||
+            `Existing Shopify sync job failed (${syncJob.id})`;
+          throw new Error(syncError);
+        }
+      }
 
       successful.push({
         rowNumber: row.rowNumber,
         url: normalizedUrl,
         action: "synced_existing",
+        sku,
         priceOverride: row.price,
         priceMultiplier: row.priceMultiplier,
         collection: row.collection,
@@ -2526,6 +2625,28 @@ async function processGoogleSheetBatch(params: {
       syncedExistingRows += 1;
       return true;
     };
+
+    if (isApprovedCatalogSheet && row.priceMultiplier === null) {
+      await registerFailure("Missing or invalid price multiplier in the Google Sheet row");
+      continue;
+    }
+
+    if (linkedUrls.has(normalizedUrl) && !isApprovedCatalogSheet) {
+      try {
+        const queued = await queueExistingLinkedProductSync(
+          "sheet_existing_product_first",
+        );
+        if (queued) {
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+      } catch (error: any) {
+        await registerFailure(
+          error?.message || "Failed to refresh the existing Shopify product",
+        );
+        continue;
+      }
+    }
 
     try {
       const analyzed = await scrapeWithBridgeFallback(normalizedUrl);
@@ -2544,7 +2665,84 @@ async function processGoogleSheetBatch(params: {
         sheetCollection: row.collection || null,
         sheetPriceMultiplier: row.priceMultiplier,
       };
+      const skuPlan = isApprovedCatalogSheet
+        ? applyDeterministicDabSkus({
+            product: analyzed,
+            url: normalizedUrl,
+            multiplier: row.priceMultiplier,
+            existingProductSku: row.sku,
+          })
+        : null;
       setCachedAnalyzeProduct(normalizedUrl, analyzed);
+
+      if (
+        isApprovedCatalogSheet &&
+        linkedUrls.has(normalizedUrl) &&
+        analyzed.raw?.repairedFlattenedNextVariants === true
+      ) {
+        const queued = await queueExistingLinkedProductSync(
+          "sheet_repair_flattened_next_variants",
+          skuPlan?.canonicalSku,
+        );
+        if (queued) {
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+      }
+
+      if (isApprovedCatalogSheet && shopifyInventoryLocation?.id) {
+        const reconciliation = await reconcileExistingShopifyProductForImport({
+          client: shopifyClient,
+          locationId: shopifyInventoryLocation.id,
+          url: normalizedUrl,
+          rowNumber: row.rowNumber,
+          multiplier: row.priceMultiplier || 1,
+          collection: row.collection,
+          sheetId: Number(approvedCatalogGid),
+          sheetName: approvedCatalogGid === "0" ? "الورقة1" : "الورقة7",
+          existingSku: row.sku,
+          fresh: analyzed,
+        });
+
+        if (reconciliation.status === "verified" && reconciliation.shopifyProductId) {
+          successful.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            action: "reconciled_existing",
+            sku: reconciliation.expectedSku || skuPlan?.canonicalSku,
+            priceOverride: row.price,
+            priceMultiplier: row.priceMultiplier,
+            collection: row.collection,
+            verification: {
+              shopifyId: reconciliation.shopifyProductId,
+              variantsExpected: reconciliation.variantsChecked,
+              variantsCreated: 0,
+              variantsLinked: reconciliation.variantsChecked,
+            },
+          });
+          syncedExistingRows += 1;
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+
+        if (reconciliation.status !== "missing") {
+          await registerFailure(
+            reconciliation.reason ||
+              `Existing Shopify product reconciliation stopped with status ${reconciliation.status}`,
+          );
+          continue;
+        }
+
+
+        if (params.createMissingProducts === false) {
+          skipped.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            reason: "missing_product_deferred_for_publish_phase",
+          });
+          continue;
+        }
+      }
 
       const publishResult = await publishPreparedProductToQueue({
         productData: analyzed,
@@ -2594,6 +2792,8 @@ async function processGoogleSheetBatch(params: {
       successful.push({
         rowNumber: row.rowNumber,
         url: normalizedUrl,
+        action: "published",
+        sku: skuPlan?.canonicalSku,
         priceOverride: row.price,
         priceMultiplier: row.priceMultiplier,
         collection: row.collection,
@@ -2601,10 +2801,12 @@ async function processGoogleSheetBatch(params: {
         jobId: publishResult.jobId,
         ...(verification ? { verification } : {}),
       });
+      seenMap[fingerprintHash] = Date.now();
     } catch (error: any) {
       const reason = error?.message || "Failed to analyze or publish this URL";
       if (isAlreadyLinkedToShopifyMessage(reason)) {
         const queued = await queueExistingLinkedProductSync("sheet_row_already_linked");
+        if (queued) seenMap[fingerprintHash] = Date.now();
         if (!queued) {
           const existing = await prisma.sourceProduct.findUnique({
             where: { url: normalizedUrl },
@@ -2628,6 +2830,14 @@ async function processGoogleSheetBatch(params: {
             mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
             collection: row.collection,
           });
+          const fallbackSkuPlan = isApprovedCatalogSheet
+            ? applyDeterministicDabSkus({
+                product: fallbackProduct,
+                url: normalizedUrl,
+                multiplier: row.priceMultiplier,
+                existingProductSku: row.sku,
+              })
+            : null;
           const publishResult = await publishPreparedProductToQueue({
             productData: fallbackProduct,
             pricingRuleId: selectedPricingRuleId,
@@ -2681,6 +2891,8 @@ async function processGoogleSheetBatch(params: {
           successful.push({
             rowNumber: row.rowNumber,
             url: normalizedUrl,
+            action: "published",
+            sku: fallbackSkuPlan?.canonicalSku,
             priceOverride: row.price,
             priceMultiplier: row.priceMultiplier,
             collection: row.collection,
@@ -2688,12 +2900,14 @@ async function processGoogleSheetBatch(params: {
             jobId: publishResult.jobId,
             ...(verification ? { verification } : {}),
           });
+          seenMap[fingerprintHash] = Date.now();
         } catch (fallbackError: any) {
           const fallbackReason =
             fallbackError?.message ||
             `Fallback publish failed after source blocked: ${reason}`;
           if (isAlreadyLinkedToShopifyMessage(fallbackReason)) {
             const queued = await queueExistingLinkedProductSync("sheet_fallback_already_linked");
+            if (queued) seenMap[fingerprintHash] = Date.now();
             if (!queued) {
               const existing = await prisma.sourceProduct.findUnique({
                 where: { url: normalizedUrl },
@@ -2715,13 +2929,13 @@ async function processGoogleSheetBatch(params: {
       }
     }
 
-    seenMap[fingerprintHash] = Date.now();
-    processedNewRows += 1;
   }
 
   setProcessedSheetRowsMap(sheetKey, seenMap);
   const publishedRows = successful.filter(
-    (entry) => entry.action !== "synced_existing",
+    (entry) =>
+      entry.action !== "synced_existing" &&
+      entry.action !== "reconciled_existing",
   ).length;
 
   const responsePayload = {
@@ -2731,8 +2945,10 @@ async function processGoogleSheetBatch(params: {
     summary: {
       totalRowsInSheet: sheetData.rows.length,
       selectedRows: filteredRows.length,
+      eligibleRows: eligibleRows.length,
       processedRows: processRows.length,
       processedNewRows,
+      remainingRows: Math.max(0, eligibleRows.length - processRows.length),
       published: publishedRows,
       syncedExisting: syncedExistingRows,
       skipped: skipped.length,
@@ -2757,6 +2973,7 @@ async function processGoogleSheetBatch(params: {
       rowNumbers: rowFilterSet.size ? [...rowFilterSet] : null,
       pricingRuleId: selectedPricingRuleId,
       defaultCollections: params.defaultCollections || [],
+      createMissingProducts: params.createMissingProducts !== false,
     },
   });
 
@@ -3760,6 +3977,13 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
   }
 
   const run = async () => {
+    if (googleSheetAutoSyncState.inProgress) {
+      console.warn("Google Sheet auto sync skipped an overlapping interval");
+      return;
+    }
+
+    googleSheetAutoSyncState.inProgress = true;
+    googleSheetAutoSyncState.currentRunStartedAt = new Date().toISOString();
     try {
       const result = await processGoogleSheetBatch({
         sheetUrl,
@@ -3778,6 +4002,9 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
       googleSheetAutoSyncState.lastRunAt = new Date().toISOString();
       googleSheetAutoSyncState.lastError = error?.message || "Auto sync failed";
       googleSheetAutoSyncState.lastBatchId = null;
+    } finally {
+      googleSheetAutoSyncState.inProgress = false;
+      googleSheetAutoSyncState.currentRunStartedAt = null;
     }
   };
 
@@ -3787,6 +4014,8 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
   }
 
   googleSheetAutoSyncState.running = true;
+  googleSheetAutoSyncState.inProgress = false;
+  googleSheetAutoSyncState.currentRunStartedAt = null;
   googleSheetAutoSyncState.sheetUrl = sheetUrl;
   googleSheetAutoSyncState.csvUrl = normalizeGoogleSheetUrl(sheetUrl);
   googleSheetAutoSyncState.intervalSeconds = intervalSeconds;
@@ -4048,7 +4277,7 @@ router.post("/imports/excel/process", async (req, res) => {
           };
         }
 
-        successful.push({
+          successful.push({
           rowNumber,
           url: normalizedUrl,
           sourceProductId: publishResult.sourceProductId,

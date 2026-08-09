@@ -3,6 +3,7 @@ import { prisma } from '../db.js';
 import { ShopifyService } from './shopify.js';
 import { PricingEngine } from './pricing.js';
 import { ScraperService, type NormalizedProduct } from './scraper.js';
+import { applyDeterministicDabSkus } from './dabSku.js';
 
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
@@ -1146,6 +1147,7 @@ export class QueueService {
       sourceProductId: existingProduct.id,
       pricingRuleId,
       collections,
+      handle: cleanOptionText(existingProduct.shopifyProduct?.handle) || undefined,
       ...(priceMultiplier ? { priceMultiplier } : {}),
     });
     const finishedJob = await this.waitForJobCompletion(publishJob.id);
@@ -1234,6 +1236,14 @@ export class QueueService {
           await scraperService.scrape(product.url),
           options,
         );
+        if (options.sheetMeta?.excelRowNumber) {
+          applyDeterministicDabSkus({
+            product: scraped,
+            url: product.url,
+            multiplier: options.priceMultiplier,
+            existingProductSku: options.sheetMeta?.sheetSku,
+          });
+        }
         const variantDiff = diffVariantStructure(product.variants || [], scraped.variants || []);
         summary.variantStructureChanged = variantDiff.changed;
         summary.variantsAdded = variantDiff.added.length;
@@ -1533,7 +1543,7 @@ export class QueueService {
 
         switch (job.type) {
           case 'PUBLISH_TO_SHOPIFY': {
-            const { sourceProductId, pricingRuleId, collections, priceMultiplier } = payload;
+            const { sourceProductId, pricingRuleId, collections, priceMultiplier, handle } = payload;
             let createdShopifyProductId: string | null = null;
             let client: any = null;
             
@@ -1582,6 +1592,7 @@ export class QueueService {
             const input: any = {
               product: {
                 title: product.title,
+                ...(cleanOptionText(handle) ? { handle: cleanOptionText(handle) } : {}),
                 descriptionHtml: product.description || undefined,
                 vendor: product.brand || product.supplier.name,
                 status: 'ACTIVE',
