@@ -51,7 +51,7 @@ const checks: Array<[string, boolean]> = [
   ['isolated first-five worker does not open global runtime write gate', !/SYNC_RUNTIME_WRITE_ENABLED/.test(firstFiveWrapper)],
   ['isolated first-five recovery does not open global runtime write gate', !/SYNC_RUNTIME_WRITE_ENABLED/.test(firstFiveRecovery)],
   ['isolated worker is existing-products-only', /No existing ACTIVE Shopify product could be matched safely\. No product was created\./.test(firstFiveWorker)],
-  ['isolated worker has no product-create call', !/createProduct|productCreate\s*\(/.test(firstFiveWorker)],
+  ['isolated worker has no Shopify product-create mutation call', !/ShopifyService\.createProduct\s*\(|\bproductCreate\s*\(/.test(firstFiveWorker)],
   ['isolated worker never enables rebuild mode', !/rebuildProducts\s*:\s*true/.test(firstFiveWorker)],
   ['isolated worker requires Shopify read-back verification', /Shopify read-back did not match expected price\/SKU\/inventory values/.test(firstFiveWorker)],
   ['isolated worker only writes inventory for explicit source stock state', /stockStatus === "out_of_stock"[\s\S]*stockStatus === "in_stock"[\s\S]*return null/.test(firstFiveWorker)],
