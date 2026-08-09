@@ -263,7 +263,15 @@ function buildGroups(rows: SheetRow[], verifiedRows: Set<string>) {
       conflictMultipliers: multipliers,
     });
   }
-  return groups;
+  return groups.sort((left, right) => {
+  const leftNext = /(?:^|\.)next\.(?:ae|co\.uk|us)$/i.test((() => {
+    try { return new URL(left.url).hostname; } catch { return ""; }
+  })());
+  const rightNext = /(?:^|\.)next\.(?:ae|co\.uk|us)$/i.test((() => {
+    try { return new URL(right.url).hostname; } catch { return ""; }
+  })());
+  return Number(leftNext) - Number(rightNext);
+});
 }
 
 function readJson(value: string | null | undefined) {
@@ -982,12 +990,15 @@ async function processWithRetries(
       return await reconcileGroup(client, locationId, group);
     } catch (error: any) {
       lastError = clean(error?.message || error).slice(0, 3000);
+      const blockedSource = /(?:HTTP\s*403|blocked automated server access|access denied|security verification|cloudflare)/i.test(lastError);
       console.warn("[first5-reconcile] group attempt failed", {
         url: group.url,
         rows: resultRows(group),
         attempt: attempt + 1,
+        blockedSource,
         error: lastError,
       });
+      if (blockedSource) break;
     }
   }
   return {
