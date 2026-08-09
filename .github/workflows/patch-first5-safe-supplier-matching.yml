@@ -1,0 +1,280 @@
+name: Patch First5 Safe Supplier Matching
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths: [.github/workflows/patch-first5-safe-supplier-matching.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact production branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 1
+
+      - name: Patch conservative first-five matching and guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+          original = s
+
+          # Recover a missing multiplier only from an exact normalized URL with one unique multiplier elsewhere.
+          old = '''async function loadAllRows() {
+            const loaded = await Promise.all(FIRST_FIVE_SHEETS.map((sheet) => loadSheet(sheet)));
+            return {
+              valid: loaded.flatMap((entry) => entry.valid),
+              invalid: loaded.flatMap((entry) => entry.invalid),
+            };
+          }'''
+          if old in s:
+              new = '''async function loadAllRows() {
+            const loaded = await Promise.all(FIRST_FIVE_SHEETS.map((sheet) => loadSheet(sheet)));
+            const valid = loaded.flatMap((entry) => entry.valid);
+            const invalid = loaded.flatMap((entry) => entry.invalid);
+            const recovered: SheetRow[] = [];
+            const unresolved: InvalidSheetRow[] = [];
+
+            for (const row of invalid) {
+              const normalizedUrl = canonicalizeUrl(row.url);
+              const candidates = valid.filter((candidate) => candidate.normalizedUrl === normalizedUrl);
+              const multipliers = [...new Set(candidates.map((candidate) => candidate.multiplier))];
+              if (multipliers.length === 1) {
+                recovered.push({
+                  sheet: row.sheet,
+                  rowNumber: row.rowNumber,
+                  url: row.url,
+                  normalizedUrl,
+                  multiplier: multipliers[0],
+                  collection: "",
+                  existingSku: "",
+                });
+              } else {
+                unresolved.push(row);
+              }
+            }
+
+            return { valid: [...valid, ...recovered], invalid: unresolved };
+          }'''
+              s = s.replace(old, new, 1)
+
+          marker = 'function extractUrlProductCode(url: string) {'
+          if 'function sourceVendor(' not in s:
+              assert marker in s
+              s = s.replace(marker, '''function sourceVendor(url: string) {
+            try {
+              const host = new URL(url).hostname.toLowerCase();
+              if (host.includes("next.")) return "Next";
+              if (host.includes("hm.com")) return "H&M";
+              if (host.includes("maxfashion")) return "Max";
+              if (host.includes("shein")) return "SHEIN";
+              if (host.includes("centrepoint")) return "Centrepoint";
+              if (host.includes("lefties")) return "Lefties";
+              if (host.includes("marksandspencer")) return "Marks & Spencer";
+            } catch {}
+            return "";
+          }
+
+          function normalizedVendor(value: unknown) {
+            return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, "");
+          }
+
+          function normalizedFreshTitle(value: unknown) {
+            return clean(value).replace(/\\s-\\sSize\\s+.+$/i, "").toLowerCase();
+          }
+
+          function shopifySearchValue(value: unknown) {
+            return `"${clean(value).replace(/["\\\\]/g, " ").slice(0, 140)}"`;
+          }
+
+          ''' + marker, 1)
+
+          old_terms = '''  const code = compact(productCode);
+          const searchTerms = [code, compact(fresh?.source?.productId), clean(fresh.title)]
+            .filter(Boolean)
+            .slice(0, 3);'''
+          if old_terms in s:
+              new_terms = '''  const code = compact(productCode);
+          const vendor = sourceVendor(row.normalizedUrl);
+          const freshTitle = clean(fresh.title);
+          const sourceIdentifiers = [
+            compact(fresh?.source?.productId),
+            ...(fresh.variants || []).flatMap((variant: any) => [
+              compact(variant?.sku),
+              compact(variant?.sourceVariantId),
+            ]),
+          ].filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index).slice(0, 8);
+          const searchTerms = [code, ...sourceIdentifiers, freshTitle]
+            .filter(Boolean)
+            .filter((value, index, values) => values.indexOf(value) === index)
+            .slice(0, 10);'''
+              s = s.replace(old_terms, new_terms, 1)
+
+          find_marker = 'query FirstFiveFind($query: String!) {'
+          find_pos = s.find(find_marker)
+          assert find_pos >= 0
+          fields_pos = s.find('          status\n', find_pos)
+          if s.find('          vendor\n', find_pos, fields_pos + 250) < 0:
+              assert fields_pos >= 0
+              s = s[:fields_pos] + '          vendor\n' + s[fields_pos:]
+
+          old_loop = '''  const found = new Map<string, any>();
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            const queryText = `status:active AND ${safe}`;
+            try {
+              const data: any = await client.request(query, { query: queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") {
+                  found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                }
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", { term: safe, error: clean((error as any)?.message || error) });
+            }
+            if (found.size === 1 && term !== fresh.title) break;
+          }
+'''
+          if old_loop in s:
+              new_loop = '''  const found = new Map<string, any>();
+          const vendorFilter = vendor ? ` AND vendor:${shopifySearchValue(vendor)}` : "";
+          const queryTexts: Array<{ label: string; queryText: string }> = [];
+          if (freshTitle) {
+            queryTexts.push({
+              label: `title:${freshTitle}`,
+              queryText: `status:active${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+            });
+          }
+          for (const identifier of sourceIdentifiers) {
+            queryTexts.push({ label: `sku:${identifier}`, queryText: `status:active${vendorFilter} AND sku:${identifier}*` });
+          }
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            queryTexts.push({ label: `text:${safe}`, queryText: `status:active${vendorFilter} AND ${shopifySearchValue(safe)}` });
+          }
+          for (const request of queryTexts) {
+            try {
+              const data: any = await client.request(query, { query: request.queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", { term: request.label, error: clean((error as any)?.message || error) });
+            }
+          }
+'''
+              s = s.replace(old_loop, new_loop, 1)
+
+          old_score = '''      const productText = compact(`${product.title} ${product.handle}`);
+              if (code && productText.includes(code)) score += 30;
+              if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
+              if (code && product.variants.some((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku).includes(code))) score += 50;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 20);
+              return { product, score };'''
+          if old_score in s:
+              new_score = '''      const productText = compact(`${product.title} ${product.handle}`);
+              const candidateSkus = product.variants.map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku)).filter(Boolean);
+              const vendorExact = Boolean(vendor) && normalizedVendor(product.vendor) === normalizedVendor(vendor);
+              const titleExact = Boolean(freshTitle) && normalizedFreshTitle(product.title) === normalizedFreshTitle(freshTitle);
+              const existingSkuExact = Boolean(existingSku) && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku);
+              const codeSkuMatch = Boolean(code) && candidateSkus.some((sku: string) => sku.includes(code));
+              const sourceIdentityMatch = sourceIdentifiers.some((identifier) => candidateSkus.some((sku: string) => sku.includes(identifier) || identifier.includes(sku)));
+              if (vendorExact) score += 40;
+              if (titleExact) score += 40;
+              if (sourceIdentityMatch) score += 80;
+              if (existingSkuExact) score += 100;
+              if (codeSkuMatch) score += 50;
+              if (code && productText.includes(code)) score += 20;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 10);
+              const qualified = vendorExact && titleExact && (sourceIdentityMatch || codeSkuMatch || existingSkuExact) && score >= 120;
+              return { product, score, qualified };'''
+              s = s.replace(old_score, new_score, 1)
+
+          old_accept = '''  if (scored.length === 1) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          if (scored[0].score > scored[1].score && scored[0].score >= 20) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };'''
+          if old_accept in s:
+              new_accept = '''  const qualified = scored.filter((candidate: any) => candidate.qualified === true);
+          if (qualified.length === 1) {
+            return { product: qualified[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          return { product: null, ambiguous: qualified.length > 1 || candidates.length > 0, matchSource: "shopify_fallback" as const };'''
+              s = s.replace(old_accept, new_accept, 1)
+
+          # Color-specific source URL must never fan out over a Shopify product containing multiple colors.
+          color_marker = '''  const singleVariant = product.variants.length === 1;'''
+          if 'color-scoped partial update is not yet read-back safe' not in s:
+              assert color_marker in s
+              guard = '''  const shopifyColors = [...new Set(product.variants.map((variant: any) => clean(shopifyOptions(variant).color).toLowerCase()).filter(Boolean))];
+          const sourceColors = [...new Set(sourceVariants.map((variant: any) => clean(sourceOptions(variant).color).toLowerCase()).filter(Boolean))];
+          if (shopifyColors.length > 1 && sourceColors.length <= 1) {
+            return {
+              status: "ambiguous",
+              url: group.url,
+              rows: resultRows(group),
+              multiplier: group.multiplier,
+              productCode,
+              shopifyProductId: product.id,
+              shopifyTitle: product.title,
+              matchSource: located.matchSource,
+              reason: "Shopify product contains multiple colors while this source URL is color-specific or lacks explicit color mapping; color-scoped partial update is not yet read-back safe. No Shopify write was made.",
+            };
+          }
+
+          '''
+              s = s.replace(color_marker, guard + color_marker, 1)
+
+          assert 'const qualified = vendorExact && titleExact' in s
+          assert 'vendor\n          status' in s
+          assert 'sourceIdentityMatch' in s
+          assert 'color-scoped partial update is not yet read-back safe' in s
+          assert 'const recovered: SheetRow[] = []' in s
+          if s != original:
+              p.write_text(s, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/server/firstFiveSheetsReconcile.ts
+
+      - name: TypeScript and production build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Docker build
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t datauplode-first5-safe:${GITHUB_SHA} .
+
+      - name: Commit only after all gates pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Safety patch already active; nothing to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m 'Harden first-five supplier-aware matching and color safety'
+          git push origin HEAD:stabilize-supabase-railway
