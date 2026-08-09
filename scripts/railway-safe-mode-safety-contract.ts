@@ -57,41 +57,32 @@ function run(path: string, overrides: Record<string, string | undefined> = {}) {
 }
 
 const preDeployCommand = String(railwayConfig?.deploy?.preDeployCommand || '');
-const dbDeploy = preDeployCommand.indexOf('npm run db:deploy');
+const targetCheck = preDeployCommand.indexOf(
+  'NODE_ENV=production npx tsx scripts/railway-database-target-preflight.ts',
+);
 const safeMode = preDeployCommand.indexOf(
   'NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts',
 );
+const dbDeploy = preDeployCommand.indexOf('npm run db:deploy');
 const dbVerify = preDeployCommand.indexOf('NODE_ENV=production npm run db:preflight');
 const runtimeStartCommand = String(railwayConfig?.deploy?.startCommand || '');
 const railwayDeployScript = String(packageJson?.scripts?.['railway:deploy'] || '');
 
 assert(
-  preDeployCommand.startsWith("echo '[predeploy] applying Prisma schema' && npm run db:deploy &&"),
-  'Railway must retain the proven Prisma pre-deploy sequence',
-);
-assert(
-  dbDeploy >= 0 && safeMode > dbDeploy && dbVerify > safeMode,
-  'Railway pre-deploy must validate full safe mode and schema',
+  targetCheck >= 0 && safeMode > targetCheck && dbDeploy > safeMode && dbVerify > dbDeploy,
+  'Railway pre-deploy must validate the exact database target and safe mode before Prisma schema writes, then verify schema',
 );
 assert(
   runtimeStartCommand === 'npm run railway:deploy',
-  'Railway runtime must bootstrap and verify the schema before serving traffic',
+  'Railway runtime must use the controlled bootstrap script',
 );
 assert(
-  railwayDeployScript.startsWith(
-    'NODE_ENV=production npx tsx scripts/railway-database-target-preflight.ts && npm run db:deploy &&',
-  ),
-  'Runtime bootstrap must validate the exact database target before Prisma schema writes',
+  railwayDeployScript === 'NODE_ENV=production npm start',
+  'Runtime bootstrap must start Express immediately because database and safety checks already completed in pre-deploy',
 );
 assert(
-  railwayDeployScript.includes('NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts') &&
-    railwayDeployScript.includes('NODE_ENV=production npm run db:preflight') &&
-    railwayDeployScript.endsWith('&& npm start'),
-  'Runtime bootstrap must verify safe mode and required schema before starting Express',
-);
-assert(
-  railwayConfig?.deploy?.healthcheckPath === '/api/health',
-  'Railway healthcheck must remain /api/health',
+  railwayConfig?.deploy?.healthcheckPath === '/',
+  'Railway healthcheck must be a process/network liveness check independent of database readiness',
 );
 assert(
   railwayConfig?.deploy?.restartPolicyType === 'ON_FAILURE',
@@ -151,7 +142,9 @@ console.log(
     {
       ok: true,
       assertions,
-      runtimeSchemaBootstrapRequired: true,
+      preDeployOwnsDatabaseValidation: true,
+      runtimeStartsImmediately: true,
+      livenessIndependentOfDatabase: true,
       runtimeSessionPoolerPreserved: true,
       requiredClosedGates: requiredClosedGates.length,
       shopifyMutationsPerformed: 0,
