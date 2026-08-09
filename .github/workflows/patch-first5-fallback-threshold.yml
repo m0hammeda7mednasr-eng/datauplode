@@ -72,3 +72,5 @@ jobs:
           git add src/server/firstFiveSheetsReconcile.ts
           git commit -m 'Fail closed on weak Shopify fallback matches'
           git push origin HEAD:stabilize-supabase-railway
+
+# automation trigger: 2026-08-09T12:35+03:00
