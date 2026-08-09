@@ -200,6 +200,7 @@ jobs:
               score += Math.round(titleSimilarity(fresh.title, product.title) * 10);
               const qualified = vendorExact && titleExact && (sourceIdentityMatch || codeSkuMatch || existingSkuExact) && score >= 120;
               return { product, score, qualified };'''
+          if old_score in s:
               s = s.replace(old_score, new_score, 1)
 
           old_accept = '''  if (scored.length === 1) {
@@ -280,3 +281,4 @@ jobs:
           git push origin HEAD:stabilize-supabase-railway
 
 # automation trigger: re-run gated supplier-aware safety patch
+# automation trigger: validate and apply supplier-aware patch after CI green
