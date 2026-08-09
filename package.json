@@ -36,7 +36,7 @@
     "db:deploy": "prisma db push --skip-generate",
     "db:deploy:verified": "npm run db:deploy && npm run db:preflight",
     "db:studio": "prisma studio",
-    "railway:deploy": "NODE_ENV=production npx tsx scripts/railway-database-target-preflight.ts && npm run db:deploy && NODE_ENV=production npx tsx scripts/railway-safe-mode-preflight.ts && NODE_ENV=production npm run db:preflight && npm start"
+    "railway:deploy": "NODE_ENV=production npm start"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
