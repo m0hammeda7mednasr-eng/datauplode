@@ -1033,7 +1033,7 @@ export async function reconcileExistingShopifyProductForImport(params: {
 }) {
   const normalizedUrl = canonicalizeUrl(params.url);
   const sheet = {
-    name: "الورقة7",
+    name: clean(params.sheetName) || "الورقة7",
     gid: Number.isFinite(params.sheetId) ? Number(params.sheetId) : 93159589,
     sheetId: Number.isFinite(params.sheetId) ? Number(params.sheetId) : 93159589,
     columnCount: 4,

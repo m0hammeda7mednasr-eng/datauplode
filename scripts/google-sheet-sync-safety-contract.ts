@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import {
+  APPROVED_CATALOG_SHEETS,
   filterUnseenGoogleSheetRows,
   googleSheetRowFingerprint,
   normalizeGoogleSheetUrl,
   orderGoogleSheetRowsExistingFirst,
+  parseHeaderlessGoogleSheetRows,
   type GoogleSheetRow,
 } from "../src/server/api.js";
 import { applyDeterministicDabSkus } from "../src/server/services/dabSku.js";
 import type { NormalizedProduct } from "../src/server/services/scraper.js";
-import { NextScraper } from "../src/server/services/scraper.js";
+import {
+  configuredScraperApiKeyCount,
+  NextScraper,
+} from "../src/server/services/scraper.js";
+import {
+  FIRST_EIGHT_CATALOG_SHEETS,
+  MAX_CATALOG_TARGET_ROWS,
+} from "../src/server/sheet1CatalogAutoSync.js";
 
 const spreadsheetId = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const fragmentOnlyUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=93159589`;
@@ -17,6 +26,31 @@ assert.equal(
   `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=93159589`,
   "fragment-only gid must not silently fall back to Sheet 1",
 );
+assert.equal(Object.keys(APPROVED_CATALOG_SHEETS).length, 8, "only the approved first eight tabs may use catalog writes");
+assert.equal(FIRST_EIGHT_CATALOG_SHEETS.length, 8, "the continuous worker must cover eight tabs");
+assert.equal(MAX_CATALOG_TARGET_ROWS, 5000, "the approved run must be hard-capped at 5000 unique products");
+
+const sparseRows = parseHeaderlessGoogleSheetRows([
+  [],
+  ["https://example.com/a", "22", "Dungarees", "DAB-NXT-A-22"],
+  ["https://example.com/b", "", "", "", "", "", "", "", "24", "Shoes"],
+]);
+assert.equal(sparseRows.length, 2, "blank leading rows must not turn a headerless tab into a header-based sheet");
+assert.deepEqual(
+  sparseRows.map((row) => [row.rowNumber, row.priceMultiplier, row.collection]),
+  [[2, 22, "Dungarees"], [3, 24, "Shoes"]],
+  "sparse multipliers and collections must be detected anywhere after the URL",
+);
+
+const previousPool = process.env.SCRAPERAPI_KEYS;
+const previousLegacyKey = process.env.SCRAPERAPI_KEY;
+process.env.SCRAPERAPI_KEYS = "dummy-one,dummy-two;dummy-three\ndummy-four";
+delete process.env.SCRAPERAPI_KEY;
+assert.equal(configuredScraperApiKeyCount(), 4, "four ScraperAPI keys must be recognized without exposing their values");
+if (previousPool === undefined) delete process.env.SCRAPERAPI_KEYS;
+else process.env.SCRAPERAPI_KEYS = previousPool;
+if (previousLegacyKey === undefined) delete process.env.SCRAPERAPI_KEY;
+else process.env.SCRAPERAPI_KEY = previousLegacyKey;
 
 const rows: GoogleSheetRow[] = Array.from({ length: 1002 }, (_, index) => ({
   rowNumber: index + 1,

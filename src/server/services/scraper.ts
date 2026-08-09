@@ -2,6 +2,7 @@
 import * as cheerio from "cheerio";
 import axios from "axios";
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import { promisify } from "node:util";
 
 export interface NormalizedProduct {
@@ -225,12 +226,12 @@ function managedBypassMode(): ManagedBypassMode {
   if (configuredMode) {
     const mode = normalizeManagedBypassMode(configuredMode);
     if (mode !== "never") return mode;
-    if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+    if (configuredScraperApiKeyCount() > 0) return "auto";
     return mode;
   }
   // Prefer managed bypass automatically when ScraperAPI is configured,
   // so blocked suppliers still scrape successfully without manual env tweaking.
-  if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+  if (configuredScraperApiKeyCount() > 0) return "auto";
   return "never";
 }
 
@@ -303,6 +304,55 @@ const managedBypassUsageByDay = new Map<string, number>();
 const managedBypassCooldownUntil = new Map<string, number>();
 const managedBypassProviderCooldownUntil = new Map<string, number>();
 const managedBypassUsageByProviderMonth = new Map<string, number>();
+const scraperApiKeyCooldownUntil = new Map<string, number>();
+let scraperApiRoundRobinIndex = 0;
+
+function configuredScraperApiKeys(): string[] {
+  const pooled = String(process.env.SCRAPERAPI_KEYS || "")
+    .split(/[\s,;]+/)
+    .map((value) => cleanText(value))
+    .filter(Boolean);
+  const legacy = cleanText(process.env.SCRAPERAPI_KEY);
+  return [...new Set(legacy ? [...pooled, legacy] : pooled)];
+}
+
+export function configuredScraperApiKeyCount(): number {
+  return configuredScraperApiKeys().length;
+}
+
+function scraperApiKeyIdentity(apiKey: string): string {
+  return crypto.createHash("sha256").update(apiKey).digest("hex");
+}
+
+function orderedAvailableScraperApiKeys(): string[] {
+  const keys = configuredScraperApiKeys();
+  if (!keys.length) return [];
+  const start = scraperApiRoundRobinIndex % keys.length;
+  scraperApiRoundRobinIndex = (start + 1) % keys.length;
+  return keys
+    .map((_, index) => keys[(start + index) % keys.length])
+    .filter(
+      (key) =>
+        (scraperApiKeyCooldownUntil.get(scraperApiKeyIdentity(key)) || 0) <=
+        Date.now(),
+    );
+}
+
+function coolDownScraperApiKey(apiKey: string, status?: number) {
+  const quotaOrAuthFailure = [401, 402, 403, 429].includes(Number(status));
+  const defaultMinutes = quotaOrAuthFailure ? 24 * 60 : 5;
+  const cooldownEnv = quotaOrAuthFailure
+    ? "SCRAPERAPI_EXHAUSTED_KEY_COOLDOWN_MINUTES"
+    : "SCRAPERAPI_KEY_COOLDOWN_MINUTES";
+  const minutes = Math.max(
+    1,
+    envNumber(cooldownEnv, defaultMinutes),
+  );
+  scraperApiKeyCooldownUntil.set(
+    scraperApiKeyIdentity(apiKey),
+    Date.now() + minutes * 60_000,
+  );
+}
 
 function getManagedBypassDayKey(): string {
   return new Date().toISOString().slice(0, 10);
@@ -467,7 +517,7 @@ function activeManagedBypassProviders(
   }
 
   const providers: ManagedBypassProvider[] = [];
-  if (cleanText(process.env.SCRAPERAPI_KEY)) providers.push("scraperapi");
+  if (configuredScraperApiKeyCount() > 0) providers.push("scraperapi");
   if (cleanText(process.env.ZENROWS_API_KEY)) providers.push("zenrows");
   if (cleanText(process.env.SCRAPINGBEE_API_KEY))
     providers.push("scrapingbee");
@@ -500,8 +550,12 @@ async function fetchHtmlViaScraperApi(
   url: string,
   options: ManagedBypassOptions,
 ): Promise<string> {
-  const apiKey = cleanText(process.env.SCRAPERAPI_KEY);
-  if (!apiKey) throw new Error("SCRAPERAPI_KEY is not configured");
+  const configuredKeyCount = configuredScraperApiKeyCount();
+  const apiKeys = orderedAvailableScraperApiKeys();
+  if (!configuredKeyCount) throw new Error("No ScraperAPI key is configured");
+  if (!apiKeys.length) {
+    throw new Error("All configured ScraperAPI keys are cooling down");
+  }
 
   const countryCode =
     options.countryCode ||
@@ -520,7 +574,7 @@ async function fetchHtmlViaScraperApi(
   const ultraPremium =
     options.ultraPremium ?? envFlag("SCRAPERAPI_ULTRA_PREMIUM", false);
 
-  const buildParams = (config: {
+  const buildParams = (apiKey: string, config: {
     render: boolean;
     includeCountryAndDevice: boolean;
     premium: boolean;
@@ -547,7 +601,7 @@ async function fetchHtmlViaScraperApi(
     return params;
   };
 
-  const requestHtml = async (params: URLSearchParams) => {
+  const requestHtml = async (apiKey: string, params: URLSearchParams) => {
     const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
       timeout: 90000,
       responseType: "text",
@@ -555,6 +609,7 @@ async function fetchHtmlViaScraperApi(
     });
 
     if (response.status !== 200) {
+      coolDownScraperApiKey(apiKey, response.status);
       throw new Error(`ScraperAPI HTTP ${response.status}`);
     }
 
@@ -592,12 +647,16 @@ async function fetchHtmlViaScraperApi(
   }
 
   const errors: string[] = [];
-  for (const attempt of attempts) {
-    try {
-      return await requestHtml(buildParams(attempt));
-    } catch (error: any) {
-      errors.push(error?.message || String(error));
+  for (let keyIndex = 0; keyIndex < apiKeys.length; keyIndex += 1) {
+    const apiKey = apiKeys[keyIndex];
+    for (const attempt of attempts) {
+      try {
+        return await requestHtml(apiKey, buildParams(apiKey, attempt));
+      } catch (error: any) {
+        errors.push(`key ${keyIndex + 1}: ${error?.message || String(error)}`);
+      }
     }
+    coolDownScraperApiKey(apiKey);
   }
 
   throw new Error(`ScraperAPI failed (${errors.join("; ")})`);
