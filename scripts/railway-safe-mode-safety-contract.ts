@@ -17,7 +17,9 @@ const requiredClosedGates = [
   'SYNC_RUNTIME_WRITE_ENABLED',
   'SYNC_INVENTORY_AUTOSTART',
   'SYNC_JOB_RECOVERY_ENABLED',
+  'SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED',
   'SYNC_SHEET_IMPORT_AUTOSTART_ENABLED',
+  'SYNC_FIRST5_RECONCILE_ENABLED',
   'CATALOG_AUDIT_WRITE_ENABLED',
   'CATALOG_AUDIT_SHEET_WRITE_ENABLED',
 ] as const;
@@ -39,6 +41,7 @@ function productionEnv(overrides: Record<string, string | undefined> = {}) {
     DATABASE_URL: validSupabaseUrl,
     CATALOG_AUDIT_DRY_RUN: 'true',
     CATALOG_AUDIT_CANARY_MAX_ROWS: '1',
+    SYNC_FIRST5_RECONCILE_REVISION: '',
   };
   for (const gate of requiredClosedGates) env[gate] = 'false';
   for (const [key, value] of Object.entries(overrides)) {
@@ -96,6 +99,11 @@ assert(
 for (const gate of requiredClosedGates) {
   assert(preflightSource.includes(`'${gate}'`), `preflight must require ${gate}`);
 }
+assert(preflightSource.includes('SYNC_FIRST5_RECONCILE_REVISION'), 'first-five revision authorization must be inspected');
+assert(
+  preflightSource.includes("value: 'must be empty in production safe mode'"),
+  'first-five revision authorization must remain empty in safe mode',
+);
 assert(preflightSource.includes('CATALOG_AUDIT_DRY_RUN'), 'dry run must remain mandatory');
 assert(preflightSource.includes('canaryMaxRows !== 1'), 'canary must remain exactly one row');
 assert(preflightSource.includes('SUPABASE_PROJECT_REF'), 'Supabase project pin must remain mandatory');
@@ -122,6 +130,10 @@ for (const gate of requiredClosedGates) {
   assert(run(preflightPath, { [gate]: 'true' }).status !== 0, `open ${gate} must block deployment`);
 }
 
+assert(
+  run(preflightPath, { SYNC_FIRST5_RECONCILE_REVISION: '680c63e118ab037a18653776863b3b3c92213c93' }).status !== 0,
+  'pre-authorized first-five deployment revision must block safe-mode deployment',
+);
 assert(run(preflightPath, { CATALOG_AUDIT_DRY_RUN: 'false' }).status !== 0, 'disabled dry run must block deployment');
 assert(run(preflightPath, { CATALOG_AUDIT_CANARY_MAX_ROWS: '2' }).status !== 0, 'wide canary must block deployment');
 assert(run(preflightPath, { SUPABASE_PROJECT_REF: 'different-project' }).status !== 0, 'wrong Supabase project must block deployment');
@@ -146,6 +158,7 @@ console.log(
       runtimeStartsImmediately: true,
       livenessIndependentOfDatabase: true,
       runtimeSessionPoolerPreserved: true,
+      firstFiveRevisionAuthorizationMustBeEmpty: true,
       requiredClosedGates: requiredClosedGates.length,
       shopifyMutationsPerformed: 0,
       googleSheetWritesPerformed: 0,
