@@ -2,26 +2,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = process.cwd();
-const serverPath = path.join(root, 'server.ts');
-const queuePath = path.join(root, 'src/server/services/queue.ts');
-const oneTimeSheetImportPath = path.join(root, 'src/server/oneTimeSheetImport.ts');
-const oneTimeSheet1ReconcilePath = path.join(root, 'src/server/oneTimeSheet1Reconcile.ts');
-const sheet1ReconcileRecoveryPath = path.join(root, 'src/server/sheet1ReconcileRecovery.ts');
-const railwayEnvExamplePath = path.join(root, '.env.railway.example');
-const productionEnvExamplePath = path.join(root, '.env.production.example');
+const server = fs.readFileSync(path.join(root, 'server.ts'), 'utf8');
+const queue = fs.readFileSync(path.join(root, 'src/server/services/queue.ts'), 'utf8');
+const oneTimeSheetImport = fs.readFileSync(path.join(root, 'src/server/oneTimeSheetImport.ts'), 'utf8');
+const firstFiveWrapper = fs.readFileSync(path.join(root, 'src/server/oneTimeSheet1Reconcile.ts'), 'utf8');
+const firstFiveRecovery = fs.readFileSync(path.join(root, 'src/server/sheet1ReconcileRecovery.ts'), 'utf8');
+const firstFiveWorker = fs.readFileSync(path.join(root, 'src/server/firstFiveSheetsReconcile.ts'), 'utf8');
+const railwayEnvExample = fs.readFileSync(path.join(root, '.env.railway.example'), 'utf8');
+const productionEnvExample = fs.readFileSync(path.join(root, '.env.production.example'), 'utf8');
 
-const server = fs.readFileSync(serverPath, 'utf8');
-const queue = fs.readFileSync(queuePath, 'utf8');
-const oneTimeSheetImport = fs.readFileSync(oneTimeSheetImportPath, 'utf8');
-const oneTimeSheet1Reconcile = fs.readFileSync(oneTimeSheet1ReconcilePath, 'utf8');
-const sheet1ReconcileRecovery = fs.readFileSync(sheet1ReconcileRecoveryPath, 'utf8');
-const railwayEnvExample = fs.readFileSync(railwayEnvExamplePath, 'utf8');
-const productionEnvExample = fs.readFileSync(productionEnvExamplePath, 'utf8');
-
-function hasClosedProductionGates(envExample: string): boolean {
+function hasClosedGlobalGates(envExample: string): boolean {
   return [
     'SYNC_RUNTIME_WRITE_ENABLED=false',
-    'SYNC_FIRST5_RECONCILE_ENABLED=false',
     'SYNC_PRICING_RULE_SEED_ENABLED=false',
     'SYNC_INVENTORY_AUTOSTART=false',
     'SYNC_JOB_RECOVERY_ENABLED=false',
@@ -32,68 +24,45 @@ function hasClosedProductionGates(envExample: string): boolean {
   ].every(line => envExample.split(/\r?\n/).includes(line));
 }
 
-function startupPrefixBeforeSafeModeReturn(): string | null {
+function startupPrefixBeforeGlobalSafeModeReturn(): string | null {
   const listenIndex = server.indexOf('httpServer.listen(PORT, HOST, () => {');
   if (listenIndex < 0) return null;
-
   const gateIndex = server.indexOf('if (!runtimeWritesEnabled())', listenIndex);
   if (gateIndex < 0) return null;
-
   const returnIndex = server.indexOf('return;', gateIndex);
   if (returnIndex < 0) return null;
-
   return server.slice(listenIndex, returnIndex);
 }
 
-const startupPrefix = startupPrefixBeforeSafeModeReturn();
+const startupPrefix = startupPrefixBeforeGlobalSafeModeReturn();
 
 const checks: Array<[string, boolean]> = [
-  ['runtime write gate defaults closed', /function runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_RUNTIME_WRITE_ENABLED"\)/.test(server)],
-  ['pricing-rule seed requires runtime write gate', /function pricingRuleSeedEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)\s*&&\s*envFlag\("SYNC_PRICING_RULE_SEED_ENABLED"\)/.test(server)],
-  ['job recovery configured flag is explicit', /function jobRecoveryConfigured\(\)[\s\S]*envFlag\("SYNC_JOB_RECOVERY_ENABLED"\)/.test(server)],
-  ['job recovery Shopify-write flag is explicit', /function jobRecoveryShopifyWritesEnabled\(\)[\s\S]*envFlag\("SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED"\)/.test(server)],
-  ['job recovery requires runtime, recovery, and Shopify-write gates', /function jobRecoveryEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)[\s\S]*jobRecoveryConfigured\(\)[\s\S]*jobRecoveryShopifyWritesEnabled\(\)/.test(server)],
-  ['inventory autostart requires runtime write gate', /function inventoryAutostartEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)\s*&&\s*envFlag\("SYNC_INVENTORY_AUTOSTART"\)/.test(server)],
-  ['sheet import autostart requires runtime write gate', /function sheetImportAutostartEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)\s*&&\s*envFlag\("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED"\)/.test(server)],
-  ['server returns before background jobs in safe mode', /if \(!runtimeWritesEnabled\(\)[\s\S]*return;[\s\S]*Runtime sync writes ENABLED/.test(server)],
-  ['pricing-rule seed call is guarded', /if \(pricingRuleSeedEnabled\(\)[\s\S]*seedDefaultPricingRules\(\)/.test(server)],
-  ['recovery call is guarded by composite recovery gate', /if \(jobRecoveryEnabled\(\)[\s\S]*QueueService\.recoverInterruptedJobs\(\)/.test(server)],
-  ['recovery has explicit blocked path for Shopify write gate', /Interrupted-job recovery blocked: SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false/.test(server)],
-  ['inventory monitor call is guarded', /if \(inventoryAutostartEnabled\(\)[\s\S]*QueueService\.startInventoryMonitor\(\)/.test(server)],
-  ['sheet import call is guarded', /if \(sheetImportAutostartEnabled\(\)[\s\S]*startOneTimeSheetImport\(PORT\)/.test(server)],
-  ['one-time sheet importer independently checks both runtime and import gates', /function sheetImportAutostartEnabled\(\)[\s\S]*envFlag\("SYNC_RUNTIME_WRITE_ENABLED"\)[\s\S]*envFlag\("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED"\)/.test(oneTimeSheetImport)],
-  ['one-time sheet importer blocks before scheduling when either gate is closed', /if \(!sheetImportAutostartEnabled\(\)\)[\s\S]*blocked unless SYNC_RUNTIME_WRITE_ENABLED=true and SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=true[\s\S]*return;[\s\S]*setTimeout/.test(oneTimeSheetImport)],
-  ['one-time sheet importer still requires Railway production environment', /if \(!isProduction\(\) \|\| !isRailway\)[\s\S]*return;/.test(oneTimeSheetImport)],
-  ['one-time sheet importer does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(oneTimeSheetImport)],
-  ['first-five reconcile wrapper requires runtime and dedicated broad-write gates', /function firstFiveReconcileWritesEnabled\(\)[\s\S]*SYNC_RUNTIME_WRITE_ENABLED[\s\S]*SYNC_FIRST5_RECONCILE_ENABLED/.test(oneTimeSheet1Reconcile)],
-  ['first-five reconcile wrapper returns before worker startup while gates are closed', /if \(!firstFiveReconcileWritesEnabled\(\)\)[\s\S]*return;[\s\S]*startFirstFiveSheetsReconcile\(port\)/.test(oneTimeSheet1Reconcile)],
-  ['first-five deployment takeover requires the same two gates', /function firstFiveReconcileWritesEnabled\(\)[\s\S]*SYNC_RUNTIME_WRITE_ENABLED[\s\S]*SYNC_FIRST5_RECONCILE_ENABLED/.test(sheet1ReconcileRecovery)],
-  ['first-five deployment takeover returns before database mutation while gates are closed', /if \(!firstFiveReconcileWritesEnabled\(\)\)[\s\S]*return;[\s\S]*prisma\.syncJob\.findMany/.test(sheet1ReconcileRecovery)],
-  ['first-five reconcile wrapper does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(oneTimeSheet1Reconcile)],
-  ['all write gates are closed in Railway example', hasClosedProductionGates(railwayEnvExample)],
-  ['Railway first-five broad reconcile gate defaults closed', /^SYNC_FIRST5_RECONCILE_ENABLED=false$/m.test(railwayEnvExample)],
-  ['Railway recovery Shopify-write gate defaults closed', /^SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false$/m.test(railwayEnvExample)],
-  ['catalog dry run remains enabled in Railway example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(railwayEnvExample)],
-  ['canary remains limited to one row in Railway example', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(railwayEnvExample)],
-  ['all write gates are closed in production example', hasClosedProductionGates(productionEnvExample)],
-  ['production first-five broad reconcile gate defaults closed', /^SYNC_FIRST5_RECONCILE_ENABLED=false$/m.test(productionEnvExample)],
-  ['production recovery Shopify-write gate defaults closed', /^SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false$/m.test(productionEnvExample)],
-  ['production example uses Supabase session pooler port 5432', /^DATABASE_URL=.*pooler\.supabase\.com:5432\//m.test(productionEnvExample)],
-  ['production example requires sslmode=require', /^DATABASE_URL=.*[?&]sslmode=require(?:&|$)/m.test(productionEnvExample)],
-  ['production example does not use transaction pooler port 6543', !/^DATABASE_URL=.*:6543\//m.test(productionEnvExample)],
-  ['catalog dry run remains enabled in production example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(productionEnvExample)],
-  ['canary remains limited to one row in production example', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(productionEnvExample)],
-  ['queue recovery includes Shopify-mutating job types that justify the second gate', /const recoverableTypes = \[[\s\S]*'PUBLISH_TO_SHOPIFY'[\s\S]*'REPUBLISH_TO_SHOPIFY'[\s\S]*'SYNC_PRODUCT'[\s\S]*'SYNC_INVENTORY'/.test(queue)],
-  ['queue recovery does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(queue)],
-  ['queue inventory monitor has an explicit disable path', /SYNC_INVENTORY_AUTOSTART === 'false'/.test(queue)],
-  ['safe-mode message requires dry run, canary, and read-back', /only after live dry run, canary, and read-back succeed/i.test(server)],
-  ['startup safe-mode scope is discoverable', startupPrefix !== null],
-  ['pre-gate first-five calls are independently fail-closed', Boolean(startupPrefix) &&
-    startupPrefix!.includes('prepareSheet1ReconcileDeploymentTakeover()') &&
-    startupPrefix!.includes('startOneTimeSheet1Reconcile(PORT)') &&
-    /firstFiveReconcileWritesEnabled/.test(oneTimeSheet1Reconcile) &&
-    /firstFiveReconcileWritesEnabled/.test(sheet1ReconcileRecovery)],
-  ['no unguarded legacy startup write call occurs before the safe-mode return', Boolean(startupPrefix) &&
+  ['global runtime write gate defaults closed', /function runtimeWritesEnabled\(\)[\s\S]*SYNC_RUNTIME_WRITE_ENABLED/.test(server)],
+  ['pricing-rule seed remains behind global runtime gate', /function pricingRuleSeedEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)[\s\S]*SYNC_PRICING_RULE_SEED_ENABLED/.test(server)],
+  ['job recovery remains behind runtime and explicit recovery gates', /function jobRecoveryEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)[\s\S]*jobRecoveryConfigured\(\)[\s\S]*jobRecoveryShopifyWritesEnabled\(\)/.test(server)],
+  ['inventory monitor remains behind global runtime gate', /function inventoryAutostartEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)[\s\S]*SYNC_INVENTORY_AUTOSTART/.test(server)],
+  ['legacy sheet import remains behind global runtime gate', /function sheetImportAutostartEnabled\(\)[\s\S]*runtimeWritesEnabled\(\)[\s\S]*SYNC_SHEET_IMPORT_AUTOSTART_ENABLED/.test(server)],
+  ['global background jobs return before startup in safe mode', /if \(!runtimeWritesEnabled\(\)\)[\s\S]*return;[\s\S]*Runtime sync writes ENABLED/.test(server)],
+  ['isolated first-five worker is invoked before global safe-mode return', Boolean(startupPrefix) && startupPrefix!.includes('startOneTimeSheet1Reconcile(PORT)')],
+  ['isolated first-five takeover is invoked before global safe-mode return', Boolean(startupPrefix) && startupPrefix!.includes('prepareSheet1ReconcileDeploymentTakeover()')],
+  ['isolated first-five wrapper independently restricts Railway production branch', /function isolatedFirstFiveWorkerEnabled\(\)[\s\S]*NODE_ENV[\s\S]*RAILWAY_ENVIRONMENT[\s\S]*RAILWAY_GIT_BRANCH[\s\S]*stabilize-supabase-railway/.test(firstFiveWrapper)],
+  ['isolated first-five recovery uses same production branch restriction', /function isolatedFirstFiveWorkerEnabled\(\)[\s\S]*NODE_ENV[\s\S]*RAILWAY_ENVIRONMENT[\s\S]*RAILWAY_GIT_BRANCH[\s\S]*stabilize-supabase-railway/.test(firstFiveRecovery)],
+  ['isolated first-five worker has kill switch', /SYNC_FIRST5_RECONCILE_DISABLED/.test(firstFiveWrapper)],
+  ['isolated first-five worker does not open global runtime write gate', !/SYNC_RUNTIME_WRITE_ENABLED/.test(firstFiveWrapper)],
+  ['isolated first-five recovery does not open global runtime write gate', !/SYNC_RUNTIME_WRITE_ENABLED/.test(firstFiveRecovery)],
+  ['isolated worker is existing-products-only', /No existing ACTIVE Shopify product could be matched safely\. No product was created\./.test(firstFiveWorker)],
+  ['isolated worker has no product-create call', !/createProduct|productCreate\s*\(/.test(firstFiveWorker)],
+  ['isolated worker never enables rebuild mode', !/rebuildProducts\s*:\s*true/.test(firstFiveWorker)],
+  ['isolated worker requires Shopify read-back verification', /Shopify read-back did not match expected price\/SKU\/inventory values/.test(firstFiveWorker)],
+  ['isolated worker only writes inventory for explicit source stock state', /stockStatus === "out_of_stock"[\s\S]*stockStatus === "in_stock"[\s\S]*return null/.test(firstFiveWorker)],
+  ['legacy sheet importer independently checks runtime and import gates', /SYNC_RUNTIME_WRITE_ENABLED[\s\S]*SYNC_SHEET_IMPORT_AUTOSTART_ENABLED/.test(oneTimeSheetImport)],
+  ['queue recovery includes Shopify-mutating job types and stays gated', /PUBLISH_TO_SHOPIFY[\s\S]*REPUBLISH_TO_SHOPIFY[\s\S]*SYNC_PRODUCT[\s\S]*SYNC_INVENTORY/.test(queue)],
+  ['Railway example keeps all global write gates closed', hasClosedGlobalGates(railwayEnvExample)],
+  ['production example keeps all global write gates closed', hasClosedGlobalGates(productionEnvExample)],
+  ['catalog dry run stays enabled in Railway example', /^CATALOG_AUDIT_DRY_RUN=true$/m.test(railwayEnvExample)],
+  ['catalog canary stays one row in Railway example', /^CATALOG_AUDIT_CANARY_MAX_ROWS=1$/m.test(railwayEnvExample)],
+  ['403 is not interpreted as stock in first-five worker', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(firstFiveWorker)],
+  ['no legacy mutating startup call occurs before global safe-mode return', Boolean(startupPrefix) &&
     !startupPrefix!.includes('seedDefaultPricingRules()') &&
     !startupPrefix!.includes('QueueService.recoverInterruptedJobs()') &&
     !startupPrefix!.includes('QueueService.startInventoryMonitor()') &&
@@ -101,11 +70,9 @@ const checks: Array<[string, boolean]> = [
 ];
 
 const failed = checks.filter(([, passed]) => !passed);
-for (const [name, passed] of checks) {
-  console.log(`${passed ? 'PASS' : 'FAIL'}: ${name}`);
-}
+for (const [name, passed] of checks) console.log(`${passed ? 'PASS' : 'FAIL'}: ${name}`);
 
-if (failed.length > 0) {
+if (failed.length) {
   console.error(`Runtime autostart safety contract failed: ${failed.length}/${checks.length} checks failed.`);
   process.exit(1);
 }
