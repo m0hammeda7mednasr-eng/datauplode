@@ -6,17 +6,6 @@ function enabled(name: string) {
   return String(process.env[name] || "").trim().toLowerCase() === "true";
 }
 
-function deployedRevision() {
-  return String(
-    process.env.RAILWAY_GIT_COMMIT_SHA ||
-      process.env.SOURCE_VERSION ||
-      process.env.GIT_COMMIT_SHA ||
-      "",
-  )
-    .trim()
-    .toLowerCase();
-}
-
 function isolatedFirstFiveWorkerEnabled() {
   const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
   const isRailway = Boolean(
@@ -28,24 +17,12 @@ function isolatedFirstFiveWorkerEnabled() {
   )
     .trim()
     .replace(/^refs\/heads\//, "");
-  const revision = deployedRevision();
-  const authorizedRevision = String(
-    process.env.SYNC_FIRST5_RECONCILE_REVISION || "",
-  )
-    .trim()
-    .toLowerCase();
-  const revisionAuthorized =
-    /^[0-9a-f]{40}$/.test(revision) &&
-    /^[0-9a-f]{40}$/.test(authorizedRevision) &&
-    revision === authorizedRevision;
 
   return (
     nodeEnv === "production" &&
     isRailway &&
     branch === "stabilize-supabase-railway" &&
-    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
     enabled("SYNC_FIRST5_RECONCILE_ENABLED") &&
-    revisionAuthorized &&
     !enabled("SYNC_FIRST5_RECONCILE_DISABLED")
   );
 }
@@ -63,7 +40,7 @@ function readResult(value: string | null | undefined) {
 export async function prepareSheet1ReconcileDeploymentTakeover() {
   if (!isolatedFirstFiveWorkerEnabled()) {
     console.log(
-      "[sheet1-reconcile] deployment takeover skipped: requires Railway production branch, runtime write gate, explicit first-five gate, and exact authorized deployed revision",
+      "[sheet1-reconcile] deployment takeover skipped: isolated first-five worker is not enabled for this Railway production branch",
     );
     return;
   }
@@ -92,13 +69,13 @@ export async function prepareSheet1ReconcileDeploymentTakeover() {
           stage: "deployment_takeover",
           interruptedByRedeploy: true,
           takeoverAt: takeoverAt.toISOString(),
-          note: "A newer explicitly authorized Railway production process took ownership. Resume only from verified row ledger and Shopify read-back.",
+          note: "A newer Railway production process took ownership. The isolated first-five worker resumes from the verified-row ledger and Shopify read-back.",
         }),
       },
     });
   }
 
   console.warn(
-    `[sheet1-reconcile] marked ${running.length} interrupted running marker(s) for explicitly authorized first-five deployment takeover`,
+    `[sheet1-reconcile] marked ${running.length} interrupted running marker(s) for isolated first-five deployment takeover`,
   );
 }
