@@ -17,106 +17,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: stabilize-supabase-railway
-      - name: Patch flattened default-variant size handling
+      - name: Fix flattened-size TypeScript inference
         shell: bash
         run: |
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-          import re
-
           p = Path('src/server/firstFiveSheetsReconcile.ts')
           s = p.read_text(encoding='utf-8')
-          original = s
-
-          if 'function explicitTitleSizeToken' not in s:
-              marker = 'function optionKey(values: Record<string, string>) {'
-              assert marker in s, 'optionKey marker missing'
-              helper = '''function explicitTitleSizeToken(value: unknown): string | null {
-            const title = clean(value);
-            const match = title.match(/\\s-\\sSize\\s+(.+)$/i);
-            if (!match) return null;
-            const parsed = normalizeSizeToken(match[1]);
-            return parsed && parsed !== "ONE" ? parsed : null;
-          }
-
-          '''
-              s = s.replace(marker, helper + marker, 1)
-
-          if 'staleFlattenedOneSku' not in s:
-              pattern = re.compile(
-                  r'(    if \(result\?\.status !== "verified" \|\| result\?\.readbackVerified !== true\) continue;\n)'
-                  r'(    for \(const row of Array\.isArray\(result\?\.rows\) \? result\.rows : \[\]\) \{)'
-              )
-              replacement = r'''\1    const explicitSize = explicitTitleSizeToken(result?.shopifyTitle);
-            const staleFlattenedOneSku = Boolean(
-              explicitSize && /-ONE-(?:\\d+(?:\\.\\d+)?)$/i.test(String(result?.expectedSku || "")),
-            );
-            if (staleFlattenedOneSku) continue;
-          \2'''
-              s, count = pattern.subn(replacement, s, count=1)
-              assert count == 1, f'verified-ledger patch count={count}'
-
-          if 'const singleDefaultVariant =' not in s:
-              pattern = re.compile(
-                  r'  const mapped = product\.variants\.map\(\(current: any\) => \(\{\n'
-                  r'    current,\n'
-                  r'    source: matchSourceVariant\(current, sourceVariants\),\n'
-                  r'  \}\)\);'
-              )
-              replacement = '''  const singleDefaultVariant =
-            product.variants.length === 1 &&
-            Object.keys(shopifyOptions(product.variants[0])).length === 0;
-          const titleSizeToken = singleDefaultVariant
-            ? explicitTitleSizeToken(product.title)
-            : null;
-
-          const mapped = product.variants.map((current: any) => {
-            if (singleDefaultVariant && titleSizeToken) {
-              const sizeMatches = sourceVariants.filter((variant) => {
-                const source = sourceOptions(variant);
-                return normalizeSizeToken(source.size || variant?.size || "") === titleSizeToken;
-              });
-              if (sizeMatches.length === 1) {
-                return { current, source: sizeMatches[0], forcedSizeToken: titleSizeToken };
-              }
-              if (sourceVariants.length === 1) {
-                return { current, source: sourceVariants[0], forcedSizeToken: titleSizeToken };
-              }
-              return { current, source: null, forcedSizeToken: titleSizeToken };
-            }
-            return {
-              current,
-              source: matchSourceVariant(current, sourceVariants),
-              forcedSizeToken: null,
-            };
-          });'''
-              s, count = pattern.subn(replacement, s, count=1)
-              assert count == 1, f'variant-mapping patch count={count}'
-
-          if 'entry.forcedSizeToken ||' not in s:
-              old = '      sizeToken: normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),'
-              new = '''      sizeToken:
-                entry.forcedSizeToken ||
-                normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),'''
-              assert old in s, 'canonical size line missing'
-              s = s.replace(old, new, 1)
-
-          assert s != original, 'hotfix made no changes'
-          assert 'function explicitTitleSizeToken' in s
-          assert 'staleFlattenedOneSku' in s
-          assert 'const singleDefaultVariant =' in s
-          assert 'entry.forcedSizeToken ||' in s
+          old = 'normalizeSizeToken(source.size || variant?.size || "") === titleSizeToken'
+          new = 'normalizeSizeToken(source.size || (variant as any)?.size || "") === titleSizeToken'
+          assert old in s, 'expected flattened-size expression not found'
+          s = s.replace(old, new, 1)
+          assert new in s
           p.write_text(s, encoding='utf-8')
           PY
           git diff --check
           git diff -- src/server/firstFiveSheetsReconcile.ts
-      - name: Commit hotfix
+      - name: Commit TypeScript fix
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
           git add src/server/firstFiveSheetsReconcile.ts
-          git commit -m 'Fix flattened Shopify size mapping in first-five worker'
+          git commit -m 'Fix flattened size variant typing'
           git push origin HEAD:stabilize-supabase-railway
