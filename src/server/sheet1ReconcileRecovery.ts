@@ -2,6 +2,17 @@ import { prisma } from "./db.js";
 
 const MARKER_TYPE = "ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1";
 
+function enabled(name: string) {
+  return String(process.env[name] || "").trim().toLowerCase() === "true";
+}
+
+function firstFiveReconcileWritesEnabled() {
+  return (
+    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
+    enabled("SYNC_FIRST5_RECONCILE_ENABLED")
+  );
+}
+
 function readResult(value: string | null | undefined) {
   if (!value) return {};
   try {
@@ -13,6 +24,13 @@ function readResult(value: string | null | undefined) {
 }
 
 export async function prepareSheet1ReconcileDeploymentTakeover() {
+  if (!firstFiveReconcileWritesEnabled()) {
+    console.log(
+      "[sheet1-reconcile] deployment takeover blocked while broad reconcile gates are closed",
+    );
+    return;
+  }
+
   const running = await prisma.syncJob.findMany({
     where: {
       type: MARKER_TYPE,
