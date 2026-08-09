@@ -1,4 +1,4 @@
-name: Hotfix First5 Flattened Size Mapping
+name: Hotfix First5 Queue Throughput
 
 on:
   push:
@@ -17,58 +17,72 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: stabilize-supabase-railway
-      - name: Force explicit title size for flattened single variant
+      - name: Skip same-pass retries for blocked sources and defer Next lane
         shell: bash
         run: |
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-          worker = Path('src/server/firstFiveSheetsReconcile.ts')
-          s = worker.read_text(encoding='utf-8')
-          old = '''  const singleDefaultVariant =
-            product.variants.length === 1 &&
-            Object.keys(shopifyOptions(product.variants[0])).length === 0;
-          const titleSizeToken = singleDefaultVariant
-            ? explicitTitleSizeToken(product.title)
-            : null;
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
 
-          const mapped = product.variants.map((current: any) => {
-            if (singleDefaultVariant && titleSizeToken) {'''
-          new = '''  const singleVariant = product.variants.length === 1;
-          const titleSizeToken = singleVariant
-            ? explicitTitleSizeToken(product.title)
-            : null;
-          if (singleVariant && /\\s-\\sSize\\s+/i.test(clean(product.title)) && !titleSizeToken) {
-            throw new Error("Single-variant Shopify product has an explicit title size that could not be normalized safely");
+          old_return = '''  return groups;
           }
 
-          const mapped = product.variants.map((current: any) => {
-            if (singleVariant && titleSizeToken) {'''
-          assert old in s, 'flattened single-variant mapping block not found'
-          s = s.replace(old, new, 1)
-          assert 'const singleVariant = product.variants.length === 1;' in s
-          assert 'if (singleVariant && titleSizeToken)' in s
-          assert 'explicit title size that could not be normalized safely' in s
-          worker.write_text(s, encoding='utf-8')
+          function readJson'''
+          new_return = '''  return groups.sort((left, right) => {
+            const leftNext = /(?:^|\\.)next\\.(?:ae|co\\.uk|us)$/i.test((() => {
+              try { return new URL(left.url).hostname; } catch { return ""; }
+            })());
+            const rightNext = /(?:^|\\.)next\\.(?:ae|co\\.uk|us)$/i.test((() => {
+              try { return new URL(right.url).hostname; } catch { return ""; }
+            })());
+            return Number(leftNext) - Number(rightNext);
+          });
+          }
 
-          safety = Path('scripts/first5-reconcile-revision-safety-contract.ts')
-          t = safety.read_text(encoding='utf-8')
-          t = t.replace(
-              "['single default variant uses explicit title-size mapping', /const singleDefaultVariant =[\\s\\S]*titleSizeToken[\\s\\S]*sizeMatches/.test(worker)],",
-              "['single flattened variant uses explicit title-size mapping', /const singleVariant = product\\.variants\\.length === 1;[\\s\\S]*titleSizeToken[\\s\\S]*sizeMatches/.test(worker)],\n  ['single variant with an unparseable explicit title size fails closed', /explicit title size that could not be normalized safely/.test(worker)],",
-          )
-          assert 'single flattened variant uses explicit title-size mapping' in t
-          assert 'unparseable explicit title size fails closed' in t
-          safety.write_text(t, encoding='utf-8')
+          function readJson'''
+          assert old_return in s, 'buildGroups return marker not found'
+          s = s.replace(old_return, new_return, 1)
+
+          old_catch = '''    } catch (error: any) {
+                lastError = clean(error?.message || error).slice(0, 3000);
+                console.warn("[first5-reconcile] group attempt failed", {
+                  url: group.url,
+                  rows: resultRows(group),
+                  attempt: attempt + 1,
+                  error: lastError,
+                });
+              }
+            }'''
+          new_catch = '''    } catch (error: any) {
+                lastError = clean(error?.message || error).slice(0, 3000);
+                const blockedSource = /(?:HTTP\\s*403|blocked automated server access|access denied|security verification|cloudflare)/i.test(lastError);
+                console.warn("[first5-reconcile] group attempt failed", {
+                  url: group.url,
+                  rows: resultRows(group),
+                  attempt: attempt + 1,
+                  blockedSource,
+                  error: lastError,
+                });
+                if (blockedSource) break;
+              }
+            }'''
+          assert old_catch in s, 'processWithRetries catch block not found'
+          s = s.replace(old_catch, new_catch, 1)
+
+          assert 'return Number(leftNext) - Number(rightNext);' in s
+          assert 'if (blockedSource) break;' in s
+          p.write_text(s, encoding='utf-8')
           PY
           git diff --check
-          git diff -- src/server/firstFiveSheetsReconcile.ts scripts/first5-reconcile-revision-safety-contract.ts
-      - name: Commit mapping hardening
+          git diff -- src/server/firstFiveSheetsReconcile.ts
+      - name: Commit throughput hotfix
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
-          git add src/server/firstFiveSheetsReconcile.ts scripts/first5-reconcile-revision-safety-contract.ts
-          git commit -m 'Harden flattened single-variant size mapping'
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m 'Skip blocked source retries and defer Next lane'
           git push origin HEAD:stabilize-supabase-railway
