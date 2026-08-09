@@ -8,6 +8,8 @@ Code under validation includes:
 - fail-closed handling for unparseable explicit title sizes
 - stale -ONE- SKU reprocessing
 - Shopify mutation read-back
+- blocked-source 403 fast-skip within the current pass
+- Next lane deferred behind other supported suppliers for throughput
 
-Validation target: hardened flattened-size mapping after live W90031 ONE-SKU observation.
+Validation target: hardened product correctness plus first-five queue throughput.
 No runtime behavior is defined by this file.
