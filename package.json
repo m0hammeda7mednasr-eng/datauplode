@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "env:check": "tsx scripts/check-env.ts",
     "safety:production": "tsx scripts/production-safety-contract.ts",
+    "test:sheet-sync": "tsx scripts/google-sheet-sync-safety-contract.ts",
     "smoke:production": "tsx scripts/production-smoke.ts",
     "shopify:audit-existing": "tsx scripts/shopify-existing-product-audit.ts",
     "canary:readback": "tsx scripts/shopify-canary-readback.ts",

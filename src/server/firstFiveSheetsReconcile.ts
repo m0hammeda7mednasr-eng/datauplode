@@ -331,6 +331,22 @@ function brandCode(url: string) {
   return "SRC";
 }
 
+function sourceVendor(url: string) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes("next.")) return "Next";
+    if (host.includes("hm.com")) return "H&M";
+    if (host.includes("maxfashion")) return "Max";
+    if (host.includes("shein")) return "SHEIN";
+    if (host.includes("centrepoint")) return "Centrepoint";
+  } catch {}
+  return "";
+}
+
+function shopifySearchValue(value: unknown) {
+  return `"${clean(value).replace(/["\\]/g, " ").slice(0, 140)}"`;
+}
+
 function extractUrlProductCode(url: string) {
   try {
     const parsed = new URL(url);
@@ -595,9 +611,17 @@ async function findShopifyProduct(
   }
 
   const code = compact(productCode);
-  const searchTerms = [code, compact(fresh?.source?.productId), clean(fresh.title)]
-    .filter(Boolean)
-    .slice(0, 3);
+  const vendor = sourceVendor(row.normalizedUrl);
+  const freshTitle = clean(fresh.title);
+  const sourceIdentifiers = [
+    compact(fresh?.source?.productId),
+    ...(fresh.variants || []).flatMap((variant: any) => [
+      compact(variant?.sku),
+      compact(variant?.sourceVariantId),
+    ]),
+  ]
+    .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
+    .slice(0, 8);
   const query = `
     query FirstFiveFind($query: String!) {
       products(first: 20, query: $query) {
@@ -605,6 +629,7 @@ async function findShopifyProduct(
           id
           title
           handle
+          vendor
           status
           variants(first: 250) {
             nodes {
@@ -623,21 +648,59 @@ async function findShopifyProduct(
   `;
 
   const found = new Map<string, any>();
-  for (const term of searchTerms) {
-    const safe = clean(term).replace(/["\\]/g, " ").slice(0, 120);
-    if (!safe) continue;
-    const queryText = `status:active AND ${safe}`;
+  const vendorFilter = vendor ? `vendor:${shopifySearchValue(vendor)} AND ` : "";
+  const queryTexts: Array<{ label: string; queryText: string }> = [];
+  if (freshTitle) {
+    queryTexts.push({
+      label: `title:${freshTitle}`,
+      queryText: `${vendorFilter}title:${shopifySearchValue(freshTitle)}`,
+    });
+    if (vendorFilter) {
+      queryTexts.push({
+        label: `title-any-vendor:${freshTitle}`,
+        queryText: `title:${shopifySearchValue(freshTitle)}`,
+      });
+    }
+  }
+  for (const identifier of sourceIdentifiers) {
+    queryTexts.push({
+      label: `sku:${identifier}`,
+      queryText: `${vendorFilter}sku:${identifier}*`,
+    });
+    if (vendorFilter) {
+      queryTexts.push({
+        label: `sku-any-vendor:${identifier}`,
+        queryText: `sku:${identifier}*`,
+      });
+    }
+  }
+  if (code) {
+    queryTexts.push({
+      label: `code:${code}`,
+      queryText: `${vendorFilter}${shopifySearchValue(code)}`,
+    });
+    if (vendorFilter) {
+      queryTexts.push({
+        label: `code-any-vendor:${code}`,
+        queryText: shopifySearchValue(code),
+      });
+    }
+  }
+
+  for (const request of queryTexts) {
     try {
-      const data: any = await client.request(query, { query: queryText });
+      const data: any = await client.request(query, { query: request.queryText });
       for (const product of data?.products?.nodes || []) {
-        if (product?.id && product.status === "ACTIVE") {
+        if (product?.id) {
           found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
         }
       }
     } catch (error) {
-      console.warn("[first5-reconcile] Shopify search term failed", { term: safe, error: clean((error as any)?.message || error) });
+      console.warn("[first5-reconcile] Shopify search term failed", {
+        term: request.label,
+        error: clean((error as any)?.message || error),
+      });
     }
-    if (found.size === 1 && term !== fresh.title) break;
   }
 
   const candidates = [...found.values()];
@@ -648,18 +711,55 @@ async function findShopifyProduct(
     .map((product) => {
       let score = 0;
       const productText = compact(`${product.title} ${product.handle}`);
+      const candidateVendor = clean(product.vendor).toLowerCase();
+      const expectedVendor = vendor.toLowerCase();
+      const candidateSkus = product.variants
+        .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
+        .filter(Boolean);
+      const exactExistingSku = Boolean(
+        existingSku &&
+          product.variants.some(
+            (variant: any) =>
+              clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() ===
+              existingSku,
+          ),
+      );
+      const codeIdentity = Boolean(
+        code &&
+          (productText.includes(code) ||
+            candidateSkus.some((sku: string) => sku.includes(code))),
+      );
+      const sourceIdentity = sourceIdentifiers.some((identifier) =>
+        candidateSkus.some(
+          (sku: string) => sku.includes(identifier) || identifier.includes(sku),
+        ),
+      );
+      if (expectedVendor && candidateVendor === expectedVendor) score += 15;
+      if (freshTitle && clean(product.title).toLowerCase() === freshTitle.toLowerCase()) score += 50;
       if (code && productText.includes(code)) score += 30;
-      if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
-      if (code && product.variants.some((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku).includes(code))) score += 50;
-      score += Math.round(titleSimilarity(fresh.title, product.title) * 20);
-      return { product, score };
+      if (exactExistingSku) score += 100;
+      if (code && candidateSkus.some((sku: string) => sku.includes(code))) score += 50;
+      if (sourceIdentity) score += 90;
+      score += Math.round(titleSimilarity(fresh.title, product.title) * 30);
+      return {
+        product,
+        score,
+        identityMatch: exactExistingSku || codeIdentity || sourceIdentity,
+      };
     })
     .sort((a, b) => b.score - a.score);
 
-  if (scored.length === 1) {
+  if (scored.length === 1 && scored[0].score >= 30 && scored[0].identityMatch) {
     return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
   }
-  if (scored[0].score > scored[1].score && scored[0].score >= 20) {
+  if (scored.length === 1) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+  if (
+    scored[0].score > scored[1].score &&
+    scored[0].score >= 20 &&
+    scored[0].identityMatch
+  ) {
     return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
   }
   return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
@@ -677,6 +777,7 @@ async function reconcileGroup(
   client: ShopifyGraphqlClient,
   locationId: string,
   group: PlanGroup,
+  freshOverride?: NormalizedProduct,
 ): Promise<GroupResult> {
   if (group.multiplier === null) {
     return {
@@ -688,7 +789,7 @@ async function reconcileGroup(
     };
   }
 
-  const fresh = await scraperService.scrape(group.rows[0].url);
+  const fresh = freshOverride || (await scraperService.scrape(group.rows[0].url));
   const codeRaw = rawProductCode(group.url, fresh);
   if (!codeRaw) throw new Error("Could not determine a stable source product code");
   const productCode = formatProductCode(codeRaw);
@@ -729,6 +830,15 @@ async function reconcileGroup(
           optionValues: {},
         },
       ];
+
+  if (
+    fresh.raw?.repairedFlattenedNextVariants === true &&
+    product.variants.length < sourceVariants.length
+  ) {
+    throw new Error(
+      `Shopify variant structure is incomplete (${product.variants.length}/${sourceVariants.length}). A linked-product rebuild is required before price and inventory reconciliation.`,
+    );
+  }
 
   const singleVariant = product.variants.length === 1;
 const titleSizeToken = singleVariant
@@ -868,6 +978,48 @@ const mapped = product.variants.map((current: any) => {
   };
 }
 
+export async function reconcileExistingShopifyProductForImport(params: {
+  client: ShopifyGraphqlClient;
+  locationId: string;
+  url: string;
+  rowNumber: number;
+  multiplier: number;
+  collection?: string;
+  sheetId?: number;
+  sheetName?: string;
+  existingSku?: string;
+  fresh: NormalizedProduct;
+}) {
+  const normalizedUrl = canonicalizeUrl(params.url);
+  const sheet = {
+    name: "الورقة7",
+    gid: Number.isFinite(params.sheetId) ? Number(params.sheetId) : 93159589,
+    sheetId: Number.isFinite(params.sheetId) ? Number(params.sheetId) : 93159589,
+    columnCount: 4,
+  } as unknown as SheetConfig;
+  const row: SheetRow = {
+    sheet,
+    rowNumber: params.rowNumber,
+    url: params.url,
+    normalizedUrl,
+    multiplier: params.multiplier,
+    collection: clean(params.collection),
+    existingSku: clean(params.existingSku),
+  };
+
+  return reconcileGroup(
+    params.client,
+    params.locationId,
+    {
+      url: normalizedUrl,
+      rows: [row],
+      multiplier: params.multiplier,
+      conflictMultipliers: [],
+    },
+    params.fresh,
+  );
+}
+
 async function persistResult(result: GroupResult) {
   await prisma.importBatch.create({
     data: {
@@ -885,7 +1037,7 @@ async function persistResult(result: GroupResult) {
   });
 }
 
-function googleWriterConfigured() {
+export function googleWriterConfigured() {
   if (clean(process.env.GOOGLE_SHEETS_ACCESS_TOKEN)) return true;
   return Boolean(
     clean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) &&
@@ -940,16 +1092,36 @@ async function googleAccessToken() {
 
 async function writeVerifiedSkuToSheet(result: GroupResult) {
   if (result.status !== "verified" || !result.expectedSku || !result.readbackVerified) return 0;
-  const requests = result.rows.map((row) => ({
+  return writeSkuCellsToSheet(
+    result.rows.map((row) => ({
+      sheetId: row.sheetId,
+      rowNumber: row.rowNumber,
+      sku: result.expectedSku!,
+    })),
+  );
+}
+
+export async function writeSkuCellsToSheet(
+  updates: Array<{ sheetId: number; rowNumber: number; sku: string }>,
+) {
+  const requests = updates
+    .filter(
+      (entry) =>
+        Number.isSafeInteger(entry.sheetId) &&
+        Number.isSafeInteger(entry.rowNumber) &&
+        entry.rowNumber > 0 &&
+        clean(entry.sku),
+    )
+    .map((entry) => ({
     updateCells: {
       range: {
-        sheetId: row.sheetId,
-        startRowIndex: row.rowNumber - 1,
-        endRowIndex: row.rowNumber,
+        sheetId: entry.sheetId,
+        startRowIndex: entry.rowNumber - 1,
+        endRowIndex: entry.rowNumber,
         startColumnIndex: 3,
         endColumnIndex: 4,
       },
-      rows: [{ values: [{ userEnteredValue: { stringValue: result.expectedSku } }] }],
+      rows: [{ values: [{ userEnteredValue: { stringValue: clean(entry.sku) } }] }],
       fields: "userEnteredValue",
     },
   }));

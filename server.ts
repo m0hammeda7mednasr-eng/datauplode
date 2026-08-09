@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express, { type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -22,6 +22,11 @@ import { QueueService } from "./src/server/services/queue.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
 import { startOneTimeSheet1Reconcile } from "./src/server/oneTimeSheet1Reconcile.js";
 import { prepareSheet1ReconcileDeploymentTakeover } from "./src/server/sheet1ReconcileRecovery.js";
+import {
+  SHEET1_CATALOG_MARKER_TYPE,
+  sheet1CatalogAutoSyncEnabled,
+  startSheet1CatalogAutoSync,
+} from "./src/server/sheet1CatalogAutoSync.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,6 +35,7 @@ const startedAt = new Date();
 const SAFE_SHEET1_SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const SAFE_SHEET1_URL = `https://docs.google.com/spreadsheets/d/${SAFE_SHEET1_SPREADSHEET_ID}/edit?gid=0`;
 const SAFE_SHEET1_MARKER_TYPE = "ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1";
+const SHEET7_CATALOG_GID = "93159589";
 
 function normalizeOrigin(value?: string | null) {
   if (!value) return null;
@@ -127,6 +133,22 @@ function spreadsheetIdFromInput(value: unknown) {
   return match?.[1] || "";
 }
 
+function spreadsheetGidFromInput(value: unknown) {
+  const raw = String(value || "").trim();
+  if (!raw) return "0";
+  try {
+    const parsed = new URL(raw);
+    const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+    return parsed.searchParams.get("gid") || hashParams.get("gid") || "0";
+  } catch {
+    return "";
+  }
+}
+
+function sheet7CatalogWritesEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_SHEET7_CATALOG_ENABLED");
+}
+
 function parseJsonObject(value: string | null | undefined) {
   if (!value) return {} as Record<string, any>;
   try {
@@ -138,16 +160,22 @@ function parseJsonObject(value: string | null | undefined) {
 }
 
 async function safeSheet1WorkerSnapshot() {
-  const job = await prisma.syncJob.findFirst({
-    where: { type: SAFE_SHEET1_MARKER_TYPE },
+  const catalogJob = await prisma.syncJob.findFirst({
+    where: { type: SHEET1_CATALOG_MARKER_TYPE },
     orderBy: { createdAt: "desc" },
   });
+  const job =
+    catalogJob ||
+    (await prisma.syncJob.findFirst({
+      where: { type: SAFE_SHEET1_MARKER_TYPE },
+      orderBy: { createdAt: "desc" },
+    }));
   if (!job) {
     return {
-      running: true,
+      running: false,
       jobId: null,
-      status: "starting",
-      stage: "starting",
+      status: sheet1CatalogAutoSyncEnabled() ? "starting" : "blocked_by_configuration",
+      stage: sheet1CatalogAutoSyncEnabled() ? "starting" : "blocked_by_configuration",
       progress: 0,
       total: 0,
       verified: 0,
@@ -155,6 +183,11 @@ async function safeSheet1WorkerSnapshot() {
       missing: 0,
       ambiguous: 0,
       conflicts: 0,
+      sheetCellsWritten: 0,
+      sheetWritePending: 0,
+      cycle: 0,
+      lastRunAt: null,
+      issues: [],
     };
   }
 
@@ -165,17 +198,27 @@ async function safeSheet1WorkerSnapshot() {
     jobId: job.id,
     status: job.status,
     stage: result.stage || "starting",
-    progress: Number(result.batch ?? totals.attempted ?? 0) || 0,
-    total: Number(result.totalBatches ?? result.planGroups ?? 0) || 0,
-    verified: Number(totals.verified ?? result.verified ?? 0) || 0,
-    errors: Number(totals.errors ?? result.errors ?? 0) || 0,
+    progress: Number(result.candidateRows ?? result.batch ?? totals.attempted ?? 0) || 0,
+    total: Number(result.totalRows ?? result.totalBatches ?? result.planGroups ?? 0) || 0,
+    verified: Number(result.existingUpdated ?? totals.verified ?? result.verified ?? 0) || 0,
+    published: Number(result.published ?? 0) || 0,
+    errors: Number(result.failed ?? totals.errors ?? result.errors ?? 0) || 0,
     missing: Number(totals.missing ?? result.missingMappings ?? 0) || 0,
     ambiguous: Number(totals.ambiguous ?? result.ambiguous ?? 0) || 0,
     conflicts: Number(totals.conflicts ?? result.multiplierConflicts ?? 0) || 0,
+    sheetCellsWritten: Number(result.sheetCellsWritten ?? totals.sheetCells ?? 0) || 0,
+    sheetWritePending: Number(result.sheetWritePending ?? 0) || 0,
+    cycle: Number(result.cycle ?? result.pass ?? 0) || 0,
+    lastRunAt: result.lastRunAt || null,
+    issues: Array.isArray(result.issues) ? result.issues.slice(-50) : [],
   };
 }
 
-async function handleLegacySheet1Action(req: Request, res: Response) {
+async function handleLegacySheet1Action(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   const suppliedId = spreadsheetIdFromInput(req.body?.sheetUrl);
   if (suppliedId && suppliedId !== SAFE_SHEET1_SPREADSHEET_ID) {
     return res.status(400).json({
@@ -186,19 +229,43 @@ async function handleLegacySheet1Action(req: Request, res: Response) {
     });
   }
 
+  const suppliedGid = spreadsheetGidFromInput(req.body?.sheetUrl);
+  if (suppliedGid === SHEET7_CATALOG_GID) {
+    if (!sheet7CatalogWritesEnabled()) {
+      return res.status(423).json({
+        success: false,
+        safeMode: true,
+        code: "SHEET7_CATALOG_WRITE_GATE_DISABLED",
+        error:
+          "Sheet 7 catalog sync is configured but locked. Enable SYNC_RUNTIME_WRITE_ENABLED=true and SYNC_SHEET7_CATALOG_ENABLED=true only for the approved production run.",
+      });
+    }
+
+    return next();
+  }
+
+  if (suppliedGid && suppliedGid !== "0") {
+    return res.status(400).json({
+      success: false,
+      safeMode: true,
+      code: "UNSUPPORTED_SHEET_GID",
+      error: `This production control is not approved for gid=${suppliedGid}.`,
+    });
+  }
+
   const worker = await safeSheet1WorkerSnapshot();
   return res.json({
     success: true,
     safeMode: true,
-    mode: "continuous_existing_products_only",
-    createProducts: false,
+    mode: "automatic_update_existing_then_publish_missing",
+    createProducts: true,
     rebuildProducts: false,
     sheetUrl: SAFE_SHEET1_URL,
-    message: "Safe continuous Sheet 1 worker is active. Legacy bulk import was bypassed to prevent duplicate products.",
+    message: "Automatic Sheet 1 catalog worker updates existing products first, then publishes missing products with deterministic SKUs.",
     worker,
     summary: {
       total: worker.total,
-      published: 0,
+      published: worker.published || 0,
       syncedExisting: worker.verified,
       skipped: worker.missing + worker.ambiguous + worker.conflicts,
       failed: worker.errors,
@@ -332,6 +399,24 @@ async function startServer() {
   // through to the old bulk importer that previously created a duplicate.
   app.post("/api/imports/excel/process-sheet-link", handleLegacySheet1Action);
   app.post("/api/imports/excel/auto-sync/start", handleLegacySheet1Action);
+  app.get("/api/imports/excel/auto-sync/status", async (_req, res, next) => {
+    try {
+      const worker = await safeSheet1WorkerSnapshot();
+      res.json({
+        running: worker.running,
+        inProgress: worker.running && worker.stage !== "idle_monitoring",
+        sheetUrl: SAFE_SHEET1_URL,
+        lastRunAt: worker.lastRunAt,
+        lastError:
+          worker.status === "failed"
+            ? String(worker.issues.at(-1)?.error || "Sheet 1 catalog worker failed")
+            : null,
+        worker,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.use("/api", apiRouter);
 
@@ -392,6 +477,7 @@ async function startServer() {
     // starts after its delay and safely resumes from verified Sheet rows.
     void prepareSheet1ReconcileDeploymentTakeover().finally(() => {
       startOneTimeSheet1Reconcile(PORT);
+      startSheet1CatalogAutoSync();
     });
 
     if (!runtimeWritesEnabled()) {

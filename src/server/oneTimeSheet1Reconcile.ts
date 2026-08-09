@@ -40,6 +40,7 @@ function isolatedFirstFiveWorkerEnabled() {
     isRailway &&
     branch === "stabilize-supabase-railway" &&
     enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
+    !enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED") &&
     enabled("SYNC_FIRST5_RECONCILE_ENABLED") &&
     !enabled("SYNC_FIRST5_RECONCILE_DISABLED") &&
     revisionAuthorized()

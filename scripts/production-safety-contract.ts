@@ -20,6 +20,11 @@ const assertions: Array<[string, boolean]> = [
     "sheet import autostart default off",
     /SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false/.test(envExample),
   ],
+  [
+    "Sheet 1 catalog autostart defaults off and requires an exact revision",
+    /SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED=false/.test(envExample) &&
+      /SYNC_SHEET1_CATALOG_REVISION=/.test(envExample),
+  ],
   ["catalog writes default off", /CATALOG_AUDIT_WRITE_ENABLED=false/.test(envExample)],
   ["sheet writes default off", /CATALOG_AUDIT_SHEET_WRITE_ENABLED=false/.test(envExample)],
   ["canary defaults to one row", /CATALOG_AUDIT_CANARY_MAX_ROWS=1/.test(envExample)],
