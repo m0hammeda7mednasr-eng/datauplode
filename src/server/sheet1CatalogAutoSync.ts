@@ -278,64 +278,43 @@ async function runPhase(params: {
     ).map((batchRows) => ({ sheet, batchRows })),
   );
 
-  for (const window of chunks(work, concurrency)) {
-    const completed = await Promise.all(
-      window.map(async ({ sheet, batchRows }) => ({
-        sheet,
-        batchRows,
-        result: await processGoogleSheetBatch({
-          sheetUrl: sheetUrl(sheet),
-          rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
-          createManualReview: true,
-          processOnlyNewRows: false,
-          waitForPublishCompletion: true,
-          createMissingProducts: params.createMissingProducts,
-          mode: "auto_sync",
-        }),
-      })),
+  const applyCompleted = async ({
+    sheet,
+    batchRows,
+    result,
+  }: {
+    sheet: SheetConfig;
+    batchRows: CatalogRow[];
+    result: Awaited<ReturnType<typeof processGoogleSheetBatch>>;
+  }) => {
+    params.state.lastBatchId = result.batchId;
+    const batchByRow = new Map(
+      batchRows.map((entry) => [entry.row.rowNumber, entry] as const),
+    );
+    await writeSuccessfulSkus(
+      result.successful,
+      sheet,
+      batchByRow,
+      params.state,
     );
 
-    // Apply results and persist in one sequence so concurrent network work can
-    // never overwrite a newer progress snapshot with an older one.
-    for (const { sheet, batchRows, result } of completed) {
-      params.state.lastBatchId = result.batchId;
-      const batchByRow = new Map(
-        batchRows.map((entry) => [entry.row.rowNumber, entry] as const),
-      );
-      await writeSuccessfulSkus(
-        result.successful,
-        sheet,
-        batchByRow,
-        params.state,
-      );
-
-      for (const entry of result.successful) {
-        const original = batchByRow.get(entry.rowNumber);
-        if (!original) continue;
-        params.state.fingerprints[original.key] = original.fingerprint;
-        params.state.verifiedFingerprints[original.key] = original.fingerprint;
-        if (entry.action === "reconciled_existing" || entry.action === "synced_existing") {
-          params.state.existingUpdated += 1;
-        } else {
-          params.state.published += 1;
-        }
+    for (const entry of result.successful) {
+      const original = batchByRow.get(entry.rowNumber);
+      if (!original) continue;
+      params.state.fingerprints[original.key] = original.fingerprint;
+      params.state.verifiedFingerprints[original.key] = original.fingerprint;
+      if (entry.action === "reconciled_existing" || entry.action === "synced_existing") {
+        params.state.existingUpdated += 1;
+      } else {
+        params.state.published += 1;
       }
-      for (const entry of result.skipped) {
-        const original = batchByRow.get(entry.rowNumber);
-        if (entry.reason === "missing_product_deferred_for_publish_phase" && original) {
-          deferred.push(original);
-        } else {
-          params.state.skipped += 1;
-          params.state.issues.push({
-            stage: params.state.stage,
-            sheetId: sheet.sheetId,
-            sheetName: sheet.name,
-            ...entry,
-          });
-        }
-      }
-      for (const entry of result.failed) {
-        params.state.failed += 1;
+    }
+    for (const entry of result.skipped) {
+      const original = batchByRow.get(entry.rowNumber);
+      if (entry.reason === "missing_product_deferred_for_publish_phase" && original) {
+        deferred.push(original);
+      } else {
+        params.state.skipped += 1;
         params.state.issues.push({
           stage: params.state.stage,
           sheetId: sheet.sheetId,
@@ -343,8 +322,45 @@ async function runPhase(params: {
           ...entry,
         });
       }
-      params.state.issues = params.state.issues.slice(-200);
-      await persist(params.markerId, params.state);
+    }
+    for (const entry of result.failed) {
+      params.state.failed += 1;
+      params.state.issues.push({
+        stage: params.state.stage,
+        sheetId: sheet.sheetId,
+        sheetName: sheet.name,
+        ...entry,
+      });
+    }
+    params.state.issues = params.state.issues.slice(-200);
+    await persist(params.markerId, params.state);
+  };
+
+  for (const window of chunks(work, concurrency)) {
+    const pending = window.map(async ({ sheet, batchRows }) => ({
+      sheet,
+      batchRows,
+      result: await processGoogleSheetBatch({
+        sheetUrl: sheetUrl(sheet),
+        rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
+        createManualReview: true,
+        processOnlyNewRows: false,
+        waitForPublishCompletion: true,
+        createMissingProducts: params.createMissingProducts,
+        mode: "auto_sync",
+      }),
+    }));
+
+    // Apply each batch as soon as it completes, while keeping state writes
+    // sequential so a slow neighboring batch cannot delay fresh progress.
+    while (pending.length) {
+      const { index, value } = await Promise.race(
+        pending.map((promise, index) =>
+          promise.then((value) => ({ index, value })),
+        ),
+      );
+      pending.splice(index, 1);
+      await applyCompleted(value);
     }
     await sleep(500);
   }
