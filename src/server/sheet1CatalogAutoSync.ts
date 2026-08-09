@@ -261,22 +261,43 @@ async function runPhase(params: {
     Math.min(
       50,
       Number(process.env.SYNC_SHEET1_CATALOG_BATCH_SIZE || DEFAULT_BATCH_SIZE) ||
-        DEFAULT_BATCH_SIZE,
+      DEFAULT_BATCH_SIZE,
     ),
   );
+  const concurrency = Math.max(
+    1,
+    Math.min(
+      4,
+      Number(process.env.SYNC_SHEET1_CATALOG_CONCURRENCY || 3) || 3,
+    ),
+  );
+  const work = FIRST_EIGHT_CATALOG_SHEETS.flatMap((sheet) =>
+    chunks(
+      params.rows.filter((entry) => entry.sheet.gid === sheet.gid),
+      batchSize,
+    ).map((batchRows) => ({ sheet, batchRows })),
+  );
 
-  for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
-    const sheetRows = params.rows.filter((entry) => entry.sheet.gid === sheet.gid);
-    for (const batchRows of chunks(sheetRows, batchSize)) {
-      const result = await processGoogleSheetBatch({
-        sheetUrl: sheetUrl(sheet),
-        rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
-        createManualReview: true,
-        processOnlyNewRows: false,
-        waitForPublishCompletion: true,
-        createMissingProducts: params.createMissingProducts,
-        mode: "auto_sync",
-      });
+  for (const window of chunks(work, concurrency)) {
+    const completed = await Promise.all(
+      window.map(async ({ sheet, batchRows }) => ({
+        sheet,
+        batchRows,
+        result: await processGoogleSheetBatch({
+          sheetUrl: sheetUrl(sheet),
+          rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
+          createManualReview: true,
+          processOnlyNewRows: false,
+          waitForPublishCompletion: true,
+          createMissingProducts: params.createMissingProducts,
+          mode: "auto_sync",
+        }),
+      })),
+    );
+
+    // Apply results and persist in one sequence so concurrent network work can
+    // never overwrite a newer progress snapshot with an older one.
+    for (const { sheet, batchRows, result } of completed) {
       params.state.lastBatchId = result.batchId;
       const batchByRow = new Map(
         batchRows.map((entry) => [entry.row.rowNumber, entry] as const),
@@ -324,8 +345,8 @@ async function runPhase(params: {
       }
       params.state.issues = params.state.issues.slice(-200);
       await persist(params.markerId, params.state);
-      await sleep(500);
     }
+    await sleep(500);
   }
   return deferred;
 }
