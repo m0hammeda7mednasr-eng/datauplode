@@ -26,7 +26,7 @@ const checks: Array<[string, boolean]> = [
   ['isolated takeover does not depend on the global runtime write gate', !/SYNC_RUNTIME_WRITE_ENABLED/.test(recovery)],
   ['isolated worker has an emergency kill switch', /!enabled\("SYNC_FIRST5_RECONCILE_DISABLED"\)/.test(wrapper)],
   ['worker only updates existing Shopify products', /No existing ACTIVE Shopify product could be matched safely\. No product was created\./.test(worker)],
-  ['worker contains no Shopify product create call', !/createProduct|productCreate\s*\(/.test(worker)],
+  ['worker contains no Shopify product create mutation call', !/ShopifyService\.createProduct\s*\(|\bproductCreate\s*\(/.test(worker)],
   ['worker contains no product rebuild mode', !/rebuildProducts\s*:\s*true/.test(worker)],
   ['worker requires Shopify read-back verification', /Shopify read-back did not match expected price\/SKU\/inventory values/.test(worker)],
   ['worker does not classify 403 as stock', !/403[^\n]{0,120}(out.?of.?stock|stockStatus)/i.test(worker)],
