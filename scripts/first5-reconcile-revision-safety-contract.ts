@@ -15,25 +15,34 @@ function isolatedRailwayGate(source: string) {
     /RAILWAY_PUBLIC_DOMAIN/.test(source) &&
     /RAILWAY_GIT_BRANCH/.test(source) &&
     /stabilize-supabase-railway/.test(source) &&
+    /SYNC_RUNTIME_WRITE_ENABLED/.test(source) &&
     /SYNC_FIRST5_RECONCILE_ENABLED/.test(source) &&
-    /SYNC_FIRST5_RECONCILE_DISABLED/.test(source)
+    /SYNC_FIRST5_RECONCILE_DISABLED/.test(source) &&
+    /SYNC_FIRST5_RECONCILE_REVISION/.test(source) &&
+    /RAILWAY_GIT_COMMIT_SHA/.test(source)
   );
 }
 
 const checks: Array<[string, boolean]> = [
-  ['first-five worker is isolated to Railway production branch and dedicated gate', isolatedRailwayGate(wrapper)],
-  ['deployment takeover uses the same isolated Railway production gate', isolatedRailwayGate(recovery)],
+  ['first-five worker is isolated to Railway production branch and explicit write gates', isolatedRailwayGate(wrapper)],
+  ['deployment takeover uses the same Railway production authorization', isolatedRailwayGate(recovery)],
   ['worker blocks before startup outside the isolated gate', /if \(!isolatedFirstFiveWorkerEnabled\(\)\)[\s\S]*return;[\s\S]*startFirstFiveSheetsReconcile\(port\)/.test(wrapper)],
   ['takeover blocks before SyncJob access outside the isolated gate', /if \(!isolatedFirstFiveWorkerEnabled\(\)\)[\s\S]*return;[\s\S]*prisma\.syncJob\.findMany/.test(recovery)],
-  ['worker does not depend on global runtime write authorization', !/SYNC_RUNTIME_WRITE_ENABLED/.test(wrapper)],
-  ['takeover does not depend on global runtime write authorization', !/SYNC_RUNTIME_WRITE_ENABLED/.test(recovery)],
-  ['worker does not depend on per-commit revision authorization', !/SYNC_FIRST5_RECONCILE_REVISION/.test(wrapper)],
-  ['takeover does not depend on per-commit revision authorization', !/SYNC_FIRST5_RECONCILE_REVISION/.test(recovery)],
+  ['worker requires global runtime write authorization', /enabled\("SYNC_RUNTIME_WRITE_ENABLED"\)/.test(wrapper)],
+  ['takeover requires global runtime write authorization', /enabled\("SYNC_RUNTIME_WRITE_ENABLED"\)/.test(recovery)],
+  ['worker requires per-commit revision authorization', /SYNC_FIRST5_RECONCILE_REVISION/.test(wrapper) && /revisionAuthorized\(\)/.test(wrapper)],
+  ['takeover requires per-commit revision authorization', /SYNC_FIRST5_RECONCILE_REVISION/.test(recovery) && /revisionAuthorized\(\)/.test(recovery)],
+  ['worker validates full 40-character expected and deployed revisions', (wrapper.match(/\^\[0-9a-f\]\{40\}\$/gi) || []).length >= 2],
+  ['takeover validates full 40-character expected and deployed revisions', (recovery.match(/\^\[0-9a-f\]\{40\}\$/gi) || []).length >= 2],
+  ['worker requires exact expected/deployed revision equality', /expected\.toLowerCase\(\) === actual\.toLowerCase\(\)/.test(wrapper)],
+  ['takeover requires exact expected/deployed revision equality', /expected\.toLowerCase\(\) === actual\.toLowerCase\(\)/.test(recovery)],
   ['worker explicitly requires dedicated first-five authorization', /enabled\("SYNC_FIRST5_RECONCILE_ENABLED"\)/.test(wrapper)],
   ['takeover explicitly requires dedicated first-five authorization', /enabled\("SYNC_FIRST5_RECONCILE_ENABLED"\)/.test(recovery)],
   ['isolated worker retains an emergency kill switch', /!enabled\("SYNC_FIRST5_RECONCILE_DISABLED"\)/.test(wrapper)],
   ['Railway template keeps dedicated first-five gate closed by default', /^SYNC_FIRST5_RECONCILE_ENABLED=false$/m.test(railwayEnv)],
   ['production template keeps dedicated first-five gate closed by default', /^SYNC_FIRST5_RECONCILE_ENABLED=false$/m.test(productionEnv)],
+  ['Railway template keeps per-commit revision authorization blank by default', /^SYNC_FIRST5_RECONCILE_REVISION=$/m.test(railwayEnv)],
+  ['production template keeps per-commit revision authorization blank by default', /^SYNC_FIRST5_RECONCILE_REVISION=$/m.test(productionEnv)],
   ['worker only updates existing Shopify products', /No existing ACTIVE Shopify product could be matched safely\. No product was created\./.test(worker)],
   ['worker contains no Shopify product create mutation call', !/ShopifyService\.createProduct\s*\(|\bproductCreate\s*\(/.test(worker)],
   ['worker contains no product rebuild mode', !/rebuildProducts\s*:\s*true/.test(worker)],
