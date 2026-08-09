@@ -751,6 +751,33 @@ async function findShopifyProduct(
     })
     .sort((a, b) => b.score - a.score);
 
+  if (fresh.raw?.repairedFlattenedNextVariants === true) {
+    const flattenedMatches = scored.filter(({ product, identityMatch }) => {
+      if (!identityMatch || product.variants.length !== 1) return false;
+      const hasSelectedSizeTitle = /\s-\sSize\s+/i.test(clean(product.title));
+      const hasDefaultOption = product.variants.some((variant: any) =>
+        (variant?.selectedOptions || []).some((option: any) =>
+          /^default(?:\s+\d+|\s+title)?$/i.test(clean(option?.value)),
+        ),
+      );
+      return hasSelectedSizeTitle && hasDefaultOption;
+    });
+    if (flattenedMatches.length === 1) {
+      return {
+        product: flattenedMatches[0].product,
+        ambiguous: false,
+        matchSource: "shopify_fallback" as const,
+      };
+    }
+    if (flattenedMatches.length > 1) {
+      return {
+        product: null,
+        ambiguous: true,
+        matchSource: "shopify_fallback" as const,
+      };
+    }
+  }
+
   if (scored.length === 1 && scored[0].score >= 30 && scored[0].identityMatch) {
     return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
   }

@@ -1684,6 +1684,21 @@ export function inferNextBabySizes(text: string): string[] {
     .map((size) => size.label);
 }
 
+function advertisedCurrencyPriceRanges(value: unknown) {
+  const text = cleanText(value);
+  if (!text) return [] as Array<{ min: number; max: number }>;
+  const currency =
+    "(?:AED|SAR|QAR|KWD|BHD|OMR|EGP|GBP|EUR|USD|TRY|TL|£|€|\\$|د\\s*\\.?\\s*إ|ج\\s*\\.?\\s*م)";
+  const amount = "\\d[\\d,.]*(?:\\s?\\d{3})*(?:[.,]\\d{1,2})?";
+  const pattern = new RegExp(
+    `${currency}\\s*${amount}\\s*(?:-|–|—|to)\\s*(?:${currency}\\s*)?${amount}`,
+    "gi",
+  );
+  return [...text.matchAll(pattern)]
+    .map((match) => parsePriceRange(match[0]))
+    .filter((range) => range.min > 0 && range.max >= range.min);
+}
+
 function buildInferredNextVariants(
   productCode: string | undefined,
   sizes: string[],
@@ -7904,9 +7919,16 @@ function extractNextProductFromHtml(
         priceText,
     );
   const price = priceValues.length ? Math.min(...priceValues) : fallbackPrice;
-  const maxPrice = priceValues.length
+  const structuredMaxPrice = priceValues.length
     ? Math.max(...priceValues)
     : priceRangeFromDom.max || price;
+  const advertisedRange = advertisedCurrencyPriceRanges($("body").text()).find(
+    (range) => Math.abs(range.min - price) < 0.01 && range.max >= price,
+  );
+  const maxPrice = Math.max(
+    structuredMaxPrice,
+    advertisedRange?.max || price,
+  );
   const currency = detectCurrency(
     offerList[0]?.priceCurrency || priceText,
     defaultNextCurrencyForUrl(url) || offerList[0]?.priceCurrency || "USD",

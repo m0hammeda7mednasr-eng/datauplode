@@ -13,7 +13,7 @@ import {
 const SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit?gid=0`;
 export const SHEET1_CATALOG_MARKER_TYPE =
-  "SHEET1_CATALOG_AUTO_SYNC:2026-08-09-v3-unlinked-next-rebuild";
+  "SHEET1_CATALOG_AUTO_SYNC:2026-08-09-v4-flattened-duplicate-priority";
 const START_DELAY_MS = 20_000;
 const DEFAULT_POLL_MS = 30 * 60 * 1000;
 const DEFAULT_BATCH_SIZE = 20;
