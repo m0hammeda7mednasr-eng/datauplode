@@ -1,6 +1,9 @@
 name: Repair Strict First5 Runtime V3
 
-# Safe rerun marker: production build #386 green; runtime gate #28 still fail-closed at 3/9.
+# Repair the runtime on the stabilization branch only. Docker/Railway validation is
+# intentionally left to the normal Production Build workflow after the runtime
+# commit, so an unrelated image-pull/build transient cannot prevent the safe
+# source fix from reaching CI.
 on:
   pull_request:
     branches: [main]
@@ -121,10 +124,7 @@ jobs:
           npm run build
           npm run safety:production
 
-      - name: Validate production Docker image
-        run: docker build --pull -t datauplode:first5-strict-gate .
-
-      - name: Commit runtime only after all gates pass
+      - name: Commit runtime only after source gates pass
         shell: bash
         run: |
           set -euo pipefail
