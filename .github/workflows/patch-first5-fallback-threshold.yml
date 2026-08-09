@@ -1,5 +1,6 @@
 name: Patch First5 Fallback Threshold
 
+# Re-run marker: validate and apply fail-closed Shopify fallback matching.
 on:
   push:
     branches: [stabilize-supabase-railway]
