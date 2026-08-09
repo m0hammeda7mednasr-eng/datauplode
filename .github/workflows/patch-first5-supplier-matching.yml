@@ -1,0 +1,200 @@
+name: Patch First5 Supplier Matching
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/patch-first5-supplier-matching.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout production branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 1
+      - name: Patch safe supplier-aware matching
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+          original = s
+
+          marker = 'function extractUrlProductCode(url: string) {'
+          if 'function sourceVendor(' not in s:
+              assert marker in s
+              s = s.replace(marker, '''function sourceVendor(url: string) {
+            try {
+              const host = new URL(url).hostname.toLowerCase();
+              if (host.includes("next.")) return "Next";
+              if (host.includes("hm.com")) return "H&M";
+              if (host.includes("maxfashion")) return "Max";
+              if (host.includes("shein")) return "SHEIN";
+              if (host.includes("centrepoint")) return "Centrepoint";
+            } catch {}
+            return "";
+          }
+
+          function shopifySearchValue(value: unknown) {
+            return `"${clean(value).replace(/["\\\\]/g, " ").slice(0, 140)}"`;
+          }
+
+          ''' + marker, 1)
+
+          if 'const vendor = sourceVendor(row.normalizedUrl);' not in s:
+              old = '''  const code = compact(productCode);
+          const searchTerms = [code, compact(fresh?.source?.productId), clean(fresh.title)]
+            .filter(Boolean)
+            .slice(0, 3);'''
+              new = '''  const code = compact(productCode);
+          const vendor = sourceVendor(row.normalizedUrl);
+          const freshTitle = clean(fresh.title);
+          const sourceIdentifiers = [
+            compact(fresh?.source?.productId),
+            ...(fresh.variants || []).flatMap((variant: any) => [
+              compact(variant?.sku),
+              compact(variant?.sourceVariantId),
+            ]),
+          ].filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index).slice(0, 8);
+          const searchTerms = [code, ...sourceIdentifiers, freshTitle]
+            .filter(Boolean)
+            .filter((value, index, values) => values.indexOf(value) === index)
+            .slice(0, 10);'''
+              assert old in s, 'searchTerms block not found'
+              s = s.replace(old, new, 1)
+
+          # Add vendor to the Shopify FIND query only, not the product-state query.
+          find_marker = 'query FirstFiveFind($query: String!) {'
+          find_pos = s.find(find_marker)
+          assert find_pos >= 0
+          fields_pos = s.find('          status\n', find_pos)
+          vendor_pos = s.find('          vendor\n', find_pos, fields_pos + 200 if fields_pos >= 0 else find_pos + 1000)
+          if vendor_pos < 0:
+              assert fields_pos >= 0
+              s = s[:fields_pos] + '          vendor\n' + s[fields_pos:]
+
+          if 'const vendorFilter = vendor ?' not in s:
+              old = '''  const found = new Map<string, any>();
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            const queryText = `status:active AND ${safe}`;
+            try {
+              const data: any = await client.request(query, { query: queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") {
+                  found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                }
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", { term: safe, error: clean((error as any)?.message || error) });
+            }
+            if (found.size === 1 && term !== fresh.title) break;
+          }
+'''
+              new = '''  const found = new Map<string, any>();
+          const vendorFilter = vendor ? ` AND vendor:${shopifySearchValue(vendor)}` : "";
+          const queryTexts: Array<{ label: string; queryText: string }> = [];
+          if (freshTitle) {
+            queryTexts.push({
+              label: `title:${freshTitle}`,
+              queryText: `status:active${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+            });
+          }
+          for (const identifier of sourceIdentifiers) {
+            queryTexts.push({
+              label: `sku:${identifier}`,
+              queryText: `status:active${vendorFilter} AND sku:${identifier}*`,
+            });
+          }
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            queryTexts.push({
+              label: `text:${safe}`,
+              queryText: `status:active${vendorFilter} AND ${shopifySearchValue(safe)}`,
+            });
+          }
+
+          for (const request of queryTexts) {
+            try {
+              const data: any = await client.request(query, { query: request.queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") {
+                  found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                }
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", {
+                term: request.label,
+                error: clean((error as any)?.message || error),
+              });
+            }
+          }
+'''
+              assert old in s, 'found loop not found'
+              s = s.replace(old, new, 1)
+
+          if 'const candidateVendor = clean(product.vendor).toLowerCase();' not in s:
+              old = '''      const productText = compact(`${product.title} ${product.handle}`);
+              if (code && productText.includes(code)) score += 30;
+              if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
+              if (code && product.variants.some((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku).includes(code))) score += 50;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 20);
+              return { product, score };'''
+              new = '''      const productText = compact(`${product.title} ${product.handle}`);
+              const candidateVendor = clean(product.vendor).toLowerCase();
+              const expectedVendor = vendor.toLowerCase();
+              const candidateSkus = product.variants.map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku)).filter(Boolean);
+              if (expectedVendor && candidateVendor === expectedVendor) score += 15;
+              if (freshTitle && clean(product.title).toLowerCase() === freshTitle.toLowerCase()) score += 50;
+              if (code && productText.includes(code)) score += 30;
+              if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
+              if (code && candidateSkus.some((sku: string) => sku.includes(code))) score += 50;
+              if (sourceIdentifiers.some((identifier) => candidateSkus.some((sku: string) => sku.includes(identifier) || identifier.includes(sku)))) score += 90;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 30);
+              return { product, score };'''
+              assert old in s, 'score block not found'
+              s = s.replace(old, new, 1)
+
+          old_single = '''  if (scored.length === 1) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }'''
+          if old_single in s:
+              s = s.replace(old_single, '''  if (scored.length === 1 && scored[0].score >= 30) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          if (scored.length === 1) {
+            return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+          }''', 1)
+
+          assert 'const vendorFilter = vendor ?' in s
+          assert 'sku:${identifier}*' in s
+          assert 'sourceIdentifiers.some' in s
+          assert 'scored[0].score >= 30' in s
+          if s != original:
+              p.write_text(s, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/server/firstFiveSheetsReconcile.ts
+      - name: Commit if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Supplier matching already patched; nothing to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m 'Improve supplier-aware Shopify matching'
+          git push origin HEAD:stabilize-supabase-railway
