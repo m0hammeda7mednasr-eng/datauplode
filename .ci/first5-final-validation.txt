@@ -4,8 +4,10 @@ Code under validation includes:
 - isolated first-five Railway worker gate
 - existing-products-only mutations
 - source-confirmed inventory handling
-- flattened Shopify title-size mapping
+- flattened single-variant Shopify title-size mapping
+- fail-closed handling for unparseable explicit title sizes
 - stale -ONE- SKU reprocessing
 - Shopify mutation read-back
 
+Validation target: hardened flattened-size mapping after live W90031 ONE-SKU observation.
 No runtime behavior is defined by this file.
