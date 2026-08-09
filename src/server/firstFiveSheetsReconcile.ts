@@ -289,6 +289,11 @@ async function loadPreviouslyVerifiedRows() {
     const payload: any = readJson(run.payloadJson);
     const result = payload?.result;
     if (result?.status !== "verified" || result?.readbackVerified !== true) continue;
+    const explicitSize = explicitTitleSizeToken(result?.shopifyTitle);
+  const staleFlattenedOneSku = Boolean(
+    explicitSize && /-ONE-(?:\d+(?:\.\d+)?)$/i.test(String(result?.expectedSku || "")),
+  );
+  if (staleFlattenedOneSku) continue;
     for (const row of Array.isArray(result?.rows) ? result.rows : []) {
       const sheetId = Number(row?.sheetId);
       const rowNumber = Number(row?.rowNumber);
@@ -440,6 +445,14 @@ function shopifyOptions(variant: any) {
     if (key && normalized && normalized !== "default title") output[key] = normalized;
   }
   return output;
+}
+
+function explicitTitleSizeToken(value: unknown): string | null {
+  const title = clean(value);
+  const match = title.match(/\s-\sSize\s+(.+)$/i);
+  if (!match) return null;
+  const parsed = normalizeSizeToken(match[1]);
+  return parsed && parsed !== "ONE" ? parsed : null;
 }
 
 function optionKey(values: Record<string, string>) {
@@ -709,10 +722,33 @@ async function reconcileGroup(
         },
       ];
 
-  const mapped = product.variants.map((current: any) => ({
+  const singleDefaultVariant =
+  product.variants.length === 1 &&
+  Object.keys(shopifyOptions(product.variants[0])).length === 0;
+const titleSizeToken = singleDefaultVariant
+  ? explicitTitleSizeToken(product.title)
+  : null;
+
+const mapped = product.variants.map((current: any) => {
+  if (singleDefaultVariant && titleSizeToken) {
+    const sizeMatches = sourceVariants.filter((variant) => {
+      const source = sourceOptions(variant);
+      return normalizeSizeToken(source.size || variant?.size || "") === titleSizeToken;
+    });
+    if (sizeMatches.length === 1) {
+      return { current, source: sizeMatches[0], forcedSizeToken: titleSizeToken };
+    }
+    if (sourceVariants.length === 1) {
+      return { current, source: sourceVariants[0], forcedSizeToken: titleSizeToken };
+    }
+    return { current, source: null, forcedSizeToken: titleSizeToken };
+  }
+  return {
     current,
     source: matchSourceVariant(current, sourceVariants),
-  }));
+    forcedSizeToken: null,
+  };
+});
   const unmapped = mapped.filter((entry: any) => !entry.source);
   if (unmapped.length) {
     throw new Error(`Could not map ${unmapped.length}/${mapped.length} Shopify variants to fresh source variants`);
@@ -721,7 +757,9 @@ async function reconcileGroup(
   const canonicalCandidates = mapped
     .map((entry: any) => ({
       ...entry,
-      sizeToken: normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),
+      sizeToken:
+      entry.forcedSizeToken ||
+      normalizeSizeToken(entry.source?.size || sourceOptions(entry.source).size || ""),
     }))
     .sort((a: any, b: any) => sizeRank(a.sizeToken) - sizeRank(b.sizeToken));
   const canonical = canonicalCandidates[0];
