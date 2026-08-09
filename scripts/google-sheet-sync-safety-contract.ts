@@ -14,6 +14,7 @@ import type { NormalizedProduct } from "../src/server/services/scraper.js";
 import {
   configuredScraperApiKeyCount,
   NextScraper,
+  scraperApiStatusExhaustsKey,
 } from "../src/server/services/scraper.js";
 import {
   FIRST_EIGHT_CATALOG_SHEETS,
@@ -63,6 +64,10 @@ const previousLegacyKey = process.env.SCRAPERAPI_KEY;
 process.env.SCRAPERAPI_KEYS = "dummy-one,dummy-two;dummy-three\ndummy-four";
 delete process.env.SCRAPERAPI_KEY;
 assert.equal(configuredScraperApiKeyCount(), 4, "four ScraperAPI keys must be recognized without exposing their values");
+assert.equal(scraperApiStatusExhaustsKey(429), true, "rate-limited ScraperAPI keys must cool down individually");
+assert.equal(scraperApiStatusExhaustsKey(402), true, "exhausted ScraperAPI keys must cool down individually");
+assert.equal(scraperApiStatusExhaustsKey(500), false, "URL-specific provider failures must not disable a healthy key");
+assert.equal(scraperApiStatusExhaustsKey(499), false, "client/URL failures must not pause the whole key pool");
 if (previousPool === undefined) delete process.env.SCRAPERAPI_KEYS;
 else process.env.SCRAPERAPI_KEYS = previousPool;
 if (previousLegacyKey === undefined) delete process.env.SCRAPERAPI_KEY;

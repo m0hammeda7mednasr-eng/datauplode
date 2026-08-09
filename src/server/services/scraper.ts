@@ -324,6 +324,10 @@ function scraperApiKeyIdentity(apiKey: string): string {
   return crypto.createHash("sha256").update(apiKey).digest("hex");
 }
 
+export function scraperApiStatusExhaustsKey(status: number): boolean {
+  return [401, 402, 403, 429].includes(Number(status));
+}
+
 function orderedAvailableScraperApiKeys(): string[] {
   const keys = configuredScraperApiKeys();
   if (!keys.length) return [];
@@ -339,7 +343,7 @@ function orderedAvailableScraperApiKeys(): string[] {
 }
 
 function coolDownScraperApiKey(apiKey: string, status?: number) {
-  const quotaOrAuthFailure = [401, 402, 403, 429].includes(Number(status));
+  const quotaOrAuthFailure = scraperApiStatusExhaustsKey(Number(status));
   const defaultMinutes = quotaOrAuthFailure ? 24 * 60 : 5;
   const cooldownEnv = quotaOrAuthFailure
     ? "SCRAPERAPI_EXHAUSTED_KEY_COOLDOWN_MINUTES"
@@ -413,6 +417,9 @@ function isProviderCoolingDown(provider: ManagedBypassProvider): boolean {
 }
 
 function noteProviderFailure(provider: ManagedBypassProvider) {
+  // ScraperAPI pools manage failures per key. A URL-specific failure across
+  // several keys must never pause the entire provider for every other product.
+  if (provider === "scraperapi" && configuredScraperApiKeyCount() > 1) return;
   const cooldownMinutes = Math.max(
     0,
     envNumber("SCRAPER_BYPASS_PROVIDER_COOLDOWN_MINUTES", 30),
@@ -609,7 +616,9 @@ async function fetchHtmlViaScraperApi(
     });
 
     if (response.status !== 200) {
-      coolDownScraperApiKey(apiKey, response.status);
+      if (scraperApiStatusExhaustsKey(response.status)) {
+        coolDownScraperApiKey(apiKey, response.status);
+      }
       throw new Error(`ScraperAPI HTTP ${response.status}`);
     }
 
@@ -656,7 +665,6 @@ async function fetchHtmlViaScraperApi(
         errors.push(`key ${keyIndex + 1}: ${error?.message || String(error)}`);
       }
     }
-    coolDownScraperApiKey(apiKey);
   }
 
   throw new Error(`ScraperAPI failed (${errors.join("; ")})`);
