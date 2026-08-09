@@ -1,21 +1,44 @@
 import { startFirstFiveSheetsReconcile } from "./firstFiveSheetsReconcile.js";
 
-/**
- * Production bootstrap for the continuous first-five-sheet reconcile worker.
- *
- * The worker itself is already hard-locked to Railway production and its
- * implementation is existing-products-only: it never creates or rebuilds a
- * Shopify product. Individual source/mapping failures are persisted and
- * retried on later passes instead of stopping the catalog.
- *
- * This bootstrap intentionally does not depend on an external per-revision
- * environment flag. That flag left the verified worker deployed but dormant
- * after every new commit. The merchant has explicitly enabled the production
- * sync workflow, so deployment of this branch is now the activation event.
- */
+function enabled(name: string) {
+  return String(process.env[name] || "").trim().toLowerCase() === "true";
+}
+
+function normalizedRevision(value: string | undefined) {
+  const revision = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(revision) ? revision : "";
+}
+
+function deployedRevision() {
+  return normalizedRevision(
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+      process.env.SOURCE_VERSION ||
+      process.env.GIT_COMMIT_SHA,
+  );
+}
+
+function firstFiveReconcileWritesEnabled() {
+  const deployed = deployedRevision();
+  const authorized = normalizedRevision(process.env.SYNC_FIRST5_RECONCILE_REVISION);
+  return (
+    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
+    enabled("SYNC_FIRST5_RECONCILE_ENABLED") &&
+    Boolean(deployed) &&
+    Boolean(authorized) &&
+    deployed === authorized
+  );
+}
+
 export function startOneTimeSheet1Reconcile(port: number) {
+  if (!firstFiveReconcileWritesEnabled()) {
+    console.log(
+      "[first5-reconcile] blocked: runtime gate, dedicated gate, and an exact SYNC_FIRST5_RECONCILE_REVISION matching the deployed 40-char revision are required after CI, dry run, canary, and read-back succeed",
+    );
+    return;
+  }
+
   console.warn(
-    "[first5-reconcile] Railway production bootstrap enabled: starting continuous existing-product reconcile for the first five sheets",
+    "[first5-reconcile] explicit broad existing-product reconcile gate ENABLED for the exact deployed revision",
   );
   startFirstFiveSheetsReconcile(port);
 }
