@@ -195,11 +195,20 @@ async function persist(markerId: string, state: WorkerState) {
 async function writeSuccessfulSkus(
   successful: Array<{ rowNumber: number; sku?: string }>,
   sheet: SheetConfig,
+  rowsByNumber: Map<number, CatalogRow>,
   state: WorkerState,
 ) {
   for (const entry of successful) {
     if (!entry.sku) continue;
-    state.pendingSkuWrites[rowKey(sheet, entry.rowNumber)] = entry.sku;
+    const key = rowKey(sheet, entry.rowNumber);
+    const existingSku = String(rowsByNumber.get(entry.rowNumber)?.row.sku || "")
+      .trim()
+      .toUpperCase();
+    if (existingSku === entry.sku.trim().toUpperCase()) {
+      delete state.pendingSkuWrites[key];
+    } else {
+      state.pendingSkuWrites[key] = entry.sku;
+    }
   }
   state.sheetWritePending = Object.keys(state.pendingSkuWrites).length;
   await flushPendingSkuWrites(state);
@@ -269,9 +278,14 @@ async function runPhase(params: {
         mode: "auto_sync",
       });
       params.state.lastBatchId = result.batchId;
-      await writeSuccessfulSkus(result.successful, sheet, params.state);
       const batchByRow = new Map(
         batchRows.map((entry) => [entry.row.rowNumber, entry] as const),
+      );
+      await writeSuccessfulSkus(
+        result.successful,
+        sheet,
+        batchByRow,
+        params.state,
       );
 
       for (const entry of result.successful) {
@@ -330,6 +344,13 @@ async function loadTargetRows(state: WorkerState) {
     for (const row of data.rows) {
       const key = rowKey(sheet, row.rowNumber);
       const fingerprint = googleSheetRowFingerprint(row);
+      const pendingSku = state.pendingSkuWrites[key];
+      if (
+        pendingSku &&
+        String(row.sku || "").trim().toUpperCase() === pendingSku.trim().toUpperCase()
+      ) {
+        delete state.pendingSkuWrites[key];
+      }
       const issueOnce = (reason: string) => {
         if (state.fingerprints[key] === fingerprint.hash) return;
         state.failed += 1;
@@ -393,12 +414,21 @@ async function loadTargetRows(state: WorkerState) {
     }
     if (!advanced) break;
   }
+  state.sheetWritePending = Object.keys(state.pendingSkuWrites).length;
   return selected;
 }
 
 async function runCycle(markerId: string, state: WorkerState) {
   await flushPendingSkuWrites(state);
   const targetRows = await loadTargetRows(state);
+  state.verifiedFingerprints = Object.fromEntries(
+    targetRows
+      .filter(
+        (entry) =>
+          state.verifiedFingerprints[entry.key] === entry.fingerprint,
+      )
+      .map((entry) => [entry.key, entry.fingerprint]),
+  );
   const candidates = targetRows.filter(
     (entry) => state.fingerprints[entry.key] !== entry.fingerprint,
   );
