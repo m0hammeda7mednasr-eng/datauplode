@@ -71,7 +71,6 @@ jobs:
               assert old in s, 'searchTerms block not found'
               s = s.replace(old, new, 1)
 
-          # Add vendor to the Shopify FIND query only, not the product-state query.
           find_marker = 'query FirstFiveFind($query: String!) {'
           find_pos = s.find(find_marker)
           assert find_pos >= 0
@@ -198,3 +197,4 @@ jobs:
           git add src/server/firstFiveSheetsReconcile.ts
           git commit -m 'Improve supplier-aware Shopify matching'
           git push origin HEAD:stabilize-supabase-railway
+          # triggered after workflow registration
