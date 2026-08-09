@@ -722,15 +722,16 @@ async function reconcileGroup(
         },
       ];
 
-  const singleDefaultVariant =
-  product.variants.length === 1 &&
-  Object.keys(shopifyOptions(product.variants[0])).length === 0;
-const titleSizeToken = singleDefaultVariant
+  const singleVariant = product.variants.length === 1;
+const titleSizeToken = singleVariant
   ? explicitTitleSizeToken(product.title)
   : null;
+if (singleVariant && /\s-\sSize\s+/i.test(clean(product.title)) && !titleSizeToken) {
+  throw new Error("Single-variant Shopify product has an explicit title size that could not be normalized safely");
+}
 
 const mapped = product.variants.map((current: any) => {
-  if (singleDefaultVariant && titleSizeToken) {
+  if (singleVariant && titleSizeToken) {
     const sizeMatches = sourceVariants.filter((variant) => {
       const source = sourceOptions(variant);
       return normalizeSizeToken(source.size || (variant as any)?.size || "") === titleSizeToken;
