@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
 
+# Retry marker: 2026-08-09 strict runtime repair after gate #15
 jobs:
   repair-test-commit:
     runs-on: ubuntu-latest
