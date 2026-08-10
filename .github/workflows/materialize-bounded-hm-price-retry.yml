@@ -1,0 +1,78 @@
+name: Materialize bounded H&M price recovery
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/materialize-bounded-hm-price-retry.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bound H&M recovery retry to one attempt per row fingerprint
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          worker = Path('src/server/sheet1CatalogAutoSync.ts')
+          text = worker.read_text()
+
+          old = '''  verifiedFingerprints: Record<string, string>;\n  totalRows: number;'''
+          new = '''  verifiedFingerprints: Record<string, string>;\n  recoveryRetryFingerprints: Record<string, string>;\n  totalRows: number;'''
+          if old not in text:
+              raise SystemExit('WorkerState anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    verifiedFingerprints,\n    totalRows: 0,'''
+          new = '''    verifiedFingerprints,\n    recoveryRetryFingerprints:\n      previous?.recoveryRetryFingerprints && typeof previous.recoveryRetryFingerprints === "object"\n        ? previous.recoveryRetryFingerprints\n        : {},\n    totalRows: 0,'''
+          if old not in text:
+              raise SystemExit('initialState anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''      if (processedButUnverified(state, entry)) {\n        if (retryableProcessedKeys.has(entry.key)) {\n          delete state.fingerprints[entry.key];\n          delete state.verifiedFingerprints[entry.key];\n        } else {\n          continue;\n        }\n      }'''
+          new = '''      if (processedButUnverified(state, entry)) {\n        if (\n          retryableProcessedKeys.has(entry.key) &&\n          state.recoveryRetryFingerprints[entry.key] !== entry.fingerprint\n        ) {\n          state.recoveryRetryFingerprints[entry.key] = entry.fingerprint;\n          delete state.fingerprints[entry.key];\n          delete state.verifiedFingerprints[entry.key];\n        } else {\n          continue;\n        }\n      }'''
+          if old not in text:
+              raise SystemExit('retry selection anchor not found')
+          text = text.replace(old, new, 1)
+          worker.write_text(text)
+
+          contract = Path('scripts/google-sheet-sync-safety-contract.ts')
+          c = contract.read_text()
+          old = '''assert.match(\n  catalogWorkerSource,\n  /retryableProcessedKeys\\.has\\(entry\\.key\\)[\\s\\S]*delete state\\.fingerprints\\[entry\\.key\\]/,\n  "retryable processed rows must clear their fingerprint so the worker can re-verify them",\n);'''
+          new = '''assert.match(\n  catalogWorkerSource,\n  /retryableProcessedKeys\\.has\\(entry\\.key\\)[\\s\\S]*recoveryRetryFingerprints\\[entry\\.key\\] !== entry\\.fingerprint[\\s\\S]*recoveryRetryFingerprints\\[entry\\.key\\] = entry\\.fingerprint[\\s\\S]*delete state\\.fingerprints\\[entry\\.key\\]/,\n  "retryable H&M price-invalid rows must be retried at most once per row fingerprint",\n);'''
+          if old not in c:
+              raise SystemExit('safety contract anchor not found')
+          c = c.replace(old, new, 1)
+          contract.write_text(c)
+          PY
+
+      - name: Validate patch
+        run: |
+          git diff --check
+          npx tsx scripts/google-sheet-sync-safety-contract.ts
+
+      - name: Commit bounded recovery source
+        run: |
+          if git diff --quiet -- src/server/sheet1CatalogAutoSync.ts scripts/google-sheet-sync-safety-contract.ts; then
+            echo "No source changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server/sheet1CatalogAutoSync.ts scripts/google-sheet-sync-safety-contract.ts
+          git commit -m "Bound H&M price recovery retries"
+          git push origin HEAD:stabilize-supabase-railway
