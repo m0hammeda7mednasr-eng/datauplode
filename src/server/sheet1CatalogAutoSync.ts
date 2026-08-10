@@ -55,6 +55,7 @@ type WorkerState = {
   sheetWritePending: number;
   pendingSkuWrites: Record<string, string>;
   hmPriceRetryFingerprints: Record<string, string>;
+  blockedHostRetryFingerprints: Record<string, string>;
   lastBatchId: string | null;
   lastRunAt: string | null;
   issues: Array<Record<string, unknown>>;
@@ -171,12 +172,20 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
     typeof previous.hmPriceRetryFingerprints === "object"
       ? previous.hmPriceRetryFingerprints
       : {};
+  const blockedHostRetryFingerprints =
+    previous?.blockedHostRetryFingerprints &&
+    typeof previous.blockedHostRetryFingerprints === "object"
+      ? previous.blockedHostRetryFingerprints
+      : {};
   for (const issue of Array.isArray(previous?.issues) ? previous.issues.slice(-200) : []) {
     const reason = String(issue.reason || issue.error || "");
     const host = normalizedUrlHost(issue.url);
     const sheetId = Number(issue.sheetId);
     const rowNumber = Number(issue.rowNumber);
     const key = `${sheetId}:${rowNumber}`;
+    const fastSkipMatch = reason.match(
+      /Source host\s+([a-z0-9.-]+)\s+skipped after\s+(\d+)\s+blocked scrape failures/i,
+    );
     if (
       /Product source price is invalid/i.test(reason) &&
       host.includes("hm.com") &&
@@ -185,6 +194,15 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
       fingerprints[key]
     ) {
       hmPriceRetryFingerprints[key] = fingerprints[key];
+    }
+    if (
+      (isBlockedSourceReason(reason) || fastSkipMatch) &&
+      !host.includes("hm.com") &&
+      Number.isSafeInteger(sheetId) &&
+      Number.isSafeInteger(rowNumber) &&
+      fingerprints[key]
+    ) {
+      blockedHostRetryFingerprints[key] = fingerprints[key];
     }
   }
   return {
@@ -208,6 +226,7 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
         ? previous.pendingSkuWrites
         : {},
     hmPriceRetryFingerprints,
+    blockedHostRetryFingerprints,
     lastBatchId: previous?.lastBatchId || null,
     lastRunAt: previous?.lastRunAt || null,
     issues: Array.isArray(previous?.issues) ? previous.issues.slice(-200) : [],
@@ -247,6 +266,14 @@ function hmPriceRetryAttempted(state: WorkerState, entry: CatalogRow) {
 
 function markHmPriceRetryAttempt(state: WorkerState, entry: CatalogRow) {
   state.hmPriceRetryFingerprints[entry.key] = entry.fingerprint;
+}
+
+function blockedHostRetryAttempted(state: WorkerState, entry: CatalogRow) {
+  return state.blockedHostRetryFingerprints[entry.key] === entry.fingerprint;
+}
+
+function markBlockedHostRetryAttempt(state: WorkerState, entry: CatalogRow) {
+  state.blockedHostRetryFingerprints[entry.key] = entry.fingerprint;
 }
 
 function retryableProcessedIssueKeysFromRecentIssues(state: WorkerState) {
@@ -342,6 +369,19 @@ function hmPriceRetryRowsPerCycleLimit() {
     Math.min(
       100,
       Number.isFinite(configured) ? Math.floor(configured) : 10,
+    ),
+  );
+}
+
+function blockedHostRetryRowsPerCycleLimit() {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_BLOCKED_HOST_RETRY_ROWS_PER_CYCLE || 20,
+  );
+  return Math.max(
+    0,
+    Math.min(
+      200,
+      Number.isFinite(configured) ? Math.floor(configured) : 20,
     ),
   );
 }
@@ -747,6 +787,8 @@ async function loadTargetRows(state: WorkerState) {
   const cursors = new Map<number, number>();
   const hmPriceRetryLimit = hmPriceRetryRowsPerCycleLimit();
   let hmPriceRetriesSelected = 0;
+  const blockedHostRetryLimit = blockedHostRetryRowsPerCycleLimit();
+  let blockedHostRetriesSelected = 0;
   const retryableProcessedKeys = retryableProcessedIssueKeysFromRecentIssues(state);
   const retryableDbKeys = await retryableHmPriceIssueKeysFromDatabase(
     state,
@@ -764,9 +806,10 @@ async function loadTargetRows(state: WorkerState) {
       cursors.set(sheet.gid, cursor + 1);
       if (processedButUnverified(state, entry)) {
         const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
+        const host = normalizedUrlHost(normalizedUrl);
         const hmPriceRetryEntry =
           retryableProcessedKeys.has(entry.key) &&
-          normalizedUrlHost(normalizedUrl).includes("hm.com");
+          host.includes("hm.com");
         if (
           hmPriceRetryEntry &&
           !hmPriceRetryAttempted(state, entry) &&
@@ -774,6 +817,16 @@ async function loadTargetRows(state: WorkerState) {
         ) {
           hmPriceRetriesSelected += 1;
           markHmPriceRetryAttempt(state, entry);
+          delete state.fingerprints[entry.key];
+          delete state.verifiedFingerprints[entry.key];
+        } else if (
+          host &&
+          !host.includes("hm.com") &&
+          !blockedHostRetryAttempted(state, entry) &&
+          blockedHostRetriesSelected < blockedHostRetryLimit
+        ) {
+          blockedHostRetriesSelected += 1;
+          markBlockedHostRetryAttempt(state, entry);
           delete state.fingerprints[entry.key];
           delete state.verifiedFingerprints[entry.key];
         } else {

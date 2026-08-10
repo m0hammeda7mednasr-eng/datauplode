@@ -138,6 +138,21 @@ assert.match(
   "H&M price-invalid recovery must be capped per worker cycle so it cannot monopolize catalog progress",
 );
 assert.match(
+  catalogWorkerSource,
+  /blockedHostRetryFingerprints/,
+  "blocked-source recovery attempts must be persisted by row fingerprint",
+);
+assert.match(
+  catalogWorkerSource,
+  /SYNC_SHEET1_CATALOG_BLOCKED_HOST_RETRY_ROWS_PER_CYCLE[\s\S]*blockedHostRetriesSelected[\s\S]*blockedHostRetriesSelected < blockedHostRetryLimit/,
+  "blocked-source recovery must be capped per worker cycle so blocked hosts cannot monopolize catalog progress",
+);
+assert.match(
+  catalogWorkerSource,
+  /markBlockedHostRetryAttempt\(state, entry\)[\s\S]*delete state\.fingerprints\[entry\.key\]/,
+  "blocked-source rows must clear their fingerprint only after recording the bounded retry attempt",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",

@@ -49,6 +49,7 @@ Checked on 2026-08-11 01:47 Africa/Cairo.
 - `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=5` is enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
 - The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
 - Blocked-host fast-skip now resets a host after a non-blocked row-level failure, so variant/data validation errors (for example unsafe Next variant structure) do not keep the whole source host closed.
+- Previously failed blocked-source rows can now be re-verified through a bounded fingerprint-tracked recovery path, capped by `SYNC_SHEET1_CATALOG_BLOCKED_HOST_RETRY_ROWS_PER_CYCLE` (default 20).
 - Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.
 - H&M rows that previously failed with `Product source price is invalid` are now eligible for a narrow re-verification retry; the normal price validation still prevents publishing if the source price is not valid.
 - H&M price-validation recovery is now bounded by row fingerprint so an unrecovered H&M row is retried once for that exact sheet state, then fails closed again until the row changes.
