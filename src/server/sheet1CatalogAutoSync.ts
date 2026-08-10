@@ -1033,6 +1033,59 @@ async function runContinuousWorker() {
   }
 }
 
+async function persistedCanaryReadbackReady() {
+  const recentCanaries = await prisma.importBatch.findMany({
+    where: { target: "catalog_audit", status: "COMPLETED" },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { payloadJson: true },
+  });
+
+  for (const run of recentCanaries) {
+    let payload: any = {};
+    try {
+      payload = JSON.parse(run.payloadJson || "{}");
+    } catch {
+      continue;
+    }
+
+    const summary = payload?.summary || {};
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+    const provenance =
+      payload?.provenance && typeof payload.provenance === "object"
+        ? payload.provenance
+        : {};
+    const verifiedResults = results.filter(
+      (result: any) =>
+        result?.status === "verified" &&
+        result?.readbackVerified === true &&
+        /^gid:\/\/shopify\/Product\/\d+$/.test(
+          String(result?.shopifyProductId || "").trim(),
+        ),
+    );
+    const shopifyProductId = String(
+      verifiedResults[0]?.shopifyProductId || "",
+    ).trim();
+
+    if (
+      summary.dryRun === false &&
+      summary.writeSheet !== true &&
+      Number(summary.uniqueProductsProcessed || 0) === 1 &&
+      Number(summary.verified || 0) === 1 &&
+      Number(summary.missing || 0) === 0 &&
+      Number(summary.ambiguous || 0) === 0 &&
+      Number(summary.errors || 0) === 0 &&
+      verifiedResults.length === 1 &&
+      Boolean(String(provenance?.dryRunBatchId || "").trim()) &&
+      String(provenance?.shopifyProductId || "").trim() === shopifyProductId
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function startSheet1CatalogAutoSync() {
   if (!sheet1CatalogAutoSyncEnabled()) {
     console.log(
@@ -1043,11 +1096,20 @@ export function startSheet1CatalogAutoSync() {
   }
   if (started) return;
   started = true;
-  console.warn(
-    "[sheet1-catalog] first-eight-sheet worker ENABLED: 5000 unique rows, update existing first, publish verified missing products, deterministic SKU writeback",
-  );
   setTimeout(() => {
-    void runContinuousWorker().catch((error) => {
+    void (async () => {
+      const canaryReadbackReady = await persistedCanaryReadbackReady();
+      if (!canaryReadbackReady) {
+        console.error(
+          "[sheet1-catalog] broad worker blocked: no persisted successful one-product canary with Shopify read-back provenance",
+        );
+        return;
+      }
+      console.warn(
+        "[sheet1-catalog] first-eight-sheet worker ENABLED after persisted one-product canary read-back: 5000 unique rows, update existing first, publish verified missing products, deterministic SKU writeback",
+      );
+      await runContinuousWorker();
+    })().catch((error) => {
       console.error("[sheet1-catalog] fatal worker error", error);
     });
   }, START_DELAY_MS);
