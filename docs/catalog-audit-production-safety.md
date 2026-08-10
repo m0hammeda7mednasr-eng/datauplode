@@ -35,17 +35,17 @@ The server caps writes to `CATALOG_AUDIT_CANARY_MAX_ROWS`, with a hard maximum o
 
 ## Current first-eight sheet auto-sync note
 
-Checked on 2026-08-11 01:27 Africa/Cairo.
+Checked on 2026-08-11 01:47 Africa/Cairo.
 
-- Latest Railway deployment `fb34aa07-16d7-453d-a8ce-06977458502f` is successful.
-- The first-eight-sheet worker is running on revision `cd28855f55258ade9b3ab1b1cfc30727e8bf9bdc`.
+- Latest Railway deployment `a4e5fa96-b82b-4190-a9b9-c45caeef6103` is successful.
+- The first-eight-sheet worker is running on revision `d301219189fa71e22bda02e61658751a9c179996`.
 - Live target is capped at 5000 unique rows from the first eight configured Google Sheet tabs.
-- Current verified progress: 780 / 5000.
-- Current Shopify work split: 337 existing products updated, 443 missing products published.
-- Current unverified failures: 2762, mostly source-site blocks from Centrepoint, SHEIN, and Next, plus retryable H&M price-validation rows.
-- Recent blocked-host fast-skips: 144 rows failed closed after repeated scrape blocks (Centrepoint, Next, and SHEIN).
-- Current Google Sheet SKU writeback pending: 533 cells.
-- Google Sheet writeback is pending because Google writer credentials are not configured in Railway and the Google Drive connector is not connected in Codex.
+- Current verified progress: 788 / 5000.
+- Current Shopify work split: 338 existing products updated, 450 missing products published.
+- Current running marker is cycle 62 in `publish_missing_products` with no marker-level `lastError`.
+- Current safe/retryable candidate set is 3007 rows; this is not the 5000-row business target, because many older processed-but-unverified rows remain failed closed behind source-site blocks or non-retryable validation failures.
+- Historical unverified failures are mostly source-site blocks from Centrepoint, SHEIN, and Next; current H&M price-validation retries are no longer producing fresh `Product source price is invalid` issues in the active marker.
+- Current Google Sheet SKU writeback still cannot complete from Railway/Codex because Google writer credentials are not configured in Railway and the Google Drive connector is not connected in Codex.
 - `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=5` is enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
 - The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
 - Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.

@@ -447,6 +447,7 @@ async function runPhase(params: {
     params.state,
     blockedHostThreshold,
   );
+  const blockedHostRecoveryProbes = new Set<string>();
   const batchSize = Math.max(
     1,
     Math.min(
@@ -516,6 +517,8 @@ async function runPhase(params: {
       } else {
         params.state.published += 1;
       }
+      const host = original ? catalogRowHost(original) : "";
+      if (host) blockedHostCounts.set(host, 0);
     }
     for (const entry of result.skipped) {
       const original = batchByRow.get(entry.rowNumber);
@@ -571,7 +574,8 @@ async function runPhase(params: {
         if (
           blockedHostThreshold > 0 &&
           host &&
-          (blockedHostCounts.get(host) || 0) >= blockedHostThreshold
+          (blockedHostCounts.get(host) || 0) >= blockedHostThreshold &&
+          blockedHostRecoveryProbes.has(host)
         ) {
           fastFailed.push({
             rowNumber: entry.row.rowNumber,
@@ -580,6 +584,13 @@ async function runPhase(params: {
               `Source host ${host} skipped after ${blockedHostCounts.get(host)} blocked scrape failures in this worker phase; product was not published.`,
           });
         } else {
+          if (
+            blockedHostThreshold > 0 &&
+            host &&
+            (blockedHostCounts.get(host) || 0) >= blockedHostThreshold
+          ) {
+            blockedHostRecoveryProbes.add(host);
+          }
           activeRows.push(entry);
         }
       }

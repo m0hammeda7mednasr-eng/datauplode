@@ -84,6 +84,21 @@ assert.match(
 );
 assert.match(
   catalogWorkerSource,
+  /blockedHostRecoveryProbes/,
+  "blocked-host fast skip must keep a bounded per-host recovery probe set",
+);
+assert.match(
+  catalogWorkerSource,
+  /blockedHostRecoveryProbes\.has\(host\)[\s\S]*blockedHostRecoveryProbes\.add\(host\)/,
+  "blocked-host fast skip must allow one recovery probe before continuing to fast-skip that host",
+);
+assert.match(
+  catalogWorkerSource,
+  /blockedHostCounts\.set\(host, 0\)/,
+  "blocked-host fast skip must reset a host after a verified successful row",
+);
+assert.match(
+  catalogWorkerSource,
   /Source host\\s\+\(\[a-z0-9\.-\]\+\)\\s\+skipped after\\s\+\(\\d\+\)/,
   "blocked-host memory must only be seeded from explicit failed-closed source-host issues",
 );
