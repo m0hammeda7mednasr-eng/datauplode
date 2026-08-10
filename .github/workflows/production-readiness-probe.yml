@@ -21,11 +21,13 @@ jobs:
   readiness:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     env:
       READINESS_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
       READINESS_EXPECTED_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
       READINESS_RESPONSE_PATH: production-readiness.json
+      READINESS_MAX_ATTEMPTS: '12'
+      READINESS_RETRY_SECONDS: '20'
 
     steps:
       - name: Checkout requested revision
@@ -58,23 +60,35 @@ jobs:
           echo "Target host: $(node -e 'console.log(new URL(process.env.READINESS_BASE_URL).host)')"
           echo "Expected deployed revision: ${READINESS_EXPECTED_REVISION}"
 
-      - name: Fetch live readiness without writes
+      - name: Wait for exact Railway revision and verify readiness without writes
         shell: bash
         run: |
           set -euo pipefail
           ready_url="${READINESS_BASE_URL%/}/api/ready"
-          status="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
-            --output "${READINESS_RESPONSE_PATH}" \
-            --write-out '%{http_code}' \
-            "${ready_url}")"
-          echo "Readiness HTTP status: ${status}"
-          if [[ ! "${status}" =~ ^[0-9]{3}$ ]]; then
-            echo "Invalid HTTP status from Railway readiness endpoint." >&2
-            exit 2
-          fi
 
-      - name: Verify exact revision, Supabase binding and safe mode
-        run: node scripts/production-readiness-probe.mjs
+          for attempt in $(seq 1 "${READINESS_MAX_ATTEMPTS}"); do
+            echo "Readiness attempt ${attempt}/${READINESS_MAX_ATTEMPTS}"
+            rm -f "${READINESS_RESPONSE_PATH}"
+
+            status="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
+              --output "${READINESS_RESPONSE_PATH}" \
+              --write-out '%{http_code}' \
+              "${ready_url}" || true)"
+            echo "Readiness HTTP status: ${status:-<curl-error>}"
+
+            if [[ "${status}" =~ ^[0-9]{3}$ ]] && node scripts/production-readiness-probe.mjs; then
+              echo "Exact Railway revision is live and production readiness passed."
+              exit 0
+            fi
+
+            if [[ "${attempt}" -eq "${READINESS_MAX_ATTEMPTS}" ]]; then
+              echo "Production readiness did not converge after ${READINESS_MAX_ATTEMPTS} read-only attempts." >&2
+              exit 2
+            fi
+
+            echo "Railway may still be deploying the expected revision; retrying in ${READINESS_RETRY_SECONDS}s."
+            sleep "${READINESS_RETRY_SECONDS}"
+          done
 
       - name: Publish readiness summary
         if: always()
@@ -87,6 +101,7 @@ jobs:
             echo "- Endpoint: \`/api/ready\`"
             echo "- Expected deployed revision: \`${READINESS_EXPECTED_REVISION}\`"
             echo "- Exact Railway revision required: \`true\`"
+            echo "- Bounded deploy-lag retries: \`${READINESS_MAX_ATTEMPTS} x ${READINESS_RETRY_SECONDS}s\`"
             echo "- Supabase target + pinned project match required: \`true\`"
             echo "- Runtime/catalog/job-recovery write gates must remain closed: \`true\`"
             echo "- Queue must be clean before Dry Run: \`true\`"
