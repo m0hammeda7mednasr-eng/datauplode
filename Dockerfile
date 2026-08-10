@@ -23,10 +23,12 @@ RUN npx playwright install --with-deps chromium
 COPY . .
 
 # Fail closed for production: materialize the strict existing-product matcher
-# inside the image, verify its safety contract, then build the exact artifact.
+# inside the image, verify its safety contract, TypeScript-check the patched runtime,
+# then build the exact artifact that Railway will execute.
 RUN node scripts/enforce-strict-first5-runtime.mjs \
     && node scripts/strict-first5-runtime-safety-contract.mjs \
     && npx prisma generate \
+    && npm run lint \
     && npm run build
 
 EXPOSE 3000
