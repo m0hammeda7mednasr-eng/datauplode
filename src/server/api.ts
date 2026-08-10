@@ -2262,6 +2262,42 @@ async function sleepMs(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function withImportScrapeTimeout<T>(
+  operation: Promise<T>,
+  url: string,
+): Promise<T> {
+  const timeoutMs = Math.max(
+    15000,
+    envNumber("EXCEL_IMPORT_SCRAPE_TIMEOUT_MS", 90 * 1000),
+  );
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              Object.assign(
+                new Error(
+                  `Timed out while scraping source product after ${timeoutMs}ms`,
+                ),
+                {
+                  statusCode: 408,
+                  code: "IMPORT_SCRAPE_TIMEOUT",
+                  url,
+                },
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function scrapeWithBridgeFallback(url: string) {
   try {
     return await scraperService.scrape(url);
@@ -2734,7 +2770,10 @@ export async function processGoogleSheetBatch(params: {
     }
 
     try {
-      const analyzed = await scrapeWithBridgeFallback(normalizedUrl);
+      const analyzed = await withImportScrapeTimeout(
+        scrapeWithBridgeFallback(normalizedUrl),
+        normalizedUrl,
+      );
       if (row.price !== null && PricingEngine.validatePrice(row.price)) {
         analyzed.price = row.price;
         analyzed.variants = analyzed.variants.map((variant: any) => ({
