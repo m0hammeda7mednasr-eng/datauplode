@@ -103,6 +103,7 @@ export function sheet1CatalogAutoSyncEnabled() {
     railway &&
     branch === "stabilize-supabase-railway" &&
     enabled("SYNC_RUNTIME_WRITE_ENABLED") &&
+    enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED") &&
     enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED") &&
     !enabled("SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED") &&
     revisionAuthorized()
@@ -131,6 +132,7 @@ function sheet1CatalogAutoSyncGateSnapshot() {
     branch,
     branchOk: branch === "stabilize-supabase-railway",
     runtimeWriteEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),
+    postCanaryBroadWritesEnabled: enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED"),
     autostartEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED"),
     killSwitchEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED"),
     expectedRevisionOk: /^[0-9a-f]{40}$/i.test(expected),
