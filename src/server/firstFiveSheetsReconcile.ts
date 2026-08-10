@@ -612,7 +612,6 @@ async function findShopifyProduct(
     }
   }
 
-  const code = compact(productCode);
   const vendor = sourceVendor(row.normalizedUrl);
   const freshTitle = clean(fresh.title);
   const sourceIdentifiers = [
@@ -623,175 +622,89 @@ async function findShopifyProduct(
     ]),
   ]
     .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
-    .slice(0, 8);
-  const query = `
-    query FirstFiveFind($query: String!) {
-      products(first: 20, query: $query) {
-        nodes {
-          id
-          title
-          handle
-          vendor
-          status
-          variants(first: 250) {
-            nodes {
-              id
-              title
-              price
-              sku
-              inventoryQuantity
-              selectedOptions { name value }
-              inventoryItem { id sku tracked }
-            }
+    .slice(0, 12);
+
+  if (!vendor || !freshTitle || sourceIdentifiers.length === 0) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+
+  const query = `query FirstFiveFindStrict($query: String!) {
+    products(first: 30, query: $query) {
+      nodes {
+        id title handle vendor status
+        variants(first: 250) {
+          nodes {
+            id title price sku inventoryQuantity
+            selectedOptions { name value }
+            inventoryItem { id sku tracked }
           }
         }
       }
     }
-  `;
-
+  }`;
+  const vendorFilter = `vendor:${shopifySearchValue(vendor)}`;
+  const requests = [
+    `status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+    ...sourceIdentifiers.map(
+      (identifier) => `status:active AND ${vendorFilter} AND sku:${identifier}*`,
+    ),
+  ];
   const found = new Map<string, any>();
-  const vendorFilter = vendor ? `vendor:${shopifySearchValue(vendor)} AND ` : "";
-  const queryTexts: Array<{ label: string; queryText: string }> = [];
-  if (freshTitle) {
-    queryTexts.push({
-      label: `title:${freshTitle}`,
-      queryText: `${vendorFilter}title:${shopifySearchValue(freshTitle)}`,
-    });
-    if (vendorFilter) {
-      queryTexts.push({
-        label: `title-any-vendor:${freshTitle}`,
-        queryText: `title:${shopifySearchValue(freshTitle)}`,
-      });
-    }
-  }
-  for (const identifier of sourceIdentifiers) {
-    queryTexts.push({
-      label: `sku:${identifier}`,
-      queryText: `${vendorFilter}sku:${identifier}*`,
-    });
-    if (vendorFilter) {
-      queryTexts.push({
-        label: `sku-any-vendor:${identifier}`,
-        queryText: `sku:${identifier}*`,
-      });
-    }
-  }
-  if (code) {
-    queryTexts.push({
-      label: `code:${code}`,
-      queryText: `${vendorFilter}${shopifySearchValue(code)}`,
-    });
-    if (vendorFilter) {
-      queryTexts.push({
-        label: `code-any-vendor:${code}`,
-        queryText: shopifySearchValue(code),
-      });
-    }
-  }
 
-  for (const request of queryTexts) {
+  for (const queryText of requests) {
     try {
-      const data: any = await client.request(query, { query: request.queryText });
+      const data: any = await client.request(query, { query: queryText });
       for (const product of data?.products?.nodes || []) {
-        if (product?.id) {
-          found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+        if (product?.id && product.status === "ACTIVE") {
+          found.set(product.id, {
+            ...product,
+            variants: product.variants?.nodes || [],
+          });
         }
       }
     } catch (error) {
-      console.warn("[first5-reconcile] Shopify search term failed", {
-        term: request.label,
+      console.warn("[first5-reconcile] strict Shopify search failed", {
+        queryText,
         error: clean((error as any)?.message || error),
       });
     }
   }
 
-  const candidates = [...found.values()];
-  if (!candidates.length) return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
-
-  const existingSku = clean(row.existingSku).toUpperCase();
-  const scored = candidates
+  const eligible = [...found.values()]
     .map((product) => {
-      let score = 0;
-      const productText = compact(`${product.title} ${product.handle}`);
-      const candidateVendor = clean(product.vendor).toLowerCase();
-      const expectedVendor = vendor.toLowerCase();
+      const vendorExact = clean(product.vendor).toLowerCase() === vendor.toLowerCase();
+      const titleExact = clean(product.title).toLowerCase() === freshTitle.toLowerCase();
       const candidateSkus = product.variants
         .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
         .filter(Boolean);
-      const exactExistingSku = Boolean(
-        existingSku &&
-          product.variants.some(
-            (variant: any) =>
-              clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() ===
-              existingSku,
-          ),
+      const identityExact = sourceIdentifiers.some((identifier) =>
+        candidateSkus.some((sku: string) => sku === identifier),
       );
-      const codeIdentity = Boolean(
-        code &&
-          (productText.includes(code) ||
-            candidateSkus.some((sku: string) => sku.includes(code))),
-      );
-      const sourceIdentity = sourceIdentifiers.some((identifier) =>
-        candidateSkus.some(
-          (sku: string) => sku.includes(identifier) || identifier.includes(sku),
-        ),
-      );
-      if (expectedVendor && candidateVendor === expectedVendor) score += 15;
-      if (freshTitle && clean(product.title).toLowerCase() === freshTitle.toLowerCase()) score += 50;
-      if (code && productText.includes(code)) score += 30;
-      if (exactExistingSku) score += 100;
-      if (code && candidateSkus.some((sku: string) => sku.includes(code))) score += 50;
-      if (sourceIdentity) score += 90;
-      score += Math.round(titleSimilarity(fresh.title, product.title) * 30);
-      return {
-        product,
-        score,
-        identityMatch: exactExistingSku || codeIdentity || sourceIdentity,
-      };
+      const confidence =
+        (vendorExact ? 30 : 0) +
+        (titleExact ? 30 : 0) +
+        (identityExact ? 60 : 0);
+      return { product, vendorExact, titleExact, identityExact, confidence };
     })
-    .sort((a, b) => b.score - a.score);
+    .filter(
+      (entry) =>
+        entry.vendorExact &&
+        entry.titleExact &&
+        entry.identityExact &&
+        entry.confidence >= 120,
+    );
 
-  if (fresh.raw?.repairedFlattenedNextVariants === true) {
-    const flattenedMatches = scored.filter(({ product, identityMatch }) => {
-      if (!identityMatch || product.variants.length !== 1) return false;
-      const hasSelectedSizeTitle = /\s-\sSize\s+/i.test(clean(product.title));
-      const hasDefaultOption = product.variants.some((variant: any) =>
-        (variant?.selectedOptions || []).some((option: any) =>
-          /^default(?:\s+\d+|\s+title)?$/i.test(clean(option?.value)),
-        ),
-      );
-      return hasSelectedSizeTitle && hasDefaultOption;
-    });
-    if (flattenedMatches.length === 1) {
-      return {
-        product: flattenedMatches[0].product,
-        ambiguous: false,
-        matchSource: "shopify_fallback" as const,
-      };
-    }
-    if (flattenedMatches.length > 1) {
-      return {
-        product: null,
-        ambiguous: true,
-        matchSource: "shopify_fallback" as const,
-      };
-    }
+  if (eligible.length === 1) {
+    return {
+      product: eligible[0].product,
+      ambiguous: false,
+      matchSource: "shopify_fallback" as const,
+    };
   }
-
-  if (scored.length === 1 && scored[0].score >= 30 && scored[0].identityMatch) {
-    return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
-  }
-  if (scored.length === 1) {
+  if (eligible.length > 1) {
     return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
   }
-  if (
-    scored[0].score > scored[1].score &&
-    scored[0].score >= 20 &&
-    scored[0].identityMatch
-  ) {
-    return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
-  }
-  return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
 }
 
 function resultRows(group: PlanGroup) {
@@ -859,6 +772,33 @@ async function reconcileGroup(
           optionValues: {},
         },
       ];
+
+  if (brandCode(group.url) === "MAX") {
+    const shopifyColors = new Set(
+      product.variants
+        .map((variant: any) => clean(shopifyOptions(variant).color).toLowerCase())
+        .filter(Boolean),
+    );
+    const sourceColors = new Set(
+      sourceVariants
+        .map((variant: any) => clean(sourceOptions(variant).color).toLowerCase())
+        .filter(Boolean),
+    );
+    if (shopifyColors.size > 1 && sourceColors.size <= 1) {
+      return {
+        status: "ambiguous",
+        url: group.url,
+        rows: resultRows(group),
+        multiplier: group.multiplier,
+        productCode,
+        shopifyProductId: product.id,
+        shopifyHandle: clean(product.handle),
+        shopifyTitle: clean(product.title),
+        matchSource: located.matchSource,
+        reason: "Max product has multiple Shopify colors but the source URL resolves to at most one explicit color. Color-scoped mapping is not explicit, so no variant write was made.",
+      };
+    }
+  }
 
   if (
     fresh.raw?.repairedFlattenedNextVariants === true &&
