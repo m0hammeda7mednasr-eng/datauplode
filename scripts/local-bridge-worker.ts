@@ -50,7 +50,7 @@ function compactVisibleText(input: string): string {
 }
 
 function isBlockedSnapshotText(text: string): boolean {
-  return /Title:\s*(Access Denied|404|Page Not Found)|Target URL returned error\s+(403|404)|You don't have permission to access|404\s*\|\s*Page Not Found|Oops'\s+Something's gone wrong|security verification|captcha|access-denied|forbidden/i.test(
+  return /Title:\s*(Access Denied|404|Page Not Found)|Target URL returned error\s+(403|404)|You don't have permission to access|404\s*\|\s*Page Not Found|Oops[,'’]?\s+something(?:'s|\s+has)?\s+gone\s+wrong|technical problem while browsing Next|security verification|captcha|access-denied|forbidden/i.test(
     text,
   );
 }
