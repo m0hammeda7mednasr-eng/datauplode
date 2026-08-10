@@ -24,6 +24,10 @@ import {
 
 const spreadsheetId = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const apiSource = readFileSync(new URL("../src/server/api.ts", import.meta.url), "utf8");
+const catalogWorkerSource = readFileSync(
+  new URL("../src/server/sheet1CatalogAutoSync.ts", import.meta.url),
+  "utf8",
+);
 const fragmentOnlyUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=93159589`;
 assert.equal(
   normalizeGoogleSheetUrl(fragmentOnlyUrl),
@@ -57,6 +61,21 @@ assert.match(
   apiSource,
   /cachedImages\.length > 0[\s\S]*cachedVariants\.length > 0/,
   "blocked-source fallback must require cached images and variants before publish",
+);
+assert.match(
+  catalogWorkerSource,
+  /SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD/,
+  "blocked-host fast skip must be controlled by an explicit production env gate",
+);
+assert.match(
+  catalogWorkerSource,
+  /product was not published/,
+  "blocked-host fast skip must fail closed without publishing unsafe products",
+);
+assert.match(
+  catalogWorkerSource,
+  /failed: fastFailed/,
+  "blocked-host fast skip rows must be recorded as failed, not verified",
 );
 
 const sparseRows = parseHeaderlessGoogleSheetRows([

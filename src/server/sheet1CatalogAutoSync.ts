@@ -237,6 +237,36 @@ function missingRowsPerCycleLimit(totalRows: number) {
   );
 }
 
+function blockedHostFastSkipThreshold() {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD || 0,
+  );
+  return Math.max(
+    0,
+    Math.min(
+      250,
+      Number.isFinite(configured) ? Math.floor(configured) : 0,
+    ),
+  );
+}
+
+function catalogRowHost(entry: CatalogRow) {
+  try {
+    return new URL(googleSheetRowFingerprint(entry.row).normalizedUrl)
+      .hostname
+      .replace(/^www\./i, "")
+      .toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isBlockedSourceReason(reason: unknown) {
+  return /blocked automated server access|No usable product HTML returned|ScraperAPI HTTP (?:403|499)|Reader fallbacks failed|Playwright returned non-product HTML|Managed bypass failed|HTTP 429/i.test(
+    String(reason || ""),
+  );
+}
+
 function refreshProgress(state: WorkerState) {
   state.verifiedRows = Object.keys(state.verifiedFingerprints).length;
   state.remainingRows = Math.max(0, state.targetRows - state.verifiedRows);
@@ -314,6 +344,8 @@ async function runPhase(params: {
   createMissingProducts: boolean;
 }) {
   const deferred: CatalogRow[] = [];
+  const blockedHostThreshold = blockedHostFastSkipThreshold();
+  const blockedHostCounts = new Map<string, number>();
   const batchSize = Math.max(
     1,
     Math.min(
@@ -357,7 +389,10 @@ async function runPhase(params: {
   }: {
     sheet: SheetConfig;
     batchRows: CatalogRow[];
-    result: Awaited<ReturnType<typeof processGoogleSheetBatch>>;
+    result: Pick<
+      Awaited<ReturnType<typeof processGoogleSheetBatch>>,
+      "batchId" | "successful" | "skipped" | "failed"
+    >;
   }) => {
     params.state.lastBatchId = result.batchId;
     const batchByRow = new Map(
@@ -404,6 +439,10 @@ async function runPhase(params: {
       if (original) {
         params.state.fingerprints[original.key] = original.fingerprint;
         delete params.state.verifiedFingerprints[original.key];
+        const host = catalogRowHost(original);
+        if (host && isBlockedSourceReason(entry.reason)) {
+          blockedHostCounts.set(host, (blockedHostCounts.get(host) || 0) + 1);
+        }
       }
       params.state.failed += 1;
       params.state.issues.push({
@@ -418,19 +457,64 @@ async function runPhase(params: {
   };
 
   for (const window of chunks(work, concurrency)) {
-    const pending = window.map(async ({ sheet, batchRows }) => ({
-      sheet,
-      batchRows,
-      result: await processGoogleSheetBatch({
+    const pending = window.map(async ({ sheet, batchRows }) => {
+      const activeRows: CatalogRow[] = [];
+      const fastFailed: Array<{
+        rowNumber: number;
+        url: string;
+        reason: string;
+      }> = [];
+
+      for (const entry of batchRows) {
+        const host = catalogRowHost(entry);
+        if (
+          blockedHostThreshold > 0 &&
+          host &&
+          (blockedHostCounts.get(host) || 0) >= blockedHostThreshold
+        ) {
+          fastFailed.push({
+            rowNumber: entry.row.rowNumber,
+            url: googleSheetRowFingerprint(entry.row).normalizedUrl,
+            reason:
+              `Source host ${host} skipped after ${blockedHostCounts.get(host)} blocked scrape failures in this worker phase; product was not published.`,
+          });
+        } else {
+          activeRows.push(entry);
+        }
+      }
+
+      if (!activeRows.length) {
+        return {
+          sheet,
+          batchRows,
+          result: {
+            batchId: `blocked-host-fast-skip:${Date.now()}`,
+            successful: [],
+            skipped: [],
+            failed: fastFailed,
+          },
+        };
+      }
+
+      const result = await processGoogleSheetBatch({
         sheetUrl: sheetUrl(sheet),
-        rowNumbers: batchRows.map((entry) => entry.row.rowNumber),
+        rowNumbers: activeRows.map((entry) => entry.row.rowNumber),
         createManualReview: true,
         processOnlyNewRows: false,
         waitForPublishCompletion: true,
         createMissingProducts: params.createMissingProducts,
         mode: "auto_sync",
-      }),
-    }));
+      });
+
+      return {
+        sheet,
+        batchRows,
+        result: {
+          ...result,
+          failed: [...result.failed, ...fastFailed],
+        },
+      };
+    });
 
     // Apply each batch as soon as it completes, while keeping state writes
     // sequential so a slow neighboring batch cannot delay fresh progress.
