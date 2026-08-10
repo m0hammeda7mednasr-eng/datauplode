@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   APPROVED_CATALOG_SHEETS,
   filterUnseenGoogleSheetRows,
@@ -22,6 +23,7 @@ import {
 } from "../src/server/sheet1CatalogAutoSync.js";
 
 const spreadsheetId = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
+const apiSource = readFileSync(new URL("../src/server/api.ts", import.meta.url), "utf8");
 const fragmentOnlyUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=93159589`;
 assert.equal(
   normalizeGoogleSheetUrl(fragmentOnlyUrl),
@@ -45,6 +47,16 @@ assert.equal(
   shouldDeferMissingCatalogRow(true, true, false),
   false,
   "linked Shopify products must still refresh during the update-existing phase",
+);
+assert.match(
+  apiSource,
+  /Blocked source did not have a verified cached product snapshot with title, images, and variants; product was not published\./,
+  "blocked-source fallback must fail closed instead of publishing placeholder products",
+);
+assert.match(
+  apiSource,
+  /cachedImages\.length > 0[\s\S]*cachedVariants\.length > 0/,
+  "blocked-source fallback must require cached images and variants before publish",
 );
 
 const sparseRows = parseHeaderlessGoogleSheetRows([

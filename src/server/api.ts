@@ -2366,6 +2366,20 @@ function guessProductIdFromUrl(url: string) {
   return cleaned ? cleaned.toUpperCase() : null;
 }
 
+function uniqueSheetFallbackValues(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const clean = String(value || "").replace(/\s+/g, " ").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
+}
+
 async function buildBlockedSheetFallbackProduct(params: {
   url: string;
   rowNumber: number;
@@ -2385,15 +2399,35 @@ async function buildBlockedSheetFallbackProduct(params: {
     },
   });
 
+  const cachedTitle = String(existing?.title || "").replace(/\s+/g, " ").trim();
+  const cachedImages = existing?.images || [];
+  const cachedVariants = existing?.variants || [];
+  const hasVerifiedCachedSnapshot =
+    Boolean(existing) &&
+    Boolean(cachedTitle) &&
+    !/^Excel Import Issue\b/i.test(cachedTitle) &&
+    !/^Blocked Source Product\b/i.test(cachedTitle) &&
+    cachedImages.length > 0 &&
+    cachedVariants.length > 0;
+
+  if (!hasVerifiedCachedSnapshot) {
+    throw Object.assign(
+      new Error(
+        "Blocked source did not have a verified cached product snapshot with title, images, and variants; product was not published.",
+      ),
+      {
+        statusCode: 422,
+        code: "BLOCKED_SOURCE_UNVERIFIED_FALLBACK",
+      },
+    );
+  }
+
   const supplierName =
     existing?.supplier?.name ||
     expectedSupplierForUrl(normalizedUrl) ||
     "Unknown Supplier";
   const guessedProductId = existing?.productId || guessProductIdFromUrl(normalizedUrl);
-  const title =
-    existing?.title && !existing.title.startsWith("Excel Import Issue")
-      ? existing.title
-      : `Blocked Source Product - Row ${params.rowNumber}`;
+  const title = cachedTitle;
   const description =
     existing?.description ||
     `Auto-published from sheet row ${params.rowNumber} because supplier source access was blocked during scrape.`;
@@ -2406,16 +2440,15 @@ async function buildBlockedSheetFallbackProduct(params: {
       : "USD";
 
   const images =
-    existing?.images?.map((img: any) => ({
+    cachedImages.map((img: any) => ({
       url: img.url,
       alt: img.alt || undefined,
       color: img.color || undefined,
       position: img.position,
-    })) || [];
+    }));
 
   const variants: NormalizedProduct["variants"] =
-    existing?.variants && existing.variants.length > 0
-      ? existing.variants.map((variant: any, index: number) => ({
+    cachedVariants.map((variant: any, index: number) => ({
           sourceVariantId:
             variant.sourceVariantId ||
             `${guessedProductId || "variant"}-${index + 1}`,
@@ -2427,16 +2460,17 @@ async function buildBlockedSheetFallbackProduct(params: {
           available: variant.available ?? true,
           stockStatus: variant.stockStatus || "unknown",
           imageUrl: variant.imageUrl || undefined,
-        }))
-      : [
-          {
-            sourceVariantId: guessedProductId || `row-${params.rowNumber}`,
-            price: params.price,
-            currency,
-            available: true,
-            stockStatus: "unknown",
-          },
-        ];
+        }));
+  const colorValues = uniqueSheetFallbackValues(
+    variants.map((variant) => variant.color),
+  );
+  const sizeValues = uniqueSheetFallbackValues(
+    variants.map((variant) => variant.size),
+  );
+  const options = [
+    ...(colorValues.length ? [{ name: "Color", values: colorValues }] : []),
+    ...(sizeValues.length ? [{ name: "Size", values: sizeValues }] : []),
+  ];
 
   return {
     source: {
@@ -2450,12 +2484,7 @@ async function buildBlockedSheetFallbackProduct(params: {
     currency,
     price: params.price,
     images,
-    options: [
-      {
-        name: "Default",
-        values: ["Default"],
-      },
-    ],
+    options: options.length ? options : [{ name: "Default", values: ["Default"] }],
     variants,
     raw: {
       fallbackFromBlockedSource: true,
