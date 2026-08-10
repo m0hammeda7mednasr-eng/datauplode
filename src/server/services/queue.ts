@@ -436,6 +436,7 @@ function verifyShopifyVariantSkus(shopifyVariants: any[], variantPayloads: any[]
   const payloadsByKey = new Map(variantPayloads.map(payload => [payload.key, payload]));
   const actualKeys = new Set<string>();
   const mismatches: Array<{
+    variantId?: string;
     optionKey: string;
     expectedSku: string | null;
     actualSku: string | null;
@@ -450,6 +451,7 @@ function verifyShopifyVariantSkus(shopifyVariants: any[], variantPayloads: any[]
 
     if (!variantPayload) {
       mismatches.push({
+        variantId: variant?.id,
         optionKey,
         expectedSku: null,
         actualSku: actualSku || null,
@@ -461,6 +463,7 @@ function verifyShopifyVariantSkus(shopifyVariants: any[], variantPayloads: any[]
     const expectedSku = getVariantPayloadSku(variantPayload);
     if (expectedSku && actualSku !== expectedSku) {
       mismatches.push({
+        variantId: variant?.id,
         optionKey,
         expectedSku,
         actualSku: actualSku || null,
@@ -1730,15 +1733,52 @@ export class QueueService {
                 client,
                 shopifyProductResult.id,
               );
-              const verifiedShopifyVariants = await ShopifyService.getProductInventoryVariants(
+              let verifiedShopifyVariants = await ShopifyService.getProductInventoryVariants(
                 client,
                 shopifyProductResult.id,
               );
-              const variantSkuVerification = verifyShopifyVariantSkus(
+              let variantSkuVerification = verifyShopifyVariantSkus(
                 verifiedShopifyVariants,
                 variantPayloads,
                 optionNames,
               );
+              let variantSkusRepaired = 0;
+              if (!variantSkuVerification.verified) {
+                const skuRepairUpdates = verifiedShopifyVariants
+                  .map((variant: any, index: number) => {
+                    const variantPayload = matchCreatedVariantPayload(variant, variantPayloads, optionNames, index);
+                    const expectedSku = getVariantPayloadSku(variantPayload);
+                    const actualSku = getShopifyVariantSku(variant);
+                    if (!variant?.id || !expectedSku || actualSku === expectedSku) return null;
+                    return {
+                      id: variant.id,
+                      inventoryItem: { sku: expectedSku },
+                    };
+                  })
+                  .filter(Boolean);
+
+                if (skuRepairUpdates.length > 0) {
+                  const skuRepairResponse = await ShopifyService.updateVariantsBulk(
+                    client,
+                    shopifyProductResult.id,
+                    skuRepairUpdates,
+                  );
+                  const skuRepairErrors = skuRepairResponse.productVariantsBulkUpdate?.userErrors || [];
+                  if (skuRepairErrors.length > 0) {
+                    throw new Error(`Shopify SKU Repair Error: ${skuRepairErrors[0].message}`);
+                  }
+                  variantSkusRepaired = skuRepairUpdates.length;
+                  verifiedShopifyVariants = await ShopifyService.getProductInventoryVariants(
+                    client,
+                    shopifyProductResult.id,
+                  );
+                  variantSkuVerification = verifyShopifyVariantSkus(
+                    verifiedShopifyVariants,
+                    variantPayloads,
+                    optionNames,
+                  );
+                }
+              }
               if (!variantSkuVerification.verified) {
                 throw new Error(
                   `Shopify variant SKU verification failed: ${variantSkuVerification.mismatches
@@ -1821,6 +1861,7 @@ export class QueueService {
                 variantsExpected: variantPayloads.length,
                 variantsVerified: verifiedShopifyVariants.length === variantPayloads.length,
                 variantSkusVerified: variantSkuVerification.verified,
+                variantSkusRepaired,
                 variantSkuMismatches: variantSkuVerification.mismatches,
                 shopifyVerified: Boolean(verifiedShopifyProduct?.id),
                 shopifyStatus: String(verifiedShopifyProduct?.status || shopifyProductResult.status || 'ACTIVE').toLowerCase(),
