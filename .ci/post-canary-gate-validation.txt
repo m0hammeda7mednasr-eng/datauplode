@@ -1,0 +1,2 @@
+Post-canary broad write gate validation marker.
+The broad Sheet1 catalog worker must remain fail-closed unless SYNC_POST_CANARY_BROAD_WRITES_ENABLED=true.
