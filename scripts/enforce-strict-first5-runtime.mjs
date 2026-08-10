@@ -53,11 +53,11 @@ const strictMatcher = `async function findShopifyProduct(
       }
     }
   }\`;
-  const vendorFilter = \`vendor:${shopifySearchValue(vendor)}\`;
+  const vendorFilter = \`vendor:\${shopifySearchValue(vendor)}\`;
   const requests = [
-    \`status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}\`,
+    \`status:active AND \${vendorFilter} AND title:\${shopifySearchValue(freshTitle)}\`,
     ...sourceIdentifiers.map(
-      (identifier) => \`status:active AND ${vendorFilter} AND sku:${identifier}*\`,
+      (identifier) => \`status:active AND \${vendorFilter} AND sku:\${identifier}*\`,
     ),
   ];
   const found = new Map<string, any>();
