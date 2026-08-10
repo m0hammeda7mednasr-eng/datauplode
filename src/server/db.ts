@@ -20,9 +20,15 @@ function normalizeDatabaseUrlForRuntime() {
 
   try {
     const url = new URL(rawUrl);
-    const limit = process.env.PRISMA_CONNECTION_LIMIT || (isProduction() ? "2" : "3");
+    const explicitLimit = process.env.PRISMA_CONNECTION_LIMIT?.trim();
+    const fallbackLimit = isProduction() ? "2" : "3";
+    const parsedLimit = Number(explicitLimit || fallbackLimit);
+    const limit =
+      Number.isInteger(parsedLimit) && parsedLimit >= 1 && parsedLimit <= 20
+        ? String(parsedLimit)
+        : fallbackLimit;
 
-    if (!url.searchParams.has("connection_limit")) {
+    if (explicitLimit || !url.searchParams.has("connection_limit")) {
       url.searchParams.set("connection_limit", limit);
     }
 
