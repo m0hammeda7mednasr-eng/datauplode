@@ -23,7 +23,7 @@ jobs:
         with:
           ref: stabilize-supabase-railway
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Apply fail-closed matcher and Max guard
         shell: bash
@@ -160,16 +160,26 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Commit runtime source only after strict contract passes
+      - name: Commit runtime through GitHub Contents API after strict contract passes
+        if: success()
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET_BRANCH: stabilize-supabase-railway
+          TARGET_PATH: src/server/firstFiveSheetsReconcile.ts
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
-          git add src/server/firstFiveSheetsReconcile.ts
-          if git diff --cached --quiet; then
+          if git diff --quiet -- "$TARGET_PATH"; then
             echo 'Runtime already strict; nothing to commit.'
             exit 0
           fi
-          git commit -m 'Enforce strict first-five Shopify matching'
-          git push origin HEAD:stabilize-supabase-railway
+
+          current_blob_sha="$(gh api "repos/$REPOSITORY/contents/$TARGET_PATH?ref=$TARGET_BRANCH" --jq '.sha')"
+          encoded="$(base64 -w0 "$TARGET_PATH")"
+          gh api --method PUT "repos/$REPOSITORY/contents/$TARGET_PATH" \
+            -f message='Enforce strict first-five Shopify matching' \
+            -f content="$encoded" \
+            -f sha="$current_blob_sha" \
+            -f branch="$TARGET_BRANCH" \
+            --jq '.commit.sha'
