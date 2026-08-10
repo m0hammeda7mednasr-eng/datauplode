@@ -80,8 +80,75 @@ function nextCookieSeed(url: string) {
 async function collectVisibleText(page: import("playwright").Page) {
   const text = await page.evaluate(() => {
     const chunks: string[] = [];
+    const seen = new Set<string>();
+    const pushChunk = (value: unknown) => {
+      const text = String(value || "").trim();
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      chunks.push(text);
+    };
+    const absoluteUrl = (value: unknown) => {
+      const raw = String(value || "").trim();
+      if (!raw) return "";
+      try {
+        return new URL(raw, location.href).toString();
+      } catch {
+        return raw;
+      }
+    };
     const title = document.title?.trim();
-    if (title) chunks.push(`Title: ${title}`);
+    if (title) pushChunk(`Title: ${title}`);
+
+    for (const script of Array.from(
+      document.querySelectorAll('script[type="application/ld+json"]'),
+    )) {
+      try {
+        const parsed = JSON.parse(script.textContent || "null");
+        const queue = Array.isArray(parsed) ? [...parsed] : [parsed];
+        while (queue.length) {
+          const item = queue.shift();
+          if (!item || typeof item !== "object") continue;
+          if (Array.isArray((item as any)["@graph"])) {
+            queue.push(...(item as any)["@graph"]);
+          }
+          const type = (Array.isArray((item as any)["@type"])
+            ? (item as any)["@type"].join(" ")
+            : (item as any)["@type"] || ""
+          ).toString();
+          if (!/Product/i.test(type)) continue;
+
+          pushChunk((item as any).name ? `# ${(item as any).name}` : "");
+          pushChunk((item as any).sku ? `Product ID: ${(item as any).sku}` : "");
+          pushChunk((item as any).productID ? `Product Code: ${(item as any).productID}` : "");
+          pushChunk((item as any).description);
+
+          const offers = Array.isArray((item as any).offers)
+            ? (item as any).offers
+            : (item as any).offers
+              ? [(item as any).offers]
+              : [];
+          for (const offer of offers) {
+            const price = (offer as any)?.price || (offer as any)?.lowPrice;
+            const currency = (offer as any)?.priceCurrency;
+            if (price) pushChunk(`Price: ${currency || ""} ${price}`.trim());
+          }
+
+          const images = Array.isArray((item as any).image)
+            ? (item as any).image
+            : (item as any).image
+              ? [(item as any).image]
+              : [];
+          for (const image of images.slice(0, 16)) {
+            const imageUrl =
+              typeof image === "string"
+                ? image
+                : (image as any)?.url || (image as any)?.contentUrl;
+            const resolved = absoluteUrl(imageUrl);
+            if (resolved) pushChunk(`![${(item as any).name || "Product image"}](${resolved})`);
+          }
+        }
+      } catch {}
+    }
 
     const metaSelectors = [
       'meta[property="og:title"]',
@@ -94,11 +161,40 @@ async function collectVisibleText(page: import("playwright").Page) {
         .querySelector(selector)
         ?.getAttribute("content")
         ?.trim();
-      if (content) chunks.push(content);
+      if (content) pushChunk(content);
     }
 
+    const metaPrice =
+      document
+        .querySelector(
+          'meta[property="product:price:amount"], meta[name="product:price:amount"], meta[property="og:price:amount"], meta[name="price"]',
+        )
+        ?.getAttribute("content")
+        ?.trim() || "";
+    const metaCurrency =
+      document
+        .querySelector(
+          'meta[property="product:price:currency"], meta[name="product:price:currency"], meta[property="og:price:currency"], meta[name="currency"]',
+        )
+        ?.getAttribute("content")
+        ?.trim() || "";
+    if (metaPrice) pushChunk(`Price: ${metaCurrency} ${metaPrice}`.trim());
+
     const bodyText = document.body?.innerText || "";
-    if (bodyText.trim()) chunks.push(bodyText);
+    if (bodyText.trim()) pushChunk(bodyText);
+
+    for (const image of Array.from(document.images).slice(0, 40)) {
+      const src =
+        image.currentSrc ||
+        image.src ||
+        image.getAttribute("data-src") ||
+        image.getAttribute("srcset")?.split(/\s+/)[0] ||
+        "";
+      const resolved = absoluteUrl(src);
+      if (resolved && /^https?:\/\//i.test(resolved)) {
+        pushChunk(`![${image.alt || "Product image"}](${resolved})`);
+      }
+    }
     return chunks.join("\n\n");
   });
 
