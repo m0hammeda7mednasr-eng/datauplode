@@ -10,6 +10,9 @@ Code under validation includes:
 - Shopify mutation read-back
 - blocked-source 403 fast-skip within the current pass
 - Next lane deferred behind other supported suppliers for throughput
+- strict Shopify fallback requires exact vendor + exact normalized title + exact source/SKU identity
+- weak score-based fallback acceptance removed
+- Max multi-color mismatch guard fails closed before variant writes
 
 Validation target: hardened product correctness plus first-five queue throughput.
 No runtime behavior is defined by this file.
