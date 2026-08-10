@@ -22,9 +22,11 @@ RUN npx playwright install --with-deps chromium
 
 COPY . .
 
-# Generate again after the full source copy so the image always contains a
-# client generated from the exact schema shipped with this revision.
-RUN npx prisma generate \
+# Fail closed for production: materialize the strict existing-product matcher
+# inside the image, verify its safety contract, then build the exact artifact.
+RUN node scripts/enforce-strict-first5-runtime.mjs \
+    && node scripts/strict-first5-runtime-safety-contract.mjs \
+    && npx prisma generate \
     && npm run build
 
 EXPOSE 3000
