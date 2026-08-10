@@ -59,6 +59,16 @@ export class PersistentJsonCache<T> {
     return Boolean(this.get(key));
   }
 
+  delete(key: string): boolean {
+    this.ensureLoaded();
+    const deleted = this.entries.delete(this.hashKey(key));
+    if (deleted) {
+      this.dirty = true;
+      this.flushIfDirty();
+    }
+    return deleted;
+  }
+
   stats() {
     this.ensureLoaded();
     this.pruneExpired();

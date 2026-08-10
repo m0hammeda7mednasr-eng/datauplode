@@ -177,6 +177,19 @@ function cloneProduct(product: NormalizedProduct): NormalizedProduct {
   return JSON.parse(JSON.stringify(product));
 }
 
+function isUsableAnalyzeProduct(product: NormalizedProduct | undefined) {
+  if (!product) return false;
+  const title = String(product.title || "").replace(/\s+/g, " ").trim();
+  if (!title) return false;
+  if (/^(?:Excel Import Issue|Blocked Source Product)\b/i.test(title)) {
+    return false;
+  }
+  if (!Number.isFinite(Number(product.price)) || Number(product.price) <= 0) {
+    return false;
+  }
+  return true;
+}
+
 function readJsonObject(value: unknown): any {
   if (!value || typeof value !== "string") return {};
   try {
@@ -196,6 +209,8 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
   if (cached) {
     if (cached.expiresAt <= Date.now()) {
       analyzeProductCache.delete(key);
+    } else if (!isUsableAnalyzeProduct(cached.product)) {
+      analyzeProductCache.delete(key);
     } else {
       return cloneProduct(cached.product);
     }
@@ -205,6 +220,10 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
 
   const persisted = analyzeProductPersistentCache.get(key);
   if (!persisted) return undefined;
+  if (!isUsableAnalyzeProduct(persisted)) {
+    analyzeProductPersistentCache.delete(key);
+    return undefined;
+  }
 
   analyzeProductCache.set(key, {
     expiresAt: Date.now() + cacheMs,
@@ -217,6 +236,7 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
 function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
   const cacheMs = getAnalyzeCacheMs();
   if (cacheMs <= 0) return;
+  if (!isUsableAnalyzeProduct(product)) return;
   const key = normalizeAnalyzeCacheUrl(url);
   analyzeProductCache.set(key, {
     expiresAt: Date.now() + cacheMs,
@@ -3758,7 +3778,10 @@ router.post("/imports/analyze", async (req, res) => {
 
       if (cachedSourceProduct) {
         const cachedProduct = sourceProductToNormalizedProduct(cachedSourceProduct);
-        if (productSupplierMatchesUrl(url, cachedProduct)) {
+        if (
+          productSupplierMatchesUrl(url, cachedProduct) &&
+          isUsableAnalyzeProduct(cachedProduct)
+        ) {
           data = cachedProduct;
           setCachedAnalyzeProduct(url, data);
         }
@@ -3801,6 +3824,7 @@ router.post("/imports/analyze", async (req, res) => {
 
           const staleProduct = sourceProductToNormalizedProduct(staleSourceProduct);
           if (!productSupplierMatchesUrl(url, staleProduct)) throw error;
+          if (!isUsableAnalyzeProduct(staleProduct)) throw error;
           data = staleProduct;
           data.raw = {
             ...(data.raw || {}),
