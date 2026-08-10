@@ -325,7 +325,13 @@ function scraperApiKeyIdentity(apiKey: string): string {
 }
 
 export function scraperApiStatusExhaustsKey(status: number): boolean {
-  return [401, 402, 403, 429].includes(Number(status));
+  // ScraperAPI HTTP 403 is usually a target/source block for a specific
+  // product request, not proof that the API key itself is exhausted. Cooling a
+  // key for 24h on target 403s quickly disables the whole pool on blocked
+  // stores like Next/SHEIN and stalls catalog replacement. Keep true
+  // quota/auth exhaustion to statuses that reliably represent account/key
+  // state.
+  return [401, 402, 429].includes(Number(status));
 }
 
 function orderedAvailableScraperApiKeys(): string[] {

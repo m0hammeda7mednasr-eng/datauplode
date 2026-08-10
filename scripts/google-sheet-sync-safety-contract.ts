@@ -66,6 +66,7 @@ delete process.env.SCRAPERAPI_KEY;
 assert.equal(configuredScraperApiKeyCount(), 4, "four ScraperAPI keys must be recognized without exposing their values");
 assert.equal(scraperApiStatusExhaustsKey(429), true, "rate-limited ScraperAPI keys must cool down individually");
 assert.equal(scraperApiStatusExhaustsKey(402), true, "exhausted ScraperAPI keys must cool down individually");
+assert.equal(scraperApiStatusExhaustsKey(403), false, "target/source 403s must not put healthy ScraperAPI keys into exhausted cooldown");
 assert.equal(scraperApiStatusExhaustsKey(500), false, "URL-specific provider failures must not disable a healthy key");
 assert.equal(scraperApiStatusExhaustsKey(499), false, "client/URL failures must not pause the whole key pool");
 if (previousPool === undefined) delete process.env.SCRAPERAPI_KEYS;
