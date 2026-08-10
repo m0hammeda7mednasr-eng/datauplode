@@ -2,6 +2,13 @@ name: Production Readiness Probe
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Production Build Check
+    types:
+      - completed
+    branches:
+      - stabilize-supabase-railway
 
 permissions:
   contents: read
@@ -12,18 +19,19 @@ concurrency:
 
 jobs:
   readiness:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       READINESS_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
-      READINESS_EXPECTED_REVISION: ${{ github.sha }}
+      READINESS_EXPECTED_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
       READINESS_RESPONSE_PATH: production-readiness.json
 
     steps:
       - name: Checkout requested revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.READINESS_EXPECTED_REVISION }}
 
       - name: Verify checked-out revision
         shell: bash
