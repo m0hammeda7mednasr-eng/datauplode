@@ -329,12 +329,26 @@ async function runPhase(params: {
       Number(process.env.SYNC_SHEET1_CATALOG_CONCURRENCY || 3) || 3,
     ),
   );
-  const work = FIRST_EIGHT_CATALOG_SHEETS.flatMap((sheet) =>
-    chunks(
-      params.rows.filter((entry) => entry.sheet.gid === sheet.gid),
-      batchSize,
-    ).map((batchRows) => ({ sheet, batchRows })),
+  const batchesBySheet = new Map(
+    FIRST_EIGHT_CATALOG_SHEETS.map((sheet) => [
+      sheet.gid,
+      chunks(
+        params.rows.filter((entry) => entry.sheet.gid === sheet.gid),
+        batchSize,
+      ),
+    ]),
   );
+  const work: Array<{ sheet: SheetConfig; batchRows: CatalogRow[] }> = [];
+  for (let batchIndex = 0; ; batchIndex += 1) {
+    let advanced = false;
+    for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
+      const batchRows = batchesBySheet.get(sheet.gid)?.[batchIndex];
+      if (!batchRows?.length) continue;
+      work.push({ sheet, batchRows });
+      advanced = true;
+    }
+    if (!advanced) break;
+  }
 
   const applyCompleted = async ({
     sheet,
