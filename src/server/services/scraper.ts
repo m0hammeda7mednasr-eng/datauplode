@@ -8476,6 +8476,8 @@ export class HmScraper implements SupplierScraper {
       Referer: "https://ae.hm.com/en/",
     });
     const fallback = extractGenericProductFromHtml(html, url, "H&M");
+    const fallbackUsable =
+      fallback.price > 0 && !/client challenge|metadata/i.test(fallback.title);
     const $ = cheerio.load(html);
     const sku = cleanText(
       extractProductJsonLdFromHtml(html)?.sku ||
@@ -8483,11 +8485,26 @@ export class HmScraper implements SupplierScraper {
         fallback.source.productId,
     );
 
-    if (!sku) return fallback;
+    if (!sku) {
+      if (fallbackUsable) return normalizeProductOptionsAndVariants(fallback);
+      throw new ScraperError(
+        "H&M did not expose usable product data to server analysis. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.",
+        {
+          code: "SOURCE_BLOCKED",
+          status: 422,
+          supplier: "H&M",
+          retryWithSnapshot: true,
+          details: ["H&M page did not expose a usable SKU"],
+        },
+      );
+    }
 
     try {
       const product = await fetchHmGraphqlProduct(url, sku);
-      if (!product) return fallback;
+      if (!product) {
+        if (fallbackUsable) return normalizeProductOptionsAndVariants(fallback);
+        throw new Error("H&M GraphQL did not return a product");
+      }
       const normalized = normalizeProductOptionsAndVariants(
         normalizeHmGraphqlProduct(product, fallback, url),
       );
