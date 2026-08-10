@@ -386,6 +386,19 @@ function blockedHostRetryRowsPerCycleLimit() {
   );
 }
 
+function blockedHostRecoveryProbesPerCycleLimit() {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_BLOCKED_HOST_PROBES_PER_CYCLE || 5,
+  );
+  return Math.max(
+    1,
+    Math.min(
+      25,
+      Number.isFinite(configured) ? Math.floor(configured) : 5,
+    ),
+  );
+}
+
 function blockedHostFastSkipThreshold() {
   const configured = Number(
     process.env.SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD || 0,
@@ -533,7 +546,8 @@ async function runPhase(params: {
     params.state,
     blockedHostThreshold,
   );
-  const blockedHostRecoveryProbes = new Set<string>();
+  const blockedHostRecoveryProbeLimit = blockedHostRecoveryProbesPerCycleLimit();
+  const blockedHostRecoveryProbes = new Map<string, number>();
   const batchSize = Math.max(
     1,
     Math.min(
@@ -663,7 +677,8 @@ async function runPhase(params: {
           blockedHostThreshold > 0 &&
           host &&
           (blockedHostCounts.get(host) || 0) >= blockedHostThreshold &&
-          blockedHostRecoveryProbes.has(host)
+          (blockedHostRecoveryProbes.get(host) || 0) >=
+            blockedHostRecoveryProbeLimit
         ) {
           fastFailed.push({
             rowNumber: entry.row.rowNumber,
@@ -677,7 +692,10 @@ async function runPhase(params: {
             host &&
             (blockedHostCounts.get(host) || 0) >= blockedHostThreshold
           ) {
-            blockedHostRecoveryProbes.add(host);
+            blockedHostRecoveryProbes.set(
+              host,
+              (blockedHostRecoveryProbes.get(host) || 0) + 1,
+            );
           }
           activeRows.push(entry);
         }

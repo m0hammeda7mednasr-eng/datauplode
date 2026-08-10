@@ -84,13 +84,13 @@ assert.match(
 );
 assert.match(
   catalogWorkerSource,
-  /blockedHostRecoveryProbes/,
-  "blocked-host fast skip must keep a bounded per-host recovery probe set",
+  /SYNC_SHEET1_CATALOG_BLOCKED_HOST_PROBES_PER_CYCLE[\s\S]*blockedHostRecoveryProbes/,
+  "blocked-host fast skip must keep a bounded per-host recovery probe count",
 );
 assert.match(
   catalogWorkerSource,
-  /blockedHostRecoveryProbes\.has\(host\)[\s\S]*blockedHostRecoveryProbes\.add\(host\)/,
-  "blocked-host fast skip must allow one recovery probe before continuing to fast-skip that host",
+  /blockedHostRecoveryProbes\.get\(host\)[\s\S]*blockedHostRecoveryProbeLimit[\s\S]*blockedHostRecoveryProbes\.set\(/,
+  "blocked-host fast skip must allow multiple bounded recovery probes before continuing to fast-skip that host",
 );
 assert.match(
   catalogWorkerSource,
