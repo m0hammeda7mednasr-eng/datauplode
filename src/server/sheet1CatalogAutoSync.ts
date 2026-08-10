@@ -250,9 +250,9 @@ function blockedHostFastSkipThreshold() {
   );
 }
 
-function catalogRowHost(entry: CatalogRow) {
+function normalizedUrlHost(url: unknown) {
   try {
-    return new URL(googleSheetRowFingerprint(entry.row).normalizedUrl)
+    return new URL(String(url || ""))
       .hostname
       .replace(/^www\./i, "")
       .toLowerCase();
@@ -261,10 +261,45 @@ function catalogRowHost(entry: CatalogRow) {
   }
 }
 
+function catalogRowHost(entry: CatalogRow) {
+  return normalizedUrlHost(googleSheetRowFingerprint(entry.row).normalizedUrl);
+}
+
 function isBlockedSourceReason(reason: unknown) {
   return /blocked automated server access|No usable product HTML returned|ScraperAPI HTTP (?:403|499)|Reader fallbacks failed|Playwright returned non-product HTML|Managed bypass failed|HTTP 429/i.test(
     String(reason || ""),
   );
+}
+
+function seedBlockedHostCountsFromRecentIssues(
+  state: WorkerState,
+  threshold: number,
+) {
+  const counts = new Map<string, number>();
+  if (threshold <= 0) return counts;
+
+  for (const issue of state.issues.slice(-200)) {
+    const reason = String(issue.reason || issue.error || "");
+    const blocked = isBlockedSourceReason(reason);
+    const fastSkipMatch = reason.match(
+      /Source host\s+([a-z0-9.-]+)\s+skipped after\s+(\d+)\s+blocked scrape failures/i,
+    );
+    if (!blocked && !fastSkipMatch) continue;
+
+    const host = normalizedUrlHost(issue.url) || fastSkipMatch?.[1]?.toLowerCase() || "";
+    if (!host) continue;
+
+    if (fastSkipMatch) {
+      counts.set(
+        host,
+        Math.max(counts.get(host) || 0, Number(fastSkipMatch[2]) || threshold),
+      );
+    } else {
+      counts.set(host, Math.min(250, (counts.get(host) || 0) + 1));
+    }
+  }
+
+  return counts;
 }
 
 function refreshProgress(state: WorkerState) {
@@ -345,7 +380,10 @@ async function runPhase(params: {
 }) {
   const deferred: CatalogRow[] = [];
   const blockedHostThreshold = blockedHostFastSkipThreshold();
-  const blockedHostCounts = new Map<string, number>();
+  const blockedHostCounts = seedBlockedHostCountsFromRecentIssues(
+    params.state,
+    blockedHostThreshold,
+  );
   const batchSize = Math.max(
     1,
     Math.min(

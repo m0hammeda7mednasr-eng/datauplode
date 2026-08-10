@@ -77,6 +77,16 @@ assert.match(
   /failed: fastFailed/,
   "blocked-host fast skip rows must be recorded as failed, not verified",
 );
+assert.match(
+  catalogWorkerSource,
+  /seedBlockedHostCountsFromRecentIssues/,
+  "blocked-host fast skip must carry recent blocked-host memory across deployments and cycles",
+);
+assert.match(
+  catalogWorkerSource,
+  /Source host\\s\+\(\[a-z0-9\.-\]\+\)\\s\+skipped after\\s\+\(\\d\+\)/,
+  "blocked-host memory must only be seeded from explicit failed-closed source-host issues",
+);
 
 const sparseRows = parseHeaderlessGoogleSheetRows([
   [],
