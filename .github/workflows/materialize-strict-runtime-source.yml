@@ -1,0 +1,51 @@
+name: Materialize Strict Runtime Source
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - .github/workflows/materialize-strict-runtime-source.yml
+      - scripts/enforce-strict-first5-runtime.mjs
+      - scripts/strict-first5-runtime-safety-contract.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-strict-runtime-source
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout stabilization branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Apply strict matcher and verify fail-closed contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/enforce-strict-first5-runtime.mjs
+          git diff --check
+          node scripts/strict-first5-runtime-safety-contract.mjs
+
+      - name: Commit materialized runtime source
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='src/server/firstFiveSheetsReconcile.ts'
+          if git diff --quiet -- "$target"; then
+            echo 'Runtime source already matches strict contract.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$target"
+          git commit -m 'Materialize strict Shopify matcher in runtime source'
+          git push origin HEAD:stabilize-supabase-railway
