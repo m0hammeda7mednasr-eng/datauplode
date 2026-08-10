@@ -349,6 +349,10 @@ function verifyPublishJobResult(jobResult: Record<string, any>) {
     throw new Error("Shopify variant verification failed");
   }
 
+  if (jobResult?.variantSkusVerified === false) {
+    throw new Error("Shopify variant SKU verification failed");
+  }
+
   const variantImagesRequested = Number(jobResult?.variantImagesRequested);
   const variantImagesLinked = Number(jobResult?.variantImagesLinked);
   if (

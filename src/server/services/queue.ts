@@ -424,6 +424,71 @@ function matchCreatedVariantPayload(createdVariant: any, variantPayloads: any[],
   return payloadsByKey.get(selectedOptionsKey) || variantPayloads[fallbackIndex] || variantPayloads[0];
 }
 
+function getShopifyVariantSku(variant: any) {
+  return cleanOptionText(variant?.inventoryItem?.sku || variant?.sku);
+}
+
+function getVariantPayloadSku(variantPayload: any) {
+  return cleanOptionText(variantPayload?.input?.inventoryItem?.sku);
+}
+
+function verifyShopifyVariantSkus(shopifyVariants: any[], variantPayloads: any[], optionNames: string[]) {
+  const payloadsByKey = new Map(variantPayloads.map(payload => [payload.key, payload]));
+  const actualKeys = new Set<string>();
+  const mismatches: Array<{
+    optionKey: string;
+    expectedSku: string | null;
+    actualSku: string | null;
+    reason: string;
+  }> = [];
+
+  for (const variant of shopifyVariants || []) {
+    const optionKey = buildSelectedOptionsKey(variant?.selectedOptions || [], optionNames);
+    actualKeys.add(optionKey);
+    const variantPayload = payloadsByKey.get(optionKey);
+    const actualSku = getShopifyVariantSku(variant);
+
+    if (!variantPayload) {
+      mismatches.push({
+        optionKey,
+        expectedSku: null,
+        actualSku: actualSku || null,
+        reason: 'Unexpected Shopify variant returned after publish',
+      });
+      continue;
+    }
+
+    const expectedSku = getVariantPayloadSku(variantPayload);
+    if (expectedSku && actualSku !== expectedSku) {
+      mismatches.push({
+        optionKey,
+        expectedSku,
+        actualSku: actualSku || null,
+        reason: 'Shopify variant SKU differed from submitted inventoryItem.sku',
+      });
+    }
+  }
+
+  for (const variantPayload of variantPayloads || []) {
+    if (!actualKeys.has(variantPayload.key)) {
+      mismatches.push({
+        optionKey: variantPayload.key,
+        expectedSku: getVariantPayloadSku(variantPayload) || null,
+        actualSku: null,
+        reason: 'Expected variant was not found in Shopify read-back',
+      });
+    }
+  }
+
+  return {
+    verified:
+      mismatches.length === 0 &&
+      Array.isArray(shopifyVariants) &&
+      shopifyVariants.length === variantPayloads.length,
+    mismatches,
+  };
+}
+
 function buildVariantPayloads(product: any, rule: any, optionNames: string[], locationId: string) {
   const seen = new Set<string>();
   const productSwatches = getProductColorSwatches(product);
@@ -1665,6 +1730,25 @@ export class QueueService {
                 client,
                 shopifyProductResult.id,
               );
+              const verifiedShopifyVariants = await ShopifyService.getProductInventoryVariants(
+                client,
+                shopifyProductResult.id,
+              );
+              const variantSkuVerification = verifyShopifyVariantSkus(
+                verifiedShopifyVariants,
+                variantPayloads,
+                optionNames,
+              );
+              if (!variantSkuVerification.verified) {
+                throw new Error(
+                  `Shopify variant SKU verification failed: ${variantSkuVerification.mismatches
+                    .slice(0, 3)
+                    .map((mismatch) =>
+                      `${mismatch.optionKey} expected ${mismatch.expectedSku || 'N/A'} got ${mismatch.actualSku || 'N/A'}`,
+                    )
+                    .join('; ')}`,
+                );
+              }
 
               // 4. Save to DB
               const dbShopifyProduct = await prisma.shopifyProduct.create({
@@ -1674,14 +1758,14 @@ export class QueueService {
                   handle: shopifyProductResult.handle,
                   status: String(shopifyProductResult.status || 'ACTIVE').toLowerCase(),
                   collectionIds: collections?.join(',') || null,
-                  price: createdVariants[0]?.price ? parseFloat(createdVariants[0].price) : variantPayloads[0].price,
+                  price: verifiedShopifyVariants[0]?.price ? parseFloat(verifiedShopifyVariants[0].price) : variantPayloads[0].price,
                   variants: {
-                    create: createdVariants.map((variant: any, index: number) => {
+                    create: verifiedShopifyVariants.map((variant: any, index: number) => {
                       const variantPayload = matchCreatedVariantPayload(variant, variantPayloads, optionNames, index);
 
                       return {
                         shopifyId: variant.id,
-                        sku: variant.inventoryItem?.sku,
+                        sku: getShopifyVariantSku(variant),
                         price: variant.price ? parseFloat(variant.price) : variantPayload?.price,
                         sourceVariantId: variantPayload?.sourceVariant.id || product.variants[0].id
                       };
@@ -1729,12 +1813,15 @@ export class QueueService {
                 inventoryLocationId: inventoryLocation.id,
                 inventoryLocationName: inventoryLocation.name,
                 variantsCreated: createdVariants.length,
+                variantsReadBack: verifiedShopifyVariants.length,
                 productMediaSubmitted: productMedia.length,
                 variantImagesRequested: variantPayloads.filter((variantPayload: any) => variantPayload.imageUrl).length,
-                variantImagesLinked: createdVariants.filter((variant: any) => (variant.media?.nodes || []).length > 0).length,
-                variantsLinked: createdVariants.length,
+                variantImagesLinked: verifiedShopifyVariants.filter((variant: any) => (variant.media?.nodes || []).length > 0).length,
+                variantsLinked: verifiedShopifyVariants.length,
                 variantsExpected: variantPayloads.length,
-                variantsVerified: createdVariants.length === variantPayloads.length,
+                variantsVerified: verifiedShopifyVariants.length === variantPayloads.length,
+                variantSkusVerified: variantSkuVerification.verified,
+                variantSkuMismatches: variantSkuVerification.mismatches,
                 shopifyVerified: Boolean(verifiedShopifyProduct?.id),
                 shopifyStatus: String(verifiedShopifyProduct?.status || shopifyProductResult.status || 'ACTIVE').toLowerCase(),
                 salesChannelsPublished: publicationResult.publishedCount,
