@@ -169,6 +169,13 @@ function rowKey(sheet: SheetConfig, rowNumber: number) {
   return `${sheet.sheetId}:${rowNumber}`;
 }
 
+function processedButUnverified(state: WorkerState, entry: CatalogRow) {
+  return (
+    state.fingerprints[entry.key] === entry.fingerprint &&
+    state.verifiedFingerprints[entry.key] !== entry.fingerprint
+  );
+}
+
 function targetRowLimit() {
   const configured = Number(
     process.env.SYNC_SHEET1_CATALOG_TARGET_ROWS || MAX_CATALOG_TARGET_ROWS,
@@ -314,6 +321,10 @@ async function runPhase(params: {
       if (entry.reason === "missing_product_deferred_for_publish_phase" && original) {
         deferred.push(original);
       } else {
+        if (original) {
+          params.state.fingerprints[original.key] = original.fingerprint;
+          delete params.state.verifiedFingerprints[original.key];
+        }
         params.state.skipped += 1;
         params.state.issues.push({
           stage: params.state.stage,
@@ -324,6 +335,11 @@ async function runPhase(params: {
       }
     }
     for (const entry of result.failed) {
+      const original = batchByRow.get(entry.rowNumber);
+      if (original) {
+        params.state.fingerprints[original.key] = original.fingerprint;
+        delete params.state.verifiedFingerprints[original.key];
+      }
       params.state.failed += 1;
       params.state.issues.push({
         stage: params.state.stage,
@@ -429,6 +445,9 @@ async function loadTargetRows(state: WorkerState) {
       advanced = true;
       const entry = rows[cursor];
       cursors.set(sheet.gid, cursor + 1);
+      if (processedButUnverified(state, entry)) {
+        continue;
+      }
       const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
       if (seenUrls.has(normalizedUrl)) {
         if (state.fingerprints[entry.key] !== entry.fingerprint) {
