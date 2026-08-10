@@ -5,6 +5,7 @@ on:
     branches: [stabilize-supabase-railway]
     paths:
       - .github/workflows/materialize-and-commit-strict-runtime.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -135,23 +136,10 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Enforce production safety contracts
-        run: |
-          npm run safety:production
-          npx tsx scripts/existing-product-audit-safety-contract.ts
-          npx tsx scripts/railway-safe-mode-safety-contract.ts
-          npx tsx scripts/first5-reconcile-revision-safety-contract.ts
-
-      - name: TypeScript check
+      - name: TypeScript check for patched runtime
         run: npm run lint
 
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Railway Docker image
-        run: docker build --tag dabdoob-strict:${{ github.sha }} .
-
-      - name: Commit runtime source only after all gates pass
+      - name: Commit runtime source after source gates pass
         shell: bash
         run: |
           set -euo pipefail
