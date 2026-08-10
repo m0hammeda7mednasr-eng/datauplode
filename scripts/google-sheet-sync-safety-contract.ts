@@ -128,6 +128,11 @@ assert.match(
   "H&M price-invalid rows must be retried at most once for the same fingerprint before being failed closed again",
 );
 assert.match(
+  catalogWorkerSource,
+  /SYNC_SHEET1_CATALOG_HM_PRICE_RETRY_ROWS_PER_CYCLE[\s\S]*hmPriceRetriesSelected[\s\S]*hmPriceRetriesSelected < hmPriceRetryLimit/,
+  "H&M price-invalid recovery must be capped per worker cycle so it cannot monopolize catalog progress",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",

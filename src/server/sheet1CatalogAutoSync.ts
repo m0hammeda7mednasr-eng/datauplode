@@ -333,6 +333,19 @@ function missingRowsPerCycleLimit(totalRows: number) {
   );
 }
 
+function hmPriceRetryRowsPerCycleLimit() {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_HM_PRICE_RETRY_ROWS_PER_CYCLE || 10,
+  );
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      Number.isFinite(configured) ? Math.floor(configured) : 10,
+    ),
+  );
+}
+
 function blockedHostFastSkipThreshold() {
   const configured = Number(
     process.env.SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD || 0,
@@ -730,6 +743,8 @@ async function loadTargetRows(state: WorkerState) {
   const selected: CatalogRow[] = [];
   const seenUrls = new Set<string>();
   const cursors = new Map<number, number>();
+  const hmPriceRetryLimit = hmPriceRetryRowsPerCycleLimit();
+  let hmPriceRetriesSelected = 0;
   const retryableProcessedKeys = retryableProcessedIssueKeysFromRecentIssues(state);
   const retryableDbKeys = await retryableHmPriceIssueKeysFromDatabase(
     state,
@@ -746,10 +761,16 @@ async function loadTargetRows(state: WorkerState) {
       const entry = rows[cursor];
       cursors.set(sheet.gid, cursor + 1);
       if (processedButUnverified(state, entry)) {
-        if (
+        const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
+        const hmPriceRetryEntry =
           retryableProcessedKeys.has(entry.key) &&
-          !hmPriceRetryAttempted(state, entry)
+          normalizedUrlHost(normalizedUrl).includes("hm.com");
+        if (
+          hmPriceRetryEntry &&
+          !hmPriceRetryAttempted(state, entry) &&
+          hmPriceRetriesSelected < hmPriceRetryLimit
         ) {
+          hmPriceRetriesSelected += 1;
           markHmPriceRetryAttempt(state, entry);
           delete state.fingerprints[entry.key];
           delete state.verifiedFingerprints[entry.key];
