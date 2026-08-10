@@ -15,6 +15,30 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Gate diagnostics on exact Railway readiness
+        shell: bash
+        env:
+          READINESS_BASE_URL: https://datauplode-production.up.railway.app
+          READINESS_EXPECTED_REVISION: ${{ github.event.pull_request.head.sha }}
+          READINESS_RESPONSE_PATH: production-readiness.json
+        run: |
+          set -euo pipefail
+          code=$(curl --silent --show-error --max-time 30 \
+            --output "$READINESS_RESPONSE_PATH" --write-out '%{http_code}' \
+            "$READINESS_BASE_URL/api/ready" || true)
+          echo "Readiness HTTP $code"
+          if [ "$code" != "200" ]; then
+            cat "$READINESS_RESPONSE_PATH" || true
+            echo "Refusing live dry-run diagnostics until exact Railway readiness is healthy."
+            exit 1
+          fi
+          node scripts/production-readiness-probe.mjs
+
       - name: Probe live reconcile dry-run
         shell: bash
         run: |
