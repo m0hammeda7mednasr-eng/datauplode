@@ -295,6 +295,14 @@ async function run() {
         if (captureError?.code === "BRIDGE_BLOCKED_SNAPSHOT" && promptOnBlocked) {
           const manualText = await promptForManualSnapshot(task.url);
           pageText = manualText.slice(0, maxChars).trim();
+        } else if (captureError?.code === "BRIDGE_BLOCKED_SNAPSHOT") {
+          pageText = compactVisibleText(
+            [
+              "Title: Access Denied",
+              `Source URL: ${task.url}`,
+              captureError?.message || "Blocked snapshot page.",
+            ].join("\n"),
+          );
         } else {
           throw captureError;
         }
