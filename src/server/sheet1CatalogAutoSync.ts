@@ -592,6 +592,8 @@ async function runPhase(params: {
         const host = catalogRowHost(original);
         if (host && isBlockedSourceReason(entry.reason)) {
           blockedHostCounts.set(host, (blockedHostCounts.get(host) || 0) + 1);
+        } else if (host) {
+          blockedHostCounts.set(host, 0);
         }
       }
       params.state.failed += 1;

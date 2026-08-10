@@ -99,6 +99,11 @@ assert.match(
 );
 assert.match(
   catalogWorkerSource,
+  /isBlockedSourceReason\(entry\.reason\)[\s\S]*blockedHostCounts\.set\(host, \(blockedHostCounts\.get\(host\) \|\| 0\) \+ 1\)[\s\S]*blockedHostCounts\.set\(host, 0\)/,
+  "blocked-host fast skip must reset after a non-blocked row-level failure so variant/data errors do not keep the whole host closed",
+);
+assert.match(
+  catalogWorkerSource,
   /Source host\\s\+\(\[a-z0-9\.-\]\+\)\\s\+skipped after\\s\+\(\\d\+\)/,
   "blocked-host memory must only be seeded from explicit failed-closed source-host issues",
 );
