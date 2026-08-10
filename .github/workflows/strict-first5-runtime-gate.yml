@@ -26,9 +26,8 @@ jobs:
       - name: Verify strict first-five runtime matching
         run: node scripts/strict-first5-runtime-safety-contract.mjs
 
-  repair-runtime:
-    needs: strict-runtime-gate
-    if: ${{ always() && github.event_name == 'push' && needs.strict-runtime-gate.result == 'failure' }}
+  repair-runtime-on-branch-push:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,10 +36,15 @@ jobs:
           ref: stabilize-supabase-railway
           fetch-depth: 1
 
-      - name: Patch runtime fail-closed
+      - name: Patch runtime fail-closed if required
         shell: bash
         run: |
           set -euo pipefail
+          if node scripts/strict-first5-runtime-safety-contract.mjs; then
+            echo 'Runtime already satisfies strict contract.'
+            exit 0
+          fi
+
           python3 <<'PY'
           from pathlib import Path
 
@@ -49,108 +53,108 @@ jobs:
           start = s.index('async function findShopifyProduct(')
           end = s.index('\nfunction resultRows(', start)
           fn = r'''async function findShopifyProduct(
-            client: ShopifyGraphqlClient,
-            row: SheetRow,
-            fresh: NormalizedProduct,
-            productCode: string,
-          ) {
-            const dbId = await findDbProduct(row.normalizedUrl, productCode);
-            if (dbId) {
-              const state = await getProductState(client, dbId);
-              if (state?.status === "ACTIVE") {
-                return { product: state, ambiguous: false, matchSource: "database" as const };
-              }
-            }
+  client: ShopifyGraphqlClient,
+  row: SheetRow,
+  fresh: NormalizedProduct,
+  productCode: string,
+) {
+  const dbId = await findDbProduct(row.normalizedUrl, productCode);
+  if (dbId) {
+    const state = await getProductState(client, dbId);
+    if (state?.status === "ACTIVE") {
+      return { product: state, ambiguous: false, matchSource: "database" as const };
+    }
+  }
 
-            const vendor = sourceVendor(row.normalizedUrl);
-            const freshTitle = clean(fresh.title);
-            const sourceIdentifiers = [
-              compact(fresh?.source?.productId),
-              ...(fresh.variants || []).flatMap((variant: any) => [
-                compact(variant?.sku),
-                compact(variant?.sourceVariantId),
-              ]),
-            ]
-              .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
-              .slice(0, 12);
+  const vendor = sourceVendor(row.normalizedUrl);
+  const freshTitle = clean(fresh.title);
+  const sourceIdentifiers = [
+    compact(fresh?.source?.productId),
+    ...(fresh.variants || []).flatMap((variant: any) => [
+      compact(variant?.sku),
+      compact(variant?.sourceVariantId),
+    ]),
+  ]
+    .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
+    .slice(0, 12);
 
-            if (!vendor || !freshTitle || sourceIdentifiers.length === 0) {
-              return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
-            }
+  if (!vendor || !freshTitle || sourceIdentifiers.length === 0) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
 
-            const query = `query FirstFiveFindStrict($query: String!) {
-              products(first: 30, query: $query) {
-                nodes {
-                  id title handle vendor status
-                  variants(first: 250) {
-                    nodes {
-                      id title price sku inventoryQuantity
-                      selectedOptions { name value }
-                      inventoryItem { id sku tracked }
-                    }
-                  }
-                }
-              }
-            }`;
-
-            const vendorFilter = `vendor:${shopifySearchValue(vendor)}`;
-            const requests = [
-              `status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
-              ...sourceIdentifiers.map(
-                (identifier) => `status:active AND ${vendorFilter} AND sku:${identifier}*`,
-              ),
-            ];
-
-            const found = new Map<string, any>();
-            for (const queryText of requests) {
-              try {
-                const data: any = await client.request(query, { query: queryText });
-                for (const product of data?.products?.nodes || []) {
-                  if (product?.id && product.status === "ACTIVE") {
-                    found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
-                  }
-                }
-              } catch (error) {
-                console.warn("[first5-reconcile] strict Shopify search failed", {
-                  queryText,
-                  error: clean((error as any)?.message || error),
-                });
-              }
-            }
-
-            const eligible = [...found.values()]
-              .map((product) => {
-                const vendorExact = clean(product.vendor).toLowerCase() === vendor.toLowerCase();
-                const titleExact = clean(product.title).toLowerCase() === freshTitle.toLowerCase();
-                const candidateSkus = product.variants
-                  .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
-                  .filter(Boolean);
-                const identityExact = sourceIdentifiers.some((identifier) =>
-                  candidateSkus.some((sku: string) => sku === identifier),
-                );
-                const confidence =
-                  (vendorExact ? 30 : 0) +
-                  (titleExact ? 30 : 0) +
-                  (identityExact ? 60 : 0);
-                return { product, vendorExact, titleExact, identityExact, confidence };
-              })
-              .filter(
-                (entry) =>
-                  entry.vendorExact && entry.titleExact && entry.identityExact && entry.confidence >= 120,
-              );
-
-            if (eligible.length === 1) {
-              return {
-                product: eligible[0].product,
-                ambiguous: false,
-                matchSource: "shopify_fallback" as const,
-              };
-            }
-            if (eligible.length > 1) {
-              return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
-            }
-            return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
+  const query = `query FirstFiveFindStrict($query: String!) {
+    products(first: 30, query: $query) {
+      nodes {
+        id title handle vendor status
+        variants(first: 250) {
+          nodes {
+            id title price sku inventoryQuantity
+            selectedOptions { name value }
+            inventoryItem { id sku tracked }
           }
+        }
+      }
+    }
+  }`;
+
+  const vendorFilter = `vendor:${shopifySearchValue(vendor)}`;
+  const requests = [
+    `status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+    ...sourceIdentifiers.map(
+      (identifier) => `status:active AND ${vendorFilter} AND sku:${identifier}*`,
+    ),
+  ];
+
+  const found = new Map<string, any>();
+  for (const queryText of requests) {
+    try {
+      const data: any = await client.request(query, { query: queryText });
+      for (const product of data?.products?.nodes || []) {
+        if (product?.id && product.status === "ACTIVE") {
+          found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+        }
+      }
+    } catch (error) {
+      console.warn("[first5-reconcile] strict Shopify search failed", {
+        queryText,
+        error: clean((error as any)?.message || error),
+      });
+    }
+  }
+
+  const eligible = [...found.values()]
+    .map((product) => {
+      const vendorExact = clean(product.vendor).toLowerCase() === vendor.toLowerCase();
+      const titleExact = clean(product.title).toLowerCase() === freshTitle.toLowerCase();
+      const candidateSkus = product.variants
+        .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
+        .filter(Boolean);
+      const identityExact = sourceIdentifiers.some((identifier) =>
+        candidateSkus.some((sku: string) => sku === identifier),
+      );
+      const confidence =
+        (vendorExact ? 30 : 0) +
+        (titleExact ? 30 : 0) +
+        (identityExact ? 60 : 0);
+      return { product, vendorExact, titleExact, identityExact, confidence };
+    })
+    .filter(
+      (entry) =>
+        entry.vendorExact && entry.titleExact && entry.identityExact && entry.confidence >= 120,
+    );
+
+  if (eligible.length === 1) {
+    return {
+      product: eligible[0].product,
+      ambiguous: false,
+      matchSource: "shopify_fallback" as const,
+    };
+  }
+  if (eligible.length > 1) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+  return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
+}
 '''
           s = s[:start] + fn + s[end:]
 
@@ -168,6 +172,7 @@ jobs:
           node scripts/strict-first5-runtime-safety-contract.mjs
 
       - name: Commit strict runtime source repair
+        if: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
           set -euo pipefail
