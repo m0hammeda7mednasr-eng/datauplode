@@ -171,17 +171,21 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Commit strict runtime source repair
+      - name: Publish strict runtime source repair through Contents API
         if: ${{ github.event_name == 'push' }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
-          git add src/server/firstFiveSheetsReconcile.ts
-          if git diff --cached --quiet; then
-            echo 'Runtime already strict; nothing to commit.'
+          if git diff --quiet -- src/server/firstFiveSheetsReconcile.ts; then
+            echo 'Runtime already strict; nothing to publish.'
             exit 0
           fi
-          git commit -m 'Enforce fail-closed Shopify existing-product matching'
-          git push origin HEAD:stabilize-supabase-railway
+          CURRENT_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/contents/src/server/firstFiveSheetsReconcile.ts?ref=stabilize-supabase-railway" --jq .sha)"
+          CONTENT="$(base64 -w0 src/server/firstFiveSheetsReconcile.ts)"
+          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/src/server/firstFiveSheetsReconcile.ts" \
+            -f message='Enforce fail-closed Shopify existing-product matching' \
+            -f content="$CONTENT" \
+            -f sha="$CURRENT_SHA" \
+            -f branch='stabilize-supabase-railway'
