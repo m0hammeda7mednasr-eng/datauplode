@@ -239,6 +239,7 @@ function isCanaryReadyDryRun(
 
 router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
+  const postCanaryBroadWritesConfigured = enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED");
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
   const jobRecoveryShopifyWritesConfigured = enabled(
@@ -280,6 +281,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     catalogAuditDryRunConfigured,
     catalogCanaryMaxRows: 1,
     runtimeWriteGateEnabled,
+    postCanaryBroadWritesConfigured,
     inventoryAutostartConfigured,
     inventoryAutostartEnabled: runtimeWriteGateEnabled && inventoryAutostartConfigured,
     jobRecoveryConfigured,
@@ -301,8 +303,12 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         String(deploymentMetadata().revision || "").toLowerCase(),
     sheet1CatalogAutostartEnabled:
       runtimeWriteGateEnabled &&
+      postCanaryBroadWritesConfigured &&
       sheet1CatalogAutostartConfigured &&
-      !sheet1CatalogKillSwitch,
+      !sheet1CatalogKillSwitch &&
+      /^[0-9a-f]{40}$/i.test(sheet1CatalogExpectedRevision) &&
+      sheet1CatalogExpectedRevision.toLowerCase() ===
+        String(deploymentMetadata().revision || "").toLowerCase(),
   };
 
   const safeMode =
@@ -322,6 +328,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       deployment.revisionVerified === true);
   const productionWriteSafetyReady =
     !runtimeWriteGateEnabled &&
+    !postCanaryBroadWritesConfigured &&
     !inventoryAutostartConfigured &&
     !jobRecoveryConfigured &&
     !jobRecoveryShopifyWritesConfigured &&
