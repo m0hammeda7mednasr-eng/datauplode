@@ -98,6 +98,11 @@ assert.match(
   "retryable processed rows must clear their fingerprint so the worker can re-verify them",
 );
 assert.match(
+  catalogWorkerSource,
+  /retryableHmPriceIssueKeysFromDatabase[\s\S]*hm\.com[\s\S]*manualReviews[\s\S]*Product source price is invalid/,
+  "older H&M price-invalid rows may be retried only when the persisted DB issue documents that exact validation failure",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",

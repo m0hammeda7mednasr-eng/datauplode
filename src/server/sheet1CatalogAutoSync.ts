@@ -237,6 +237,49 @@ function retryableProcessedIssueKeysFromRecentIssues(state: WorkerState) {
   return keys;
 }
 
+async function retryableHmPriceIssueKeysFromDatabase(
+  state: WorkerState,
+  entries: CatalogRow[],
+) {
+  const byUrl = new Map<string, string[]>();
+  for (const entry of entries) {
+    if (!processedButUnverified(state, entry)) continue;
+    const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
+    if (!normalizedUrlHost(normalizedUrl).includes("hm.com")) continue;
+    const keys = byUrl.get(normalizedUrl) || [];
+    keys.push(entry.key);
+    byUrl.set(normalizedUrl, keys);
+  }
+
+  const urls = [...byUrl.keys()];
+  if (!urls.length) return new Set<string>();
+
+  const retryable = new Set<string>();
+  for (const urlBatch of chunks(urls, 500)) {
+    const products = await prisma.sourceProduct.findMany({
+      where: {
+        url: { in: urlBatch },
+        OR: [
+          { raw: { contains: "Product source price is invalid" } },
+          {
+            manualReviews: {
+              some: {
+                reason: { contains: "Product source price is invalid" },
+              },
+            },
+          },
+        ],
+      },
+      select: { url: true },
+    });
+    for (const product of products) {
+      for (const key of byUrl.get(product.url) || []) retryable.add(key);
+    }
+  }
+
+  return retryable;
+}
+
 function targetRowLimit() {
   const configured = Number(
     process.env.SYNC_SHEET1_CATALOG_TARGET_ROWS || MAX_CATALOG_TARGET_ROWS,
@@ -644,6 +687,11 @@ async function loadTargetRows(state: WorkerState) {
   const seenUrls = new Set<string>();
   const cursors = new Map<number, number>();
   const retryableProcessedKeys = retryableProcessedIssueKeysFromRecentIssues(state);
+  const retryableDbKeys = await retryableHmPriceIssueKeysFromDatabase(
+    state,
+    [...validBySheet.values()].flat(),
+  );
+  for (const key of retryableDbKeys) retryableProcessedKeys.add(key);
   while (selected.length < targetRowLimit()) {
     let advanced = false;
     for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
