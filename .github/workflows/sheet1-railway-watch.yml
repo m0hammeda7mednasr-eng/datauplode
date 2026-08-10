@@ -13,6 +13,7 @@ on:
       - src/server/oneTimeSheet1Reconcile.ts
       - server.ts
       - scripts/watch-sheet1-reconcile.mjs
+      - scripts/watch-sheet1-rollout.mjs
       - .github/workflows/sheet1-railway-watch.yml
 
 permissions:
@@ -43,5 +44,5 @@ jobs:
         with:
           node-version: 22
 
-      - name: Watch Railway deployment and reconcile job
-        run: node scripts/watch-sheet1-reconcile.mjs
+      - name: Verify Railway rollout and watch reconcile only when writes are enabled
+        run: node scripts/watch-sheet1-rollout.mjs
