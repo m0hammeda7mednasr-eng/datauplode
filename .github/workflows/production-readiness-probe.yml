@@ -1,0 +1,87 @@
+name: Production Readiness Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-production-readiness
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      READINESS_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      READINESS_EXPECTED_REVISION: ${{ github.sha }}
+      READINESS_RESPONSE_PATH: production-readiness.json
+
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          if [[ "${checked_out,,}" != "${READINESS_EXPECTED_REVISION,,}" ]]; then
+            echo "Checked-out revision ${checked_out} does not match expected ${READINESS_EXPECTED_REVISION}." >&2
+            exit 2
+          fi
+
+      - name: Validate Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${READINESS_BASE_URL}" ]]; then
+            echo "Missing RAILWAY_SMOKE_BASE_URL repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${READINESS_BASE_URL}" =~ ^https:// ]]; then
+            echo "Railway readiness target must use HTTPS." >&2
+            exit 2
+          fi
+          echo "Target host: $(node -e 'console.log(new URL(process.env.READINESS_BASE_URL).host)')"
+          echo "Expected deployed revision: ${READINESS_EXPECTED_REVISION}"
+
+      - name: Fetch live readiness without writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${READINESS_BASE_URL%/}/api/ready"
+          status="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output "${READINESS_RESPONSE_PATH}" \
+            --write-out '%{http_code}' \
+            "${ready_url}")"
+          echo "Readiness HTTP status: ${status}"
+          if [[ ! "${status}" =~ ^[0-9]{3}$ ]]; then
+            echo "Invalid HTTP status from Railway readiness endpoint." >&2
+            exit 2
+          fi
+
+      - name: Verify exact revision, Supabase binding and safe mode
+        run: node scripts/production-readiness-probe.mjs
+
+      - name: Publish readiness summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Dabdoob production readiness probe"
+            echo
+            echo "- Read-only live probe: \`true\`"
+            echo "- Endpoint: \`/api/ready\`"
+            echo "- Expected deployed revision: \`${READINESS_EXPECTED_REVISION}\`"
+            echo "- Exact Railway revision required: \`true\`"
+            echo "- Supabase target + pinned project match required: \`true\`"
+            echo "- Runtime/catalog/job-recovery write gates must remain closed: \`true\`"
+            echo "- Queue must be clean before Dry Run: \`true\`"
+            echo "- Shopify mutations from this workflow: \`0\`"
+            echo "- Google Sheet writes from this workflow: \`0\`"
+          } >> "$GITHUB_STEP_SUMMARY"
