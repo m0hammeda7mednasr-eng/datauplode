@@ -67,7 +67,8 @@ function enabled(name: string) {
 
 function deployedRevision() {
   return String(
-    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.SYNC_SHEET1_CATALOG_DEPLOYED_REVISION ||
+      process.env.RAILWAY_GIT_COMMIT_SHA ||
       process.env.SOURCE_VERSION ||
       process.env.GIT_COMMIT_SHA ||
       "",
@@ -86,7 +87,10 @@ function revisionAuthorized() {
 
 export function sheet1CatalogAutoSyncEnabled() {
   const branch = String(
-    process.env.RAILWAY_GIT_BRANCH || process.env.GIT_BRANCH || "",
+    process.env.SYNC_SHEET1_CATALOG_BRANCH ||
+      process.env.RAILWAY_GIT_BRANCH ||
+      process.env.GIT_BRANCH ||
+      "",
   )
     .trim()
     .replace(/^refs\/heads\//, "");
@@ -103,6 +107,41 @@ export function sheet1CatalogAutoSyncEnabled() {
     !enabled("SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED") &&
     revisionAuthorized()
   );
+}
+
+function sheet1CatalogAutoSyncGateSnapshot() {
+  const branch = String(
+    process.env.SYNC_SHEET1_CATALOG_BRANCH ||
+      process.env.RAILWAY_GIT_BRANCH ||
+      process.env.GIT_BRANCH ||
+      "",
+  )
+    .trim()
+    .replace(/^refs\/heads\//, "");
+  const expected = String(process.env.SYNC_SHEET1_CATALOG_REVISION || "").trim();
+  const actual = deployedRevision();
+  const railway = Boolean(
+    String(process.env.RAILWAY_ENVIRONMENT || "").trim() ||
+      String(process.env.RAILWAY_PUBLIC_DOMAIN || "").trim(),
+  );
+  return {
+    production:
+      String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+    railway,
+    branch,
+    branchOk: branch === "stabilize-supabase-railway",
+    runtimeWriteEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),
+    autostartEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED"),
+    killSwitchEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED"),
+    expectedRevisionOk: /^[0-9a-f]{40}$/i.test(expected),
+    actualRevisionOk: /^[0-9a-f]{40}$/i.test(actual),
+    revisionMatches:
+      expected.toLowerCase() === actual.toLowerCase() &&
+      /^[0-9a-f]{40}$/i.test(expected) &&
+      /^[0-9a-f]{40}$/i.test(actual),
+    actualRevisionPrefix: actual ? actual.slice(0, 8) : "missing",
+    expectedRevisionPrefix: expected ? expected.slice(0, 8) : "missing",
+  };
 }
 
 function parseState(value: string | null | undefined): Partial<WorkerState> {
@@ -644,6 +683,7 @@ export function startSheet1CatalogAutoSync() {
   if (!sheet1CatalogAutoSyncEnabled()) {
     console.log(
       "[sheet1-catalog] autostart blocked: requires Railway production branch stabilize-supabase-railway, runtime writes, catalog autostart flag, exact deployed revision, and no kill switch",
+      sheet1CatalogAutoSyncGateSnapshot(),
     );
     return;
   }
