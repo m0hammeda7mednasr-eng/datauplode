@@ -186,6 +186,16 @@ function targetRowLimit() {
   );
 }
 
+function missingRowsPerCycleLimit(totalRows: number) {
+  const configured = Number(
+    process.env.SYNC_SHEET1_CATALOG_MISSING_ROWS_PER_CYCLE || totalRows,
+  );
+  return Math.min(
+    totalRows,
+    Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : totalRows),
+  );
+}
+
 function refreshProgress(state: WorkerState) {
   state.verifiedRows = Object.keys(state.verifiedFingerprints).length;
   state.remainingRows = Math.max(0, state.targetRows - state.verifiedRows);
@@ -542,10 +552,14 @@ async function runCycle(markerId: string, state: WorkerState) {
   ];
   state.stage = "publish_missing_products";
   await persist(markerId, state);
+  const missingRowsForThisCycle = missingRows.slice(
+    0,
+    missingRowsPerCycleLimit(missingRows.length),
+  );
   await runPhase({
     markerId,
     state,
-    rows: missingRows,
+    rows: missingRowsForThisCycle,
     createMissingProducts: true,
   });
   state.stage = state.remainingRows === 0 ? "target_complete_monitoring" : "idle_monitoring";
