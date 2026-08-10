@@ -1,0 +1,3 @@
+Persisted canary read-back broad-write gate materialized on stabilize-supabase-railway.
+Broad Sheet1 catalog writes remain fail-closed until a completed one-product canary has Shopify readbackVerified=true and valid dry-run provenance.
+No Shopify or Google Sheet write is performed by this marker.
