@@ -35,15 +35,17 @@ The server caps writes to `CATALOG_AUDIT_CANARY_MAX_ROWS`, with a hard maximum o
 
 ## Current first-eight sheet auto-sync note
 
-Checked on 2026-08-11 01:11 Africa/Cairo.
+Checked on 2026-08-11 01:20 Africa/Cairo.
 
-- Latest Railway deployment `f403ff07-e924-4ba2-9778-4638bba6a6c1` is successful.
-- The first-eight-sheet worker is running on revision `a57b6ca7ce0fd6d47a4ec6ea7a162087628bca18`.
+- Latest Railway deployment `c24cf24c-cf04-4e6a-b94c-eb46c55cb90d` is successful.
+- The first-eight-sheet worker is running on revision `1a413b89daad32312a58295498f472c411bbb31a`.
 - Live target is capped at 5000 unique rows from the first eight configured Google Sheet tabs.
-- Current verified progress: 720 / 5000.
-- Current Shopify work split: 326 existing products updated, 394 missing products published.
-- Current unverified failures: 1789, mostly source-site blocks from Centrepoint, SHEIN, and Next.
-- Recent blocked-host fast-skips: 112 rows failed closed after repeated scrape blocks (Centrepoint, Next, and SHEIN).
-- Current Google Sheet SKU writeback pending: 473 cells.
+- Current verified progress: 755 / 5000.
+- Current Shopify work split: 332 existing products updated, 423 missing products published.
+- Current unverified failures: 2020, mostly source-site blocks from Centrepoint, SHEIN, and Next.
+- Recent blocked-host fast-skips: 199 rows failed closed after repeated scrape blocks (Centrepoint, Next, and SHEIN).
+- Current Google Sheet SKU writeback pending: 508 cells.
 - Google Sheet writeback is pending because Google writer credentials are not configured in Railway and the Google Drive connector is not connected in Codex.
 - `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=5` is enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
+- The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
+- Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.

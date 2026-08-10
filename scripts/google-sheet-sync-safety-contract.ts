@@ -87,6 +87,11 @@ assert.match(
   /Source host\\s\+\(\[a-z0-9\.-\]\+\)\\s\+skipped after\\s\+\(\\d\+\)/,
   "blocked-host memory must only be seeded from explicit failed-closed source-host issues",
 );
+assert.match(
+  readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
+  /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
+  "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",
+);
 
 const sparseRows = parseHeaderlessGoogleSheetRows([
   [],

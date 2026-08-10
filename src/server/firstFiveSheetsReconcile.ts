@@ -488,6 +488,17 @@ function optionKey(values: Record<string, string>) {
     .join("|");
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function variantSkuSizeSuffixMatches(sku: unknown, sizeToken: string | null) {
+  if (!sizeToken) return false;
+  const normalizedSku = clean(sku).toUpperCase();
+  if (!normalizedSku) return false;
+  return new RegExp(`-${escapeRegExp(sizeToken)}-\\d+(?:\\.\\d+)?$`).test(normalizedSku);
+}
+
 function matchSourceVariant(shopifyVariant: any, sourceVariants: any[]) {
   const shopOptions = shopifyOptions(shopifyVariant);
   const exactKey = optionKey(shopOptions);
@@ -507,6 +518,16 @@ function matchSourceVariant(shopifyVariant: any, sourceVariants: any[]) {
       );
     });
     if (matches.length === 1) return matches[0];
+  }
+
+  const currentSku = shopifyVariant?.inventoryItem?.sku || shopifyVariant?.sku;
+  if (currentSku) {
+    const skuMatches = sourceVariants.filter((variant) => {
+      const source = sourceOptions(variant);
+      const sourceSize = normalizeSizeToken(source.size || variant?.size || "");
+      return variantSkuSizeSuffixMatches(currentSku, sourceSize);
+    });
+    if (skuMatches.length === 1) return skuMatches[0];
   }
 
   const relaxed = sourceVariants.filter((variant) => {
