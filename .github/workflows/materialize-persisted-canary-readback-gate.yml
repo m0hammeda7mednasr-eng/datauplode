@@ -1,0 +1,69 @@
+name: Materialize Persisted Canary Readback Gate
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/materialize-persisted-canary-readback-gate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Require persisted successful canary read-back before broad worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/server/sheet1CatalogAutoSync.ts')
+          text = path.read_text()
+
+          anchor = '''export function startSheet1CatalogAutoSync() {\n  if (!sheet1CatalogAutoSyncEnabled()) {'''
+          helper = '''async function persistedCanaryReadbackReady() {\n  const recentCanaries = await prisma.importBatch.findMany({\n    where: { target: "catalog_audit", status: "COMPLETED" },\n    orderBy: { createdAt: "desc" },\n    take: 10,\n    select: { payloadJson: true },\n  });\n\n  for (const run of recentCanaries) {\n    let payload: any = {};\n    try {\n      payload = JSON.parse(run.payloadJson || "{}");\n    } catch {\n      continue;\n    }\n\n    const summary = payload?.summary || {};\n    const results = Array.isArray(payload?.results) ? payload.results : [];\n    const provenance =\n      payload?.provenance && typeof payload.provenance === "object"\n        ? payload.provenance\n        : {};\n    const verifiedResults = results.filter(\n      (result: any) =>\n        result?.status === "verified" &&\n        result?.readbackVerified === true &&\n        /^gid:\\/\\/shopify\\/Product\\/\\d+$/.test(\n          String(result?.shopifyProductId || "").trim(),\n        ),\n    );\n    const shopifyProductId = String(\n      verifiedResults[0]?.shopifyProductId || "",\n    ).trim();\n\n    if (\n      summary.dryRun === false &&\n      summary.writeSheet !== true &&\n      Number(summary.uniqueProductsProcessed || 0) === 1 &&\n      Number(summary.verified || 0) === 1 &&\n      Number(summary.missing || 0) === 0 &&\n      Number(summary.ambiguous || 0) === 0 &&\n      Number(summary.errors || 0) === 0 &&\n      verifiedResults.length === 1 &&\n      Boolean(String(provenance?.dryRunBatchId || "").trim()) &&\n      String(provenance?.shopifyProductId || "").trim() === shopifyProductId\n    ) {\n      return true;\n    }\n  }\n\n  return false;\n}\n\nexport function startSheet1CatalogAutoSync() {\n  if (!sheet1CatalogAutoSyncEnabled()) {'''
+          if anchor not in text:
+              raise SystemExit('Expected startSheet1CatalogAutoSync anchor not found; refusing ambiguous patch')
+          text = text.replace(anchor, helper, 1)
+
+          old_start = '''  if (started) return;\n  started = true;\n  console.warn(\n    "[sheet1-catalog] first-eight-sheet worker ENABLED: 5000 unique rows, update existing first, publish verified missing products, deterministic SKU writeback",\n  );\n  setTimeout(() => {\n    void runContinuousWorker().catch((error) => {\n      console.error("[sheet1-catalog] fatal worker error", error);\n    });\n  }, START_DELAY_MS);'''
+          new_start = '''  if (started) return;\n  started = true;\n  setTimeout(() => {\n    void (async () => {\n      const canaryReadbackReady = await persistedCanaryReadbackReady();\n      if (!canaryReadbackReady) {\n        console.error(\n          "[sheet1-catalog] broad worker blocked: no persisted successful one-product canary with Shopify read-back provenance",\n        );\n        return;\n      }\n      console.warn(\n        "[sheet1-catalog] first-eight-sheet worker ENABLED after persisted one-product canary read-back: 5000 unique rows, update existing first, publish verified missing products, deterministic SKU writeback",\n      );\n      await runContinuousWorker();\n    })().catch((error) => {\n      console.error("[sheet1-catalog] fatal worker error", error);\n    });\n  }, START_DELAY_MS);'''
+          if old_start not in text:
+              raise SystemExit('Expected broad worker start block not found; refusing ambiguous patch')
+          text = text.replace(old_start, new_start, 1)
+          path.write_text(text)
+          PY
+
+      - name: Verify fail-closed persisted canary read-back gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'async function persistedCanaryReadbackReady()' src/server/sheet1CatalogAutoSync.ts
+          grep -F 'result?.readbackVerified === true' src/server/sheet1CatalogAutoSync.ts
+          grep -F 'Boolean(String(provenance?.dryRunBatchId || "").trim())' src/server/sheet1CatalogAutoSync.ts
+          grep -F 'broad worker blocked: no persisted successful one-product canary with Shopify read-back provenance' src/server/sheet1CatalogAutoSync.ts
+          git diff --check
+
+      - name: Commit runtime safety change
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/server/sheet1CatalogAutoSync.ts; then
+            echo 'No source change required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/sheet1CatalogAutoSync.ts
+          git commit -m 'Require persisted canary readback before broad sync'
+          git push origin HEAD:stabilize-supabase-railway
