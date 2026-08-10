@@ -8,7 +8,11 @@ const checks = [
   ['fallback uses exact vendor identity', source.includes('vendorExact')],
   ['fallback uses exact normalized title identity', source.includes('titleExact')],
   ['fallback requires source/SKU identity', source.includes('identityExact')],
-  ['fallback requires all three independent signals', source.includes('vendorExact && entry.titleExact && entry.identityExact')],
+  [
+    'fallback requires all three independent signals',
+    /entry\.vendorExact\s*&&\s*entry\.titleExact\s*&&\s*entry\.identityExact/.test(source),
+  ],
+  ['fallback requires full confidence threshold', /entry\.confidence\s*>=\s*120/.test(source)],
   ['weak score threshold is removed', !source.includes('score >= 20')],
   ['single-candidate auto-accept is removed', !/candidates\.length\s*===\s*1[\s\S]{0,220}return/.test(source)],
   ['Max multi-color guard exists', source.includes('Max product has multiple Shopify colors')],
