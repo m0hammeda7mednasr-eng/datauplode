@@ -12,11 +12,25 @@ permissions:
 jobs:
   patch-contract-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
+    env:
+      NODE_ENV: development
     steps:
       - uses: actions/checkout@v4
         with:
           ref: stabilize-supabase-railway
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Generate Prisma client
+        run: npx prisma generate
 
       - name: Apply fail-closed matcher and Max guard
         shell: bash
@@ -121,7 +135,23 @@ jobs:
           git diff --check
           node scripts/strict-first5-runtime-safety-contract.mjs
 
-      - name: Commit runtime source only after strict contract passes
+      - name: Enforce production safety contracts
+        run: |
+          npm run safety:production
+          npx tsx scripts/existing-product-audit-safety-contract.ts
+          npx tsx scripts/railway-safe-mode-safety-contract.ts
+          npx tsx scripts/first5-reconcile-revision-safety-contract.ts
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Railway Docker image
+        run: docker build --tag dabdoob-strict:${{ github.sha }} .
+
+      - name: Commit runtime source only after all gates pass
         shell: bash
         run: |
           set -euo pipefail
