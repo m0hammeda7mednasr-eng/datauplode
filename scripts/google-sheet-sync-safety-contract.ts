@@ -118,6 +118,16 @@ assert.match(
   "older H&M price-invalid rows may be retried only when the persisted DB issue documents that exact validation failure",
 );
 assert.match(
+  catalogWorkerSource,
+  /hmPriceRetryFingerprints/,
+  "H&M price-invalid recovery attempts must be persisted by row fingerprint",
+);
+assert.match(
+  catalogWorkerSource,
+  /hmPriceRetryAttempted\(state, entry\)[\s\S]*markHmPriceRetryAttempt\(state, entry\)[\s\S]*delete state\.fingerprints\[entry\.key\]/,
+  "H&M price-invalid rows must be retried at most once for the same fingerprint before being failed closed again",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",

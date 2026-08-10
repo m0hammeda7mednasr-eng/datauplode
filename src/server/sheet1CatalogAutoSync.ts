@@ -54,6 +54,7 @@ type WorkerState = {
   sheetCellsWritten: number;
   sheetWritePending: number;
   pendingSkuWrites: Record<string, string>;
+  hmPriceRetryFingerprints: Record<string, string>;
   lastBatchId: string | null;
   lastRunAt: string | null;
   issues: Array<Record<string, unknown>>;
@@ -161,13 +162,35 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
     previous?.verifiedFingerprints && typeof previous.verifiedFingerprints === "object"
       ? previous.verifiedFingerprints
       : {};
+  const fingerprints =
+    previous?.fingerprints && typeof previous.fingerprints === "object"
+      ? previous.fingerprints
+      : {};
+  const hmPriceRetryFingerprints =
+    previous?.hmPriceRetryFingerprints &&
+    typeof previous.hmPriceRetryFingerprints === "object"
+      ? previous.hmPriceRetryFingerprints
+      : {};
+  for (const issue of Array.isArray(previous?.issues) ? previous.issues.slice(-200) : []) {
+    const reason = String(issue.reason || issue.error || "");
+    const host = normalizedUrlHost(issue.url);
+    const sheetId = Number(issue.sheetId);
+    const rowNumber = Number(issue.rowNumber);
+    const key = `${sheetId}:${rowNumber}`;
+    if (
+      /Product source price is invalid/i.test(reason) &&
+      host.includes("hm.com") &&
+      Number.isSafeInteger(sheetId) &&
+      Number.isSafeInteger(rowNumber) &&
+      fingerprints[key]
+    ) {
+      hmPriceRetryFingerprints[key] = fingerprints[key];
+    }
+  }
   return {
     stage: "starting",
     cycle: Number(previous?.cycle || 0),
-    fingerprints:
-      previous?.fingerprints && typeof previous.fingerprints === "object"
-        ? previous.fingerprints
-        : {},
+    fingerprints,
     verifiedFingerprints,
     totalRows: 0,
     targetRows: 0,
@@ -184,6 +207,7 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
       previous?.pendingSkuWrites && typeof previous.pendingSkuWrites === "object"
         ? previous.pendingSkuWrites
         : {},
+    hmPriceRetryFingerprints,
     lastBatchId: previous?.lastBatchId || null,
     lastRunAt: previous?.lastRunAt || null,
     issues: Array.isArray(previous?.issues) ? previous.issues.slice(-200) : [],
@@ -217,6 +241,14 @@ function processedButUnverified(state: WorkerState, entry: CatalogRow) {
   );
 }
 
+function hmPriceRetryAttempted(state: WorkerState, entry: CatalogRow) {
+  return state.hmPriceRetryFingerprints[entry.key] === entry.fingerprint;
+}
+
+function markHmPriceRetryAttempt(state: WorkerState, entry: CatalogRow) {
+  state.hmPriceRetryFingerprints[entry.key] = entry.fingerprint;
+}
+
 function retryableProcessedIssueKeysFromRecentIssues(state: WorkerState) {
   const keys = new Set<string>();
   for (const issue of state.issues.slice(-200)) {
@@ -244,6 +276,7 @@ async function retryableHmPriceIssueKeysFromDatabase(
   const byUrl = new Map<string, string[]>();
   for (const entry of entries) {
     if (!processedButUnverified(state, entry)) continue;
+    if (hmPriceRetryAttempted(state, entry)) continue;
     const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
     if (!normalizedUrlHost(normalizedUrl).includes("hm.com")) continue;
     const keys = byUrl.get(normalizedUrl) || [];
@@ -713,7 +746,11 @@ async function loadTargetRows(state: WorkerState) {
       const entry = rows[cursor];
       cursors.set(sheet.gid, cursor + 1);
       if (processedButUnverified(state, entry)) {
-        if (retryableProcessedKeys.has(entry.key)) {
+        if (
+          retryableProcessedKeys.has(entry.key) &&
+          !hmPriceRetryAttempted(state, entry)
+        ) {
+          markHmPriceRetryAttempt(state, entry);
           delete state.fingerprints[entry.key];
           delete state.verifiedFingerprints[entry.key];
         } else {

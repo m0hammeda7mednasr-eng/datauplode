@@ -50,3 +50,4 @@ Checked on 2026-08-11 01:47 Africa/Cairo.
 - The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
 - Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.
 - H&M rows that previously failed with `Product source price is invalid` are now eligible for a narrow re-verification retry; the normal price validation still prevents publishing if the source price is not valid.
+- H&M price-validation recovery is now bounded by row fingerprint so an unrecovered H&M row is retried once for that exact sheet state, then fails closed again until the row changes.
