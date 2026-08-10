@@ -217,6 +217,26 @@ function processedButUnverified(state: WorkerState, entry: CatalogRow) {
   );
 }
 
+function retryableProcessedIssueKeysFromRecentIssues(state: WorkerState) {
+  const keys = new Set<string>();
+  for (const issue of state.issues.slice(-200)) {
+    const reason = String(issue.reason || issue.error || "");
+    const host = normalizedUrlHost(issue.url);
+    const sheetId = Number(issue.sheetId);
+    const rowNumber = Number(issue.rowNumber);
+    if (
+      /Product source price is invalid/i.test(reason) &&
+      host.includes("hm.com") &&
+      Number.isSafeInteger(sheetId) &&
+      Number.isSafeInteger(rowNumber) &&
+      rowNumber > 0
+    ) {
+      keys.add(`${sheetId}:${rowNumber}`);
+    }
+  }
+  return keys;
+}
+
 function targetRowLimit() {
   const configured = Number(
     process.env.SYNC_SHEET1_CATALOG_TARGET_ROWS || MAX_CATALOG_TARGET_ROWS,
@@ -623,6 +643,7 @@ async function loadTargetRows(state: WorkerState) {
   const selected: CatalogRow[] = [];
   const seenUrls = new Set<string>();
   const cursors = new Map<number, number>();
+  const retryableProcessedKeys = retryableProcessedIssueKeysFromRecentIssues(state);
   while (selected.length < targetRowLimit()) {
     let advanced = false;
     for (const sheet of FIRST_EIGHT_CATALOG_SHEETS) {
@@ -633,7 +654,12 @@ async function loadTargetRows(state: WorkerState) {
       const entry = rows[cursor];
       cursors.set(sheet.gid, cursor + 1);
       if (processedButUnverified(state, entry)) {
-        continue;
+        if (retryableProcessedKeys.has(entry.key)) {
+          delete state.fingerprints[entry.key];
+          delete state.verifiedFingerprints[entry.key];
+        } else {
+          continue;
+        }
       }
       const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
       if (seenUrls.has(normalizedUrl)) {

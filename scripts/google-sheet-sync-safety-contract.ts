@@ -88,6 +88,16 @@ assert.match(
   "blocked-host memory must only be seeded from explicit failed-closed source-host issues",
 );
 assert.match(
+  catalogWorkerSource,
+  /retryableProcessedIssueKeysFromRecentIssues[\s\S]*Product source price is invalid[\s\S]*host\.includes\("hm\.com"\)/,
+  "processed unverified rows may only be retried for the narrow H&M price-invalid recovery path",
+);
+assert.match(
+  catalogWorkerSource,
+  /retryableProcessedKeys\.has\(entry\.key\)[\s\S]*delete state\.fingerprints\[entry\.key\]/,
+  "retryable processed rows must clear their fingerprint so the worker can re-verify them",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",

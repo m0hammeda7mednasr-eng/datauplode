@@ -35,17 +35,18 @@ The server caps writes to `CATALOG_AUDIT_CANARY_MAX_ROWS`, with a hard maximum o
 
 ## Current first-eight sheet auto-sync note
 
-Checked on 2026-08-11 01:20 Africa/Cairo.
+Checked on 2026-08-11 01:27 Africa/Cairo.
 
-- Latest Railway deployment `c24cf24c-cf04-4e6a-b94c-eb46c55cb90d` is successful.
-- The first-eight-sheet worker is running on revision `1a413b89daad32312a58295498f472c411bbb31a`.
+- Latest Railway deployment `fb34aa07-16d7-453d-a8ce-06977458502f` is successful.
+- The first-eight-sheet worker is running on revision `cd28855f55258ade9b3ab1b1cfc30727e8bf9bdc`.
 - Live target is capped at 5000 unique rows from the first eight configured Google Sheet tabs.
-- Current verified progress: 755 / 5000.
-- Current Shopify work split: 332 existing products updated, 423 missing products published.
-- Current unverified failures: 2020, mostly source-site blocks from Centrepoint, SHEIN, and Next.
-- Recent blocked-host fast-skips: 199 rows failed closed after repeated scrape blocks (Centrepoint, Next, and SHEIN).
-- Current Google Sheet SKU writeback pending: 508 cells.
+- Current verified progress: 780 / 5000.
+- Current Shopify work split: 337 existing products updated, 443 missing products published.
+- Current unverified failures: 2762, mostly source-site blocks from Centrepoint, SHEIN, and Next, plus retryable H&M price-validation rows.
+- Recent blocked-host fast-skips: 144 rows failed closed after repeated scrape blocks (Centrepoint, Next, and SHEIN).
+- Current Google Sheet SKU writeback pending: 533 cells.
 - Google Sheet writeback is pending because Google writer credentials are not configured in Railway and the Google Drive connector is not connected in Codex.
 - `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=5` is enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
 - The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
 - Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.
+- H&M rows that previously failed with `Product source price is invalid` are now eligible for a narrow re-verification retry; the normal price validation still prevents publishing if the source price is not valid.
