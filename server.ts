@@ -339,6 +339,7 @@ async function startServer() {
       "Content-Type",
       "Authorization",
       "X-Catalog-Audit-Write-Token",
+      "X-GitHub-Actions-OIDC-Token",
       "X-Sync-Job-Quarantine-Confirm",
       "X-Sheet1-Reconcile-Run",
     ],
@@ -360,7 +361,7 @@ async function startServer() {
       res.setHeader(
         "Access-Control-Allow-Headers",
         req.get("access-control-request-headers") ||
-          "Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-Sheet1-Reconcile-Run",
+          "Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-GitHub-Actions-OIDC-Token,X-Sheet1-Reconcile-Run",
       );
       return res.sendStatus(204);
     }
