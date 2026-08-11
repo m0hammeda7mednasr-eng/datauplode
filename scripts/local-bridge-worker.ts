@@ -242,6 +242,9 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
         },
       ]);
     }
+    await context.addInitScript(
+      "window.__name = window.__name || function(target) { return target; };",
+    );
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
