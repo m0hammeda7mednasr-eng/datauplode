@@ -16,6 +16,7 @@ import apiRouter from "./src/server/api.js";
 import catalogAuditRouter from "./src/server/routes/catalog-audit.routes.js";
 import sheet1ReconcileRouter from "./src/server/routes/sheet1-reconcile.routes.js";
 import readinessRouter from "./src/server/routes/readiness.routes.js";
+import syncJobQuarantineRouter from "./src/server/routes/sync-job-quarantine.routes.js";
 import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
@@ -338,6 +339,7 @@ async function startServer() {
       "Content-Type",
       "Authorization",
       "X-Catalog-Audit-Write-Token",
+      "X-Sync-Job-Quarantine-Confirm",
       "X-Sheet1-Reconcile-Run",
     ],
   };
@@ -358,7 +360,7 @@ async function startServer() {
       res.setHeader(
         "Access-Control-Allow-Headers",
         req.get("access-control-request-headers") ||
-          "Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sheet1-Reconcile-Run",
+          "Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-Sheet1-Reconcile-Run",
       );
       return res.sendStatus(204);
     }
@@ -397,6 +399,7 @@ async function startServer() {
   });
 
   app.use("/api", readinessRouter);
+  app.use("/api", syncJobQuarantineRouter);
   app.use("/api", catalogAuditSafety);
   app.use("/api", catalogAuditRouter);
   app.use("/api", sheet1ReconcileRouter);
