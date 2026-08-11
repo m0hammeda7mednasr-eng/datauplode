@@ -7,6 +7,24 @@ const router = Router();
 const REQUIRED_CONFIRM = "QUARANTINE_STALE_RUNNING_NO_REPLAY";
 const MAX_ROWS = 20;
 const MIN_STALE_MINUTES = 10;
+const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const GITHUB_OIDC_AUDIENCE = "dabdoob-stale-job-quarantine";
+const GITHUB_REPOSITORY = "m0hammeda7mednasr-eng/datauplode";
+const GITHUB_REPOSITORY_ID = "1236020386";
+const GITHUB_REF = "refs/heads/stabilize-supabase-railway";
+const GITHUB_WORKFLOW_REF = `${GITHUB_REPOSITORY}/.github/workflows/materialize-and-run-stale-job-quarantine.yml@${GITHUB_REF}`;
+
+type GithubOidcClaims = {
+  iss?: string;
+  aud?: string | string[];
+  exp?: number;
+  nbf?: number;
+  repository?: string;
+  repository_id?: string;
+  ref?: string;
+  workflow_ref?: string;
+  event_name?: string;
+};
 
 function clean(value: unknown) {
   return String(value ?? "").trim();
@@ -22,17 +40,76 @@ function allowedType(type: string) {
   return type === "PUBLISH_TO_SHOPIFY" || type.startsWith("SHEET1_CATALOG_AUTO_SYNC:");
 }
 
+function decodeJwtPart(value: string) {
+  return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+}
+
+async function verifyGithubActionsOidc(token: string): Promise<boolean> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return false;
+
+    const header = decodeJwtPart(parts[0]) as { alg?: string; kid?: string; typ?: string };
+    const claims = decodeJwtPart(parts[1]) as GithubOidcClaims;
+    if (header.alg !== "RS256" || !header.kid || (header.typ && header.typ !== "JWT")) return false;
+
+    const now = Math.floor(Date.now() / 1000);
+    const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    const claimsValid =
+      claims.iss === GITHUB_OIDC_ISSUER &&
+      audience.includes(GITHUB_OIDC_AUDIENCE) &&
+      Number.isFinite(claims.exp) &&
+      Number(claims.exp) > now - 30 &&
+      (!Number.isFinite(claims.nbf) || Number(claims.nbf) <= now + 30) &&
+      claims.repository === GITHUB_REPOSITORY &&
+      clean(claims.repository_id) === GITHUB_REPOSITORY_ID &&
+      claims.ref === GITHUB_REF &&
+      claims.workflow_ref === GITHUB_WORKFLOW_REF &&
+      (claims.event_name === "push" || claims.event_name === "workflow_dispatch");
+    if (!claimsValid) return false;
+
+    const response = await fetch(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return false;
+    const jwks = (await response.json()) as { keys?: Array<Record<string, unknown> & { kid?: string; kty?: string; use?: string }> };
+    const jwk = jwks.keys?.find((key) => key.kid === header.kid && key.kty === "RSA" && (!key.use || key.use === "sig"));
+    if (!jwk) return false;
+
+    const publicKey = crypto.createPublicKey({ key: jwk as crypto.JsonWebKey, format: "jwk" });
+    return crypto.verify(
+      "RSA-SHA256",
+      Buffer.from(`${parts[0]}.${parts[1]}`),
+      publicKey,
+      Buffer.from(parts[2], "base64url"),
+    );
+  } catch (error) {
+    console.warn("GitHub Actions OIDC verification failed", error);
+    return false;
+  }
+}
+
+async function authorized(req: Parameters<Parameters<typeof router.post>[1]>[0]) {
+  const configuredToken = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
+  const suppliedToken = clean(req.header("x-catalog-audit-write-token"));
+  if (configuredToken && suppliedToken && safeEqual(configuredToken, suppliedToken)) {
+    return true;
+  }
+
+  const oidcToken = clean(req.header("x-github-actions-oidc-token"));
+  return Boolean(oidcToken) && verifyGithubActionsOidc(oidcToken);
+}
+
 router.post("/admin/quarantine-stale-sync-jobs", async (req, res) => {
   try {
-    const configuredToken = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
-    const suppliedToken = clean(req.header("x-catalog-audit-write-token"));
     const confirmation = clean(req.header("x-sync-job-quarantine-confirm") || req.body?.confirm);
 
-    if (!configuredToken || !suppliedToken || !safeEqual(configuredToken, suppliedToken)) {
+    if (!(await authorized(req))) {
       return res.status(403).json({
         success: false,
         code: "SYNC_JOB_QUARANTINE_NOT_AUTHORIZED",
-        error: "A valid production write token is required.",
+        error: "A valid production write token or repo-bound GitHub Actions OIDC token is required.",
       });
     }
     if (confirmation !== REQUIRED_CONFIRM) {
@@ -139,7 +216,7 @@ router.post("/admin/quarantine-stale-sync-jobs", async (req, res) => {
       (job) =>
         job.status !== "failed" ||
         !job.completedAt ||
-        !String(job.result || "").includes('"quarantined":true'),
+        !String(job.result || "").includes('\"quarantined\":true'),
     );
     if (readBackInvalid.length > 0 || readBack.length !== ids.length) {
       return res.status(500).json({
