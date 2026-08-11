@@ -25,6 +25,7 @@ import {
 
 const spreadsheetId = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const apiSource = readFileSync(new URL("../src/server/api.ts", import.meta.url), "utf8");
+const scraperSource = readFileSync(new URL("../src/server/services/scraper.ts", import.meta.url), "utf8");
 const catalogWorkerSource = readFileSync(
   new URL("../src/server/sheet1CatalogAutoSync.ts", import.meta.url),
   "utf8",
@@ -62,6 +63,11 @@ assert.match(
   apiSource,
   /cachedImages\.length > 0[\s\S]*cachedVariants\.length > 0/,
   "blocked-source fallback must require cached images and variants before publish",
+);
+assert.match(
+  scraperSource,
+  /catch \(error: any\) \{[\s\S]*if \(!fallbackUsable\)[\s\S]*H&M fallback did not expose a trustworthy AED product price/,
+  "H&M live scraping must not return an untrusted fallback product when GraphQL fails",
 );
 assert.match(
   catalogWorkerSource,

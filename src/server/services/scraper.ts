@@ -8564,10 +8564,7 @@ export class HmScraper implements SupplierScraper {
       this.assertTrustworthyHmPrice(normalized, url);
       return normalized;
     } catch (error: any) {
-      if (
-        fallback.price <= 0 ||
-        /client challenge|metadata/i.test(fallback.title)
-      ) {
+      if (!fallbackUsable) {
         throw new ScraperError(
           "H&M did not expose usable product data to server analysis. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.",
           {
@@ -8575,7 +8572,10 @@ export class HmScraper implements SupplierScraper {
             status: 422,
             supplier: "H&M",
             retryWithSnapshot: true,
-            details: [error.message],
+            details: [
+              error.message,
+              "H&M fallback did not expose a trustworthy AED product price",
+            ],
           },
         );
       }
