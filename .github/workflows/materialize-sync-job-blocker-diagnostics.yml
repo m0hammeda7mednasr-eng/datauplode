@@ -135,3 +135,4 @@ jobs:
 # retrigger-2: force materializer after exact-head readiness confirmed
 # retrigger-3: re-run after c9b36382 exact Railway deployment verified
 # retrigger-4: force bounded diagnostics after 429f8d5 exact Railway verification
+# retrigger-5: force materialization after a7612b4 exact Railway verification
