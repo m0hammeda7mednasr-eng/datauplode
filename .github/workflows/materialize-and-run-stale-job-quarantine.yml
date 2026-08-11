@@ -1,6 +1,6 @@
 name: Materialize and run targeted stale job quarantine
 
-# Bounded seven-job no-replay quarantine after exact-head CI is green.
+# Bounded one-job no-replay quarantine after exact-head CI is green.
 on:
   push:
     branches: [stabilize-supabase-railway]
@@ -25,8 +25,8 @@ jobs:
     env:
       RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL || 'https://datauplode-production.up.railway.app' }}
       CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
-      TARGET_IDS_JSON: '["cmsnxcn1i000ypb10swaecmni","cmso1ry8f0013md10k7s2vwa0","cmso3rjop02hgmr10h14sgssn","cmso44ojl027xnx10tfky7md2","cmso4jjrb01x7pc10660pl2um","cmso50zvk01l5n41093xqydq4","cmso5tca70340pl10ggih0hin"]'
-      EXPECTED_TARGET_COUNT: '7'
+      TARGET_IDS_JSON: '["cmsp01lg70000pl10py2rsz0a"]'
+      EXPECTED_TARGET_COUNT: '1'
 
     steps:
       - name: Checkout quarantine branch
@@ -186,7 +186,7 @@ jobs:
           echo "token=$oidc_token" >> "$GITHUB_OUTPUT"
           echo 'mode=oidc' >> "$GITHUB_OUTPUT"
 
-      - name: Quarantine exactly the seven confirmed stale Shopify jobs with no replay
+      - name: Quarantine exactly the one confirmed stale Sheet1 job with no replay
         env:
           OIDC_TOKEN: ${{ steps.auth.outputs.token }}
           AUTH_MODE: ${{ steps.auth.outputs.mode }}
