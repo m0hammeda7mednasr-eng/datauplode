@@ -671,6 +671,7 @@ async function findShopifyProduct(
     ),
   ];
   const found = new Map<string, any>();
+  const searchErrors: string[] = [];
 
   for (const queryText of requests) {
     try {
@@ -688,6 +689,7 @@ async function findShopifyProduct(
         queryText,
         error: clean((error as any)?.message || error),
       });
+      searchErrors.push(clean((error as any)?.message || error));
     }
   }
 
@@ -724,6 +726,15 @@ async function findShopifyProduct(
   }
   if (eligible.length > 1) {
     return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+  if (searchErrors.length > 0) {
+    return {
+      product: null,
+      ambiguous: true,
+      matchSource: "shopify_fallback" as const,
+      reason:
+        "Shopify strict product search failed temporarily. No automatic create/update was made to avoid duplicate products.",
+    };
   }
   return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
 }
@@ -766,7 +777,9 @@ async function reconcileGroup(
       multiplier: group.multiplier,
       productCode,
       matchSource: located.matchSource,
-      reason: "More than one ACTIVE Shopify product matched with the same confidence. No automatic write was made.",
+      reason:
+        located.reason ||
+        "More than one ACTIVE Shopify product matched with the same confidence. No automatic write was made.",
     };
   }
   if (!located.product) {
