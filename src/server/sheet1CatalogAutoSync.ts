@@ -952,7 +952,13 @@ async function findLinkedCatalogUrls(rows: CatalogRow[]) {
       prisma.sourceProduct.findMany({
         where: {
           url: { in: urlBatch },
-          shopifyProduct: { isNot: null },
+          syncStatus: "active",
+          shopifyProduct: {
+            is: {
+              status: "active",
+              syncEnabled: true,
+            },
+          },
         },
         select: { url: true },
       }),
