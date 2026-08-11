@@ -213,7 +213,30 @@ async function collectVisibleText(page: import("playwright").Page) {
       pushChunk(
         centrepointProduct.sku ? `Product Code: ${centrepointProduct.sku}` : "",
       );
+      const variants = Array.isArray(centrepointProduct.variants)
+        ? centrepointProduct.variants
+        : [];
+      const variantPrices = variants
+        .map((variant: any) => ({
+          amount: Number(variant?.priceInfo?.price?.amount),
+          currency:
+            variant?.priceInfo?.price?.currency ||
+            variant?.priceInfo?.priceTypeDetails?.salePrice?.bestPrice
+              ?.currency ||
+            variant?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
+              ?.currency,
+        }))
+        .filter(
+          (price: any) =>
+            Number.isFinite(price.amount) &&
+            price.amount > 0 &&
+            String(price.currency || "AED").toUpperCase() === "AED",
+        );
+      const lowestVariantPrice = variantPrices.length
+        ? Math.min(...variantPrices.map((price: any) => price.amount))
+        : 0;
       const statePrice =
+        lowestVariantPrice ||
         centrepointProduct?.priceInfo?.price?.amount ||
         centrepointProduct?.price?.amount ||
         centrepointProduct?.priceInfo?.priceTypeDetails?.salePrice?.bestPrice
@@ -228,7 +251,19 @@ async function collectVisibleText(page: import("playwright").Page) {
       if (statePrice) pushChunk(`Price: ${stateCurrency} ${statePrice}`.trim());
       const basePrice =
         centrepointProduct?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
-          ?.amount;
+          ?.amount ||
+        Math.max(
+          0,
+          ...variants
+            .map(
+              (variant: any) =>
+                Number(
+                  variant?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
+                    ?.amount,
+                ) || 0,
+            )
+            .filter((price: number) => price > 0),
+        );
       if (basePrice && basePrice !== statePrice) {
         pushChunk(`Original price: ${stateCurrency} ${basePrice}`.trim());
       }
@@ -249,9 +284,7 @@ async function collectVisibleText(page: import("playwright").Page) {
           else if (/colou?r/i.test(optionName)) pushChunk(`Color: ${label}`);
         }
       }
-      for (const variant of Array.isArray(centrepointProduct.variants)
-        ? centrepointProduct.variants.slice(0, 40)
-        : []) {
+      for (const variant of variants.slice(0, 40)) {
         const size = String(variant?.optionValues?.Size || "").trim();
         if (size) pushChunk(size);
         const variantPrice = variant?.priceInfo?.price?.amount;
