@@ -330,12 +330,31 @@ function markHmPriceRetryAttempt(state: WorkerState, entry: CatalogRow) {
   state.hmPriceRetryFingerprints[entry.key] = entry.fingerprint;
 }
 
+function blockedHostRetryMarker(entry: CatalogRow) {
+  const host = catalogRowHost(entry);
+  const centrepointRecoveryRevision = String(
+    process.env.SYNC_SHEET1_CATALOG_CENTREPOINT_RECOVERY_REVISION || "",
+  )
+    .trim()
+    .toLowerCase();
+  if (
+    host.includes("centrepointstores.com") &&
+    /^[a-z0-9._:-]{3,80}$/i.test(centrepointRecoveryRevision)
+  ) {
+    return `${entry.fingerprint}:${centrepointRecoveryRevision}`;
+  }
+  return entry.fingerprint;
+}
+
 function blockedHostRetryAttempted(state: WorkerState, entry: CatalogRow) {
-  return state.blockedHostRetryFingerprints[entry.key] === entry.fingerprint;
+  return (
+    state.blockedHostRetryFingerprints[entry.key] ===
+    blockedHostRetryMarker(entry)
+  );
 }
 
 function markBlockedHostRetryAttempt(state: WorkerState, entry: CatalogRow) {
-  state.blockedHostRetryFingerprints[entry.key] = entry.fingerprint;
+  state.blockedHostRetryFingerprints[entry.key] = blockedHostRetryMarker(entry);
 }
 
 function retryableProcessedIssueKeysFromRecentIssues(state: WorkerState) {

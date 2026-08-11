@@ -162,6 +162,11 @@ assert.match(
   "blocked-source rows must clear their fingerprint only after recording the bounded retry attempt",
 );
 assert.match(
+  catalogWorkerSource,
+  /SYNC_SHEET1_CATALOG_CENTREPOINT_RECOVERY_REVISION[\s\S]*host\.includes\("centrepointstores\.com"\)[\s\S]*entry\.fingerprint/,
+  "Centrepoint parser fixes may unlock one bounded recovery retry without reopening other blocked suppliers",
+);
+assert.match(
   readFileSync(new URL("../src/server/firstFiveSheetsReconcile.ts", import.meta.url), "utf8"),
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",
