@@ -1,0 +1,132 @@
+name: Materialize sync job blocker diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/materialize-sync-job-blocker-diagnostics.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+      - name: Add bounded read-only queue blocker samples to readiness
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/server/routes/readiness.routes.ts')
+          text = path.read_text()
+
+          old_decl = '''    const [pendingJobs, runningJobs, failedJobs, recentFailedJobs, staleRunningJobs, recentAudits] = await withTimeout('''
+          new_decl = '''    const [
+      pendingJobs,
+      runningJobs,
+      failedJobs,
+      recentFailedJobs,
+      staleRunningJobs,
+      staleRunningJobSamples,
+      recentFailedJobSamples,
+      recentAudits,
+    ] = await withTimeout('''
+          if old_decl not in text and new_decl not in text:
+              raise SystemExit('Expected readiness Promise.all declaration not found')
+          text = text.replace(old_decl, new_decl, 1)
+
+          old_queries = '''        prisma.syncJob.count({
+          where: {
+            status: "running",
+            OR: [{ startedAt: null }, { startedAt: { lt: staleJobCutoff } }],
+          },
+        }),
+        prisma.importBatch.findMany({'''
+          new_queries = '''        prisma.syncJob.count({
+          where: {
+            status: "running",
+            OR: [{ startedAt: null }, { startedAt: { lt: staleJobCutoff } }],
+          },
+        }),
+        prisma.syncJob.findMany({
+          where: {
+            status: "running",
+            OR: [{ startedAt: null }, { startedAt: { lt: staleJobCutoff } }],
+          },
+          orderBy: { createdAt: "asc" },
+          take: 5,
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            startedAt: true,
+            completedAt: true,
+          },
+        }),
+        prisma.syncJob.findMany({
+          where: {
+            status: "failed",
+            OR: [
+              { completedAt: { gte: recentFailureCutoff } },
+              { completedAt: null, createdAt: { gte: recentFailureCutoff } },
+            ],
+          },
+          orderBy: { createdAt: "desc" },
+          take: 5,
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            startedAt: true,
+            completedAt: true,
+          },
+        }),
+        prisma.importBatch.findMany({'''
+          if old_queries not in text and new_queries not in text:
+              raise SystemExit('Expected readiness job query block not found')
+          text = text.replace(old_queries, new_queries, 1)
+
+          old_output = '''        staleRunning: staleRunningJobs,
+        staleThresholdMinutes: staleJobThresholdMinutes,
+      },'''
+          new_output = '''        staleRunning: staleRunningJobs,
+        staleThresholdMinutes: staleJobThresholdMinutes,
+        blockerSamples: {
+          staleRunning: staleRunningJobSamples,
+          recentFailed: recentFailedJobSamples,
+        },
+      },'''
+          if old_output not in text and new_output not in text:
+              raise SystemExit('Expected readiness jobs output block not found')
+          text = text.replace(old_output, new_output, 1)
+
+          path.write_text(text)
+          PY
+      - name: Verify diagnostics stay read-only and bounded
+        run: |
+          grep -q 'take: 5' src/server/routes/readiness.routes.ts
+          grep -q 'blockerSamples' src/server/routes/readiness.routes.ts
+          if grep -A60 'blockerSamples' src/server/routes/readiness.routes.ts | grep -Eq 'payload|result'; then
+            echo 'Refusing to expose job payload/result in readiness diagnostics.' >&2
+            exit 1
+          fi
+      - name: Commit materialized source
+        run: |
+          if git diff --quiet -- src/server/routes/readiness.routes.ts; then
+            echo 'Readiness blocker diagnostics already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/routes/readiness.routes.ts
+          git commit -m 'Expose bounded sync job blocker diagnostics'
+          git push origin HEAD:stabilize-supabase-railway
