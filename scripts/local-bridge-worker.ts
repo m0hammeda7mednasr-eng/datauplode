@@ -389,6 +389,70 @@ async function collectVisibleTextWithRetry(
   throw lastError;
 }
 
+async function waitForCentrepointProductState(page: import("playwright").Page) {
+  if (!page.url().toLowerCase().includes("centrepointstores.com")) return;
+  const waitMs = Math.max(
+    0,
+    Math.min(30000, envNumber("LOCAL_BRIDGE_CENTREPOINT_STATE_WAIT_MS", 10000)),
+  );
+  if (waitMs <= 0) return;
+
+  await page
+    .waitForFunction(
+      () => {
+        if (!location.hostname.toLowerCase().includes("centrepointstores.com")) {
+          return true;
+        }
+        for (const script of Array.from(document.scripts)) {
+          const raw = script.textContent || "";
+          if (!raw.includes("initialState")) continue;
+          try {
+            const parsed = JSON.parse(raw);
+            const encoded = parsed?.props?.initialState;
+            if (!encoded || typeof encoded !== "string") continue;
+            const decoded = JSON.parse(
+              decodeURIComponent(
+                Array.prototype.map
+                  .call(atob(encoded), (char: string) =>
+                    `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+                  )
+                  .join(""),
+              ),
+            );
+            const product = decoded?.productPageReducerBL?.data;
+            const price =
+              product?.priceInfo?.price?.amount ||
+              product?.price?.amount ||
+              product?.priceInfo?.priceTypeDetails?.salePrice?.bestPrice
+                ?.amount ||
+              product?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
+                ?.amount ||
+              (Array.isArray(product?.variants)
+                ? product.variants.find(
+                    (variant: any) =>
+                      Number(variant?.priceInfo?.price?.amount) > 0,
+                  )?.priceInfo?.price?.amount
+                : 0);
+            const currency =
+              product?.priceInfo?.price?.currency ||
+              product?.price?.currency ||
+              product?.currency ||
+              "AED";
+            return (
+              (product?.id || product?.sku || product?.name) &&
+              Number(price) > 0 &&
+              String(currency || "").toUpperCase() === "AED"
+            );
+          } catch {}
+        }
+        return false;
+      },
+      null,
+      { timeout: waitMs, polling: 500 },
+    )
+    .catch(() => {});
+}
+
 async function capturePageText(url: string, timeoutMs: number, settleMs: number) {
   const headless = envFlag("LOCAL_BRIDGE_HEADLESS", true);
   const browser = await chromium.launch({
@@ -442,6 +506,7 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page.waitForLoadState("networkidle", { timeout: 7000 }).catch(() => {});
+    await waitForCentrepointProductState(page);
     if (settleMs > 0) await page.waitForTimeout(settleMs);
     await warmUpLazyAssets(page, settleMs);
 
