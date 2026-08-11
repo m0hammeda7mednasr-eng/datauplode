@@ -1,3 +1,4 @@
 Persisted canary read-back broad-write gate materialized on stabilize-supabase-railway.
 Broad Sheet1 catalog writes remain fail-closed until a completed one-product canary has Shopify readbackVerified=true and valid dry-run provenance.
+Post-canary readiness now resolves the exact persisted dry-run referenced by canary dryRunBatchId instead of trusting the latest dry-run or its freshness window.
 No Shopify or Google Sheet write is performed by this marker.
