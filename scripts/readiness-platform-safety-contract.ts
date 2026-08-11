@@ -241,8 +241,8 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "post-canary readiness requires dry-run to canary identity continuity",
-    source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&
-      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId"),
+    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&
+      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),
   ],
   [
     "post-canary broad readiness remains queue-clean fail-closed",
@@ -251,6 +251,17 @@ const checks: Array<[string, boolean]> = [
       source.includes("runningJobs === 0") &&
       source.includes("staleRunningJobs === 0") &&
       source.includes("recentFailedJobs === 0"),
+  ],
+  [
+    "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",
+    source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") &&
+      source.includes("persistedCanaryDryRunVerified") &&
+      !source.includes("catalogAuditDryRunConfigured &&\n        latestDryRunCanaryReady &&\n        latestCanaryReadbackVerified"),
+  ],
+  [
+    "post-canary read-back stays bound to the dry-run referenced by canary provenance",
+    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&
+      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),
   ],
 ];
 

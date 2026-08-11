@@ -384,11 +384,29 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     const latestCatalogAudit = observedAudits[0] || null;
     const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;
     const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;
+    const canaryDryRun = latestCanary?.dryRunBatchId
+      ? observedAudits.find(
+          (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,
+        ) || null
+      : null;
     const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);
     const latestDryRunCanaryReady = isCanaryReadyDryRun(latestDryRun, canaryDryRunMaxAge);
     const latestDryRunExpired = Boolean(
       latestDryRun &&
         (latestDryRunAgeMinutes === null || latestDryRunAgeMinutes > canaryDryRunMaxAge),
+    );
+
+    const persistedCanaryDryRunVerified = Boolean(
+      canaryDryRun &&
+        canaryDryRun.status === "COMPLETED" &&
+        canaryDryRun.dryRun === true &&
+        canaryDryRun.writeSheet === false &&
+        canaryDryRun.uniqueProductsProcessed === 1 &&
+        canaryDryRun.verified === 1 &&
+        canaryDryRun.missing === 0 &&
+        canaryDryRun.ambiguous === 0 &&
+        canaryDryRun.errors === 0 &&
+        canaryDryRun.shopifyProductIds.length === 1,
     );
 
     const latestCanaryReadbackVerified = Boolean(
@@ -404,9 +422,10 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         latestCanary.shopifyProductIds.length === 1 &&
         latestCanary.canaryProvenanceValid === true &&
         latestCanary.readbackVerified === true &&
-        latestDryRun &&
-        latestCanary.dryRunBatchId === latestDryRun.id &&
-        latestCanary.shopifyProductId === latestDryRun.shopifyProductId,
+        persistedCanaryDryRunVerified &&
+        canaryDryRun &&
+        latestCanary.dryRunBatchId === canaryDryRun.id &&
+        latestCanary.shopifyProductId === canaryDryRun.shopifyProductId,
     );
     const postCanaryWriteSafetyReady = Boolean(
       runtimeWriteGateEnabled &&
@@ -419,7 +438,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         !configuration.catalogWriteGateEnabled &&
         !configuration.catalogSheetWriteGateEnabled &&
         catalogAuditDryRunConfigured &&
-        latestDryRunCanaryReady &&
+        persistedCanaryDryRunVerified &&
         latestCanaryReadbackVerified &&
         pendingJobs === 0 &&
         runningJobs === 0 &&
@@ -480,6 +499,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         latestDryRunExpired,
         latestDryRunCanaryReady,
         latestCanary,
+        canaryDryRun,
+        persistedCanaryDryRunVerified,
         latestCanaryReadbackVerified,
         postCanaryWriteSafetyReady,
       },
