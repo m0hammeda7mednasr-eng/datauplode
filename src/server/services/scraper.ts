@@ -8145,15 +8145,29 @@ function parseGenericReaderMarkdown(
     throw new Error("Reader fallback did not expose a product title");
   }
 
+  const looksLikeReaderPriceLine = (line: string) => {
+    if (/https?:\/\//i.test(line) || /!\[[^\]]*]\(/.test(line)) return false;
+    if (/\.(?:jpg|jpeg|png|webp|svg)(?:\?|$)/i.test(line)) return false;
+    if (parsePrice(line) <= 0) return false;
+    return (
+      looksLikeCurrencyText(line) ||
+      /\b(?:price|now|was|sale|regular|current|from|starting\s+at)\b/i.test(
+        line,
+      )
+    );
+  };
   const priceLine =
     lines.find((line) => looksLikeCurrencyText(line) && parsePrice(line) > 0) ||
-    lines.find((line) => parsePrice(line) > 0);
+    lines.find(looksLikeReaderPriceLine);
   const price = parsePrice(priceLine);
   if (price <= 0) {
     throw new Error("Reader fallback did not expose a product price");
   }
 
-  const currency = detectCurrency(priceLine || markdown, "USD");
+  const currency = detectCurrency(
+    priceLine || markdown,
+    inferCountryCodeFromUrl(url) === "ae" ? "AED" : "USD",
+  );
   const images: NormalizedProduct["images"] = [];
   const imageRegex = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
   for (const match of markdown.matchAll(imageRegex)) {
@@ -8351,6 +8365,11 @@ export class CentrepointScraper implements SupplierScraper {
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
     const product = parseGenericReaderMarkdown(snapshotText, url);
+    if (product.currency !== "AED" || product.price <= 1) {
+      throw new Error(
+        "Reader fallback did not expose a trustworthy Centrepoint AED product price",
+      );
+    }
     return normalizeProductOptionsAndVariants({
       ...product,
       source: {
@@ -8407,8 +8426,14 @@ export class CentrepointScraper implements SupplierScraper {
 
     try {
       const markdown = await fetchReaderMarkdown(url);
+      const product = parseGenericReaderMarkdown(markdown, url);
+      if (product.currency !== "AED" || product.price <= 1) {
+        throw new Error(
+          "Reader fallback did not expose a trustworthy Centrepoint AED product price",
+        );
+      }
       return {
-        ...parseGenericReaderMarkdown(markdown, url),
+        ...product,
         source: {
           supplier: "Centrepoint",
           url,

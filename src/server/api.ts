@@ -187,6 +187,18 @@ function isUsableAnalyzeProduct(product: NormalizedProduct | undefined) {
   if (!Number.isFinite(Number(product.price)) || Number(product.price) <= 0) {
     return false;
   }
+  const supplier = String(product.source?.supplier || "").toLowerCase();
+  const sourceUrl = String(product.source?.url || "").toLowerCase();
+  const raw = product.raw && typeof product.raw === "object" ? product.raw : {};
+  if (
+    (supplier.includes("centrepoint") ||
+      sourceUrl.includes("centrepointstores.com")) &&
+    (raw.readerFallback || raw.pastedSnapshotFallback) &&
+    (String(product.currency || "").toUpperCase() !== "AED" ||
+      Number(product.price) <= 1)
+  ) {
+    return false;
+  }
   return true;
 }
 
