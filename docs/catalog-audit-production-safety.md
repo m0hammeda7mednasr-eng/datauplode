@@ -35,23 +35,29 @@ The server caps writes to `CATALOG_AUDIT_CANARY_MAX_ROWS`, with a hard maximum o
 
 ## Current first-eight sheet auto-sync note
 
-Checked on 2026-08-11 01:47 Africa/Cairo.
+Checked on 2026-08-11 05:00 Africa/Cairo.
 
-- Latest Railway deployment `a4e5fa96-b82b-4190-a9b9-c45caeef6103` is successful.
-- The first-eight-sheet worker is running on revision `d301219189fa71e22bda02e61658751a9c179996`.
+- Latest Railway deployment `a4f2d35d-1969-4df0-bef2-e25bb8d98e64` is successful.
+- The first-eight-sheet worker is running on revision `d958e040723de601a22ab3d04d4bc7d4116a7e8e`.
 - Live target is capped at 5000 unique rows from the first eight configured Google Sheet tabs.
-- Current verified progress: 788 / 5000.
-- Current Shopify work split: 338 existing products updated, 450 missing products published.
-- Current running marker is cycle 62 in `publish_missing_products` with no marker-level `lastError`.
-- Current safe/retryable candidate set is 3007 rows; this is not the 5000-row business target, because many older processed-but-unverified rows remain failed closed behind source-site blocks or non-retryable validation failures.
-- Historical unverified failures are mostly source-site blocks from Centrepoint, SHEIN, and Next; current H&M price-validation retries are no longer producing fresh `Product source price is invalid` issues in the active marker.
+- Current verified progress: 847 / 5000.
+- Current Shopify work split: 344 existing products updated, 503 missing products published.
+- Current running marker is cycle 91 in `idle_monitoring` with no marker-level `lastError`.
+- Current safe/retryable candidate set is 20 rows; most of these are bounded recovery probes for rows that previously failed closed.
+- Historical unverified failures are mostly source-site blocks from Next and SHEIN, plus price/data-quality failures from H&M and Centrepoint. The worker now fails these closed instead of publishing incomplete products.
+- A previously published SHEIN rate-limit page (`You have too many requests, which exceeds our limit.`) was quarantined: Shopify status set to `draft`, local sync disabled, and source status set to `error`.
+- Latest suspicious-active audit returned zero active products matching the known bad-price / wrong-currency / SHEIN challenge patterns.
 - Current Google Sheet SKU writeback still cannot complete from Railway/Codex because Google writer credentials are not configured in Railway and the Google Drive connector is not connected in Codex.
-- `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=5` is enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
+- `SYNC_POST_CANARY_BROAD_WRITES_ENABLED=true` is enabled after the SHEIN guard passed production smoke testing.
+- `SYNC_SHEET1_CATALOG_BLOCKED_HOST_FAST_SKIP_THRESHOLD=3` and `SYNC_SHEET1_CATALOG_BLOCKED_HOST_PROBES_PER_CYCLE=1` are enabled so repeated blocked source hosts can be failed closed faster without publishing incomplete products.
 - The worker now seeds blocked-host fast-skip counts from recent failed-closed issues so deploys and later cycles do not restart known blocked hosts from zero.
 - Blocked-host fast-skip now resets a host after a non-blocked row-level failure, so variant/data validation errors (for example unsafe Next variant structure) do not keep the whole source host closed.
 - Previously failed blocked-source rows can now be re-verified through a bounded fingerprint-tracked recovery path, capped by `SYNC_SHEET1_CATALOG_BLOCKED_HOST_RETRY_ROWS_PER_CYCLE` (default 20).
-- Blocked hosts also get multiple bounded live probes per cycle through `SYNC_SHEET1_CATALOG_BLOCKED_HOST_PROBES_PER_CYCLE` (default 5), which matters when a supplier has mixed URLs where some are blocked and some scrape correctly.
+- Blocked hosts also get bounded live probes per cycle through `SYNC_SHEET1_CATALOG_BLOCKED_HOST_PROBES_PER_CYCLE`, which matters when a supplier has mixed URLs where some are blocked and some scrape correctly.
 - Existing-product variant reconciliation now has a safe SKU-size fallback: it only maps through the current SKU when exactly one fresh source variant matches the SKU size suffix.
 - H&M rows that previously failed with `Product source price is invalid` are now eligible for a narrow re-verification retry; the normal price validation still prevents publishing if the source price is not valid.
 - H&M price-validation recovery is now bounded by row fingerprint so an unrecovered H&M row is retried once for that exact sheet state, then fails closed again until the row changes.
 - H&M price-validation recovery is also capped per worker cycle through `SYNC_SHEET1_CATALOG_HM_PRICE_RETRY_ROWS_PER_CYCLE` (default 10) so it cannot monopolize progress on other source hosts.
+- Centrepoint bridge snapshots now extract product state from the page state and prefer the current active variant AED price, which restored safe publishing for many Centrepoint rows.
+- SHEIN snapshots are rejected when the captured page is a challenge/rate-limit page, uses an untrusted currency, or has no product images.
+- Bridge `Reader fallback returned an access-denied or missing page` errors are now classified as blocked-source failures, so Next/SHEIN access-denied rows feed the fast-skip/recovery logic instead of being retried as ordinary unknown errors.
