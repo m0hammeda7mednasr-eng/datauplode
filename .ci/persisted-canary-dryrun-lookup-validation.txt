@@ -1,0 +1,3 @@
+Persisted canary dry-run lookup materialized on stabilize-supabase-railway.
+Purpose: trigger normal PR checks after the GitHub Actions source commit.
+Safety: no Shopify writes, no Google Sheet writes, no database mutations.
