@@ -67,7 +67,7 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "readiness reports platform ready state",
-    source.includes("ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady)"),
+    source.includes("ready: productionPlatformReady && (!productionEnvironment || phaseWriteSafetyReady)"),
   ],
   [
     "database binding is computed once for consistent reporting",
@@ -108,7 +108,7 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "production readiness requires write safety",
-    source.includes("(!productionEnvironment || productionWriteSafetyReady)"),
+    source.includes("(!productionEnvironment || phaseWriteSafetyReady)"),
   ],
   [
     "production write safety requires catalog dry run",
@@ -140,7 +140,7 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "readiness exposes write safety state for monitoring",
-    source.includes("writeSafetyReady: productionWriteSafetyReady"),
+    source.includes("writeSafetyReady: phaseWriteSafetyReady"),
   ],
   [
     "readiness declares safe mode mandatory in production",
@@ -233,6 +233,24 @@ const checks: Array<[string, boolean]> = [
     "database failure response does not fabricate fresh dry-run state",
     source.includes("latestDryRunAgeMinutes: null") &&
       source.includes("latestDryRunExpired: false"),
+  ],
+  [
+    "post-canary readiness requires exact persisted Shopify read-back",
+    source.includes("latestCanary.readbackVerified === true") &&
+      source.includes("latestCanaryReadbackVerified"),
+  ],
+  [
+    "post-canary readiness requires dry-run to canary identity continuity",
+    source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&
+      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId"),
+  ],
+  [
+    "post-canary broad readiness remains queue-clean fail-closed",
+    source.includes("postCanaryWriteSafetyReady") &&
+      source.includes("pendingJobs === 0") &&
+      source.includes("runningJobs === 0") &&
+      source.includes("staleRunningJobs === 0") &&
+      source.includes("recentFailedJobs === 0"),
   ],
 ];
 

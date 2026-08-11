@@ -185,6 +185,10 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
             provenanceShopifyProductId === shopifyProductIds[0],
         )
       : null;
+  const readbackVerified =
+    summary.dryRun === false
+      ? Boolean(results.length === 1 && results[0]?.readbackVerified === true)
+      : null;
 
   return {
     id: run.id,
@@ -204,6 +208,7 @@ function catalogAuditObservation(run: CatalogAuditRun | undefined) {
     dryRunBatchId,
     provenanceShopifyProductId,
     canaryProvenanceValid,
+    readbackVerified,
   };
 }
 
@@ -386,6 +391,44 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         (latestDryRunAgeMinutes === null || latestDryRunAgeMinutes > canaryDryRunMaxAge),
     );
 
+    const latestCanaryReadbackVerified = Boolean(
+      latestCanary &&
+        latestCanary.status === "COMPLETED" &&
+        latestCanary.dryRun === false &&
+        latestCanary.writeSheet === false &&
+        latestCanary.uniqueProductsProcessed === 1 &&
+        latestCanary.verified === 1 &&
+        latestCanary.missing === 0 &&
+        latestCanary.ambiguous === 0 &&
+        latestCanary.errors === 0 &&
+        latestCanary.shopifyProductIds.length === 1 &&
+        latestCanary.canaryProvenanceValid === true &&
+        latestCanary.readbackVerified === true &&
+        latestDryRun &&
+        latestCanary.dryRunBatchId === latestDryRun.id &&
+        latestCanary.shopifyProductId === latestDryRun.shopifyProductId,
+    );
+    const postCanaryWriteSafetyReady = Boolean(
+      runtimeWriteGateEnabled &&
+        postCanaryBroadWritesConfigured &&
+        configuration.sheet1CatalogAutostartEnabled &&
+        !inventoryAutostartConfigured &&
+        !jobRecoveryConfigured &&
+        !jobRecoveryShopifyWritesConfigured &&
+        !sheetImportAutostartConfigured &&
+        !configuration.catalogWriteGateEnabled &&
+        !configuration.catalogSheetWriteGateEnabled &&
+        catalogAuditDryRunConfigured &&
+        latestDryRunCanaryReady &&
+        latestCanaryReadbackVerified &&
+        pendingJobs === 0 &&
+        runningJobs === 0 &&
+        staleRunningJobs === 0 &&
+        recentFailedJobs === 0,
+    );
+    const phaseWriteSafetyReady =
+      productionWriteSafetyReady || postCanaryWriteSafetyReady;
+
     const productionMinimumReady =
       configuration.database &&
       configuration.encryptionKey &&
@@ -393,7 +436,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       configuration.shopifyToken &&
       configuration.googleSheet &&
       productionPlatformReady &&
-      (!productionEnvironment || productionWriteSafetyReady);
+      (!productionEnvironment || phaseWriteSafetyReady);
 
     res.status(productionMinimumReady ? 200 : 503).json({
       ok: productionMinimumReady,
@@ -413,8 +456,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         supabaseProjectPinRequired: productionEnvironment,
         railwayRevisionRequired: productionEnvironment,
         safeModeRequired: productionEnvironment,
-        writeSafetyReady: productionWriteSafetyReady,
-        ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady),
+        writeSafetyReady: phaseWriteSafetyReady,
+        ready: productionPlatformReady && (!productionEnvironment || phaseWriteSafetyReady),
       },
       configuration: {
         ...configuration,
@@ -437,6 +480,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
         latestDryRunExpired,
         latestDryRunCanaryReady,
         latestCanary,
+        latestCanaryReadbackVerified,
+        postCanaryWriteSafetyReady,
       },
       latestCatalogAudit,
       checkedAt: new Date().toISOString(),
