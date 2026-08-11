@@ -167,14 +167,14 @@ async function collectVisibleText(page: import("playwright").Page) {
     const metaPrice =
       document
         .querySelector(
-          'meta[property="product:price:amount"], meta[name="product:price:amount"], meta[property="og:price:amount"], meta[name="price"]',
+          'meta[property="product:price:amount"], meta[property="product:price-amount"], meta[name="product:price:amount"], meta[name="product:price-amount"], meta[property="og:price:amount"], meta[property="og:price-amount"], meta[name="price"]',
         )
         ?.getAttribute("content")
         ?.trim() || "";
     const metaCurrency =
       document
         .querySelector(
-          'meta[property="product:price:currency"], meta[name="product:price:currency"], meta[property="og:price:currency"], meta[name="currency"]',
+          'meta[property="product:price:currency"], meta[property="product:price-currency"], meta[name="product:price:currency"], meta[name="product:price-currency"], meta[property="og:price:currency"], meta[property="og:price-currency"], meta[name="currency"]',
         )
         ?.getAttribute("content")
         ?.trim() || "";
@@ -229,13 +229,48 @@ async function warmUpLazyAssets(page: import("playwright").Page, settleMs: numbe
   const stepMs = Math.max(100, envNumber("LOCAL_BRIDGE_SCROLL_STEP_MS", 450));
 
   for (let pass = 0; pass < passes; pass += 1) {
-    await page.evaluate(() => {
-      window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
-    });
+    try {
+      await page.evaluate(() => {
+        window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+      });
+    } catch (error: any) {
+      if (/Execution context was destroyed|navigation/i.test(String(error?.message || error))) {
+        await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+      } else {
+        throw error;
+      }
+    }
     await page.waitForTimeout(stepMs);
   }
-  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.evaluate(() => window.scrollTo(0, 0)).catch((error: any) => {
+    if (!/Execution context was destroyed|navigation/i.test(String(error?.message || error))) {
+      throw error;
+    }
+  });
   if (settleMs > 0) await page.waitForTimeout(Math.min(settleMs, 2000));
+}
+
+async function collectVisibleTextWithRetry(
+  page: import("playwright").Page,
+  settleMs: number,
+) {
+  const attempts = Math.max(1, envNumber("LOCAL_BRIDGE_CAPTURE_RETRIES", 3));
+  let lastError: any = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      if (attempt > 0) {
+        await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+        if (settleMs > 0) await page.waitForTimeout(Math.min(settleMs, 2000));
+      }
+      return await collectVisibleText(page);
+    } catch (error: any) {
+      lastError = error;
+      const message = String(error?.message || error);
+      if (!/Execution context was destroyed|navigation/i.test(message)) throw error;
+      await page.waitForTimeout(750);
+    }
+  }
+  throw lastError;
 }
 
 async function capturePageText(url: string, timeoutMs: number, settleMs: number) {
@@ -290,10 +325,11 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
       "accept-language": envString("LOCAL_BRIDGE_ACCEPT_LANGUAGE", "en-AE,en;q=0.9,ar;q=0.8"),
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    await page.waitForLoadState("networkidle", { timeout: 7000 }).catch(() => {});
     if (settleMs > 0) await page.waitForTimeout(settleMs);
     await warmUpLazyAssets(page, settleMs);
 
-    let text = await collectVisibleText(page);
+    let text = await collectVisibleTextWithRetry(page, settleMs);
     const allowInteractiveSolve = envFlag("LOCAL_BRIDGE_ALLOW_INTERACTIVE_SOLVE", true);
     const interactiveWaitMs = Math.max(
       10000,
@@ -315,7 +351,7 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
       while (Date.now() - start < interactiveWaitMs) {
         await page.waitForTimeout(interactivePollMs);
         await warmUpLazyAssets(page, settleMs);
-        text = await collectVisibleText(page);
+        text = await collectVisibleTextWithRetry(page, settleMs);
         if (!isBlockedSnapshotText(text)) break;
       }
     }
