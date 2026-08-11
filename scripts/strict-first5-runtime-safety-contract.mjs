@@ -22,6 +22,15 @@ const checks = [
       /if \(searchErrors\.length > 0\)[\s\S]*ambiguous:\s*true/.test(source),
   ],
   ['Max multi-color guard exists', source.includes('Max product has multiple Shopify colors')],
+  [
+    'variant mapper prefers exact unique SKU before relaxed matching',
+    /const currentSku = normalizedSku\(shopifyVariant\?\.inventoryItem\?\.sku \|\| shopifyVariant\?\.sku\);[\s\S]{0,320}exactSkuMatches\.length === 1/.test(source),
+  ],
+  [
+    'variant mapper can infer source size from deterministic source SKU',
+    source.includes('function sourceVariantSizeToken') &&
+      /sku\.match\(\s*\/-\(\[A-Z0-9\]\+/.test(source),
+  ],
   ['403 is not classified as out-of-stock', !/403[\s\S]{0,180}(out[- ]?of[- ]?stock|sold[- ]?out)/i.test(source)],
 ];
 

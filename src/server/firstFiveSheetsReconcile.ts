@@ -499,8 +499,29 @@ function variantSkuSizeSuffixMatches(sku: unknown, sizeToken: string | null) {
   return new RegExp(`-${escapeRegExp(sizeToken)}-\\d+(?:\\.\\d+)?$`).test(normalizedSku);
 }
 
+function normalizedSku(value: unknown) {
+  return clean(value).toUpperCase();
+}
+
+function sourceVariantSizeToken(variant: any) {
+  const source = sourceOptions(variant);
+  const explicitSize = normalizeSizeToken(source.size || variant?.size || "");
+  if (explicitSize) return explicitSize;
+  const sku = normalizedSku(variant?.sku || variant?.sourceVariantId);
+  const match = sku.match(/-([A-Z0-9]+(?:-[A-Z0-9]+)*)-\d+(?:\.\d+)?$/);
+  return match ? normalizeSizeToken(match[1]) : null;
+}
+
 function matchSourceVariant(shopifyVariant: any, sourceVariants: any[]) {
   const shopOptions = shopifyOptions(shopifyVariant);
+  const currentSku = normalizedSku(shopifyVariant?.inventoryItem?.sku || shopifyVariant?.sku);
+  if (currentSku) {
+    const exactSkuMatches = sourceVariants.filter(
+      (variant) => normalizedSku(variant?.sku || variant?.sourceVariantId) === currentSku,
+    );
+    if (exactSkuMatches.length === 1) return exactSkuMatches[0];
+  }
+
   const exactKey = optionKey(shopOptions);
   if (exactKey) {
     const exact = sourceVariants.filter((variant) => optionKey(sourceOptions(variant)) === exactKey);
@@ -513,18 +534,16 @@ function matchSourceVariant(shopifyVariant: any, sourceVariants: any[]) {
     const matches = sourceVariants.filter((variant) => {
       const source = sourceOptions(variant);
       return (
-        normalizeSizeToken(source.size || variant?.size) === shopSize &&
+        sourceVariantSizeToken(variant) === shopSize &&
         (!shopColor || !source.color || source.color === shopColor)
       );
     });
     if (matches.length === 1) return matches[0];
   }
 
-  const currentSku = shopifyVariant?.inventoryItem?.sku || shopifyVariant?.sku;
   if (currentSku) {
     const skuMatches = sourceVariants.filter((variant) => {
-      const source = sourceOptions(variant);
-      const sourceSize = normalizeSizeToken(source.size || variant?.size || "");
+      const sourceSize = sourceVariantSizeToken(variant);
       return variantSkuSizeSuffixMatches(currentSku, sourceSize);
     });
     if (skuMatches.length === 1) return skuMatches[0];
