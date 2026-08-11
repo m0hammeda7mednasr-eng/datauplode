@@ -171,6 +171,11 @@ assert.match(
   /variantSkuSizeSuffixMatches[\s\S]*skuMatches\.length === 1/,
   "existing-product variant updates may use SKU size fallback only when exactly one source variant matches",
 );
+assert.match(
+  apiSource,
+  /retryableCentrepointVariantMap[\s\S]*centrepointstores\.com[\s\S]*Could not map \\d\+\\\/\\d\+ Shopify variants to fresh source variants[\s\S]*reconciliation = await reconcileExisting\(analyzed\)/,
+  "Centrepoint existing-product variant mapping failures may retry once with a fresh scrape before failing closed",
+);
 
 const sparseRows = parseHeaderlessGoogleSheetRows([
   [],

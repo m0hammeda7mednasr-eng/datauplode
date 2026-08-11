@@ -2886,7 +2886,7 @@ export async function processGoogleSheetBatch(params: {
     }
 
     try {
-      const analyzed = await withImportScrapeTimeout(
+      let analyzed = await withImportScrapeTimeout(
         scrapeWithBridgeFallback(normalizedUrl),
         normalizedUrl,
       );
@@ -2905,7 +2905,7 @@ export async function processGoogleSheetBatch(params: {
         sheetCollection: row.collection || null,
         sheetPriceMultiplier: row.priceMultiplier,
       };
-      const skuPlan = isApprovedCatalogSheet
+      let skuPlan = isApprovedCatalogSheet
         ? applyDeterministicDabSkus({
             product: analyzed,
             url: normalizedUrl,
@@ -2931,18 +2931,52 @@ export async function processGoogleSheetBatch(params: {
       }
 
       if (isApprovedCatalogSheet && shopifyInventoryLocation?.id) {
-        const reconciliation = await reconcileExistingShopifyProductForImport({
-          client: shopifyClient,
-          locationId: shopifyInventoryLocation.id,
-          url: normalizedUrl,
-          rowNumber: row.rowNumber,
-          multiplier: row.priceMultiplier || 1,
-          collection: row.collection,
-          sheetId: Number(approvedCatalogGid),
-          sheetName: APPROVED_CATALOG_SHEETS[approvedCatalogGid],
-          existingSku: row.sku,
-          fresh: analyzed,
-        });
+        const reconcileExisting = (fresh: typeof analyzed) =>
+          reconcileExistingShopifyProductForImport({
+            client: shopifyClient,
+            locationId: shopifyInventoryLocation.id,
+            url: normalizedUrl,
+            rowNumber: row.rowNumber,
+            multiplier: row.priceMultiplier || 1,
+            collection: row.collection,
+            sheetId: Number(approvedCatalogGid),
+            sheetName: APPROVED_CATALOG_SHEETS[approvedCatalogGid],
+            existingSku: row.sku,
+            fresh,
+          });
+
+        let reconciliation: Awaited<ReturnType<typeof reconcileExisting>>;
+        try {
+          reconciliation = await reconcileExisting(analyzed);
+        } catch (error: any) {
+          const reason = String(error?.message || error || "");
+          const retryableCentrepointVariantMap =
+            normalizedUrl.includes("centrepointstores.com") &&
+            /Could not map \d+\/\d+ Shopify variants to fresh source variants/i.test(reason);
+          if (!retryableCentrepointVariantMap) throw error;
+
+          const refreshed = await withImportScrapeTimeout(
+            scrapeWithBridgeFallback(normalizedUrl),
+            normalizedUrl,
+          );
+          if (row.price !== null && PricingEngine.validatePrice(row.price)) {
+            refreshed.price = row.price;
+            refreshed.variants = refreshed.variants.map((variant: any) => ({
+              ...variant,
+              price: row.price,
+            }));
+          }
+          refreshed.importMeta = analyzed.importMeta;
+          skuPlan = applyDeterministicDabSkus({
+            product: refreshed,
+            url: normalizedUrl,
+            multiplier: row.priceMultiplier,
+            existingProductSku: row.sku,
+          });
+          setCachedAnalyzeProduct(normalizedUrl, refreshed);
+          analyzed = refreshed;
+          reconciliation = await reconcileExisting(analyzed);
+        }
 
         if (reconciliation.status === "verified" && reconciliation.shopifyProductId) {
           successful.push({
