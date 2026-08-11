@@ -909,8 +909,6 @@ async function loadTargetRows(state: WorkerState) {
           markBlockedHostRetryAttempt(state, entry);
           delete state.fingerprints[entry.key];
           delete state.verifiedFingerprints[entry.key];
-        } else {
-          continue;
         }
       }
       const normalizedUrl = googleSheetRowFingerprint(entry.row).normalizedUrl;
