@@ -130,3 +130,5 @@ jobs:
           git add src/server/routes/readiness.routes.ts
           git commit -m 'Expose bounded sync job blocker diagnostics'
           git push origin HEAD:stabilize-supabase-railway
+
+# retrigger: bounded blocker diagnostics only; no recovery or write mutation
