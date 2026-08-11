@@ -55,6 +55,9 @@ jobs:
       - name: Enforce production safety contract
         run: npm run safety:production
 
+      - name: Enforce stale SyncJob quarantine safety contract
+        run: npm run safety:quarantine-stale
+
       - name: Enforce existing-product audit safety contract
         run: npx tsx scripts/existing-product-audit-safety-contract.ts
 
