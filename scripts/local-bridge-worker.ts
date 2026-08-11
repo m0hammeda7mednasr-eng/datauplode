@@ -183,22 +183,59 @@ async function collectVisibleText(page: import("playwright").Page) {
     const bodyText = document.body?.innerText || "";
     if (bodyText.trim()) pushChunk(bodyText);
 
-    for (const image of Array.from(document.images).slice(0, 40)) {
-      const src =
-        image.currentSrc ||
-        image.src ||
-        image.getAttribute("data-src") ||
-        image.getAttribute("srcset")?.split(/\s+/)[0] ||
-        "";
-      const resolved = absoluteUrl(src);
+    const pushImageUrl = (rawUrl: unknown, alt = "Product image") => {
+      const resolved = absoluteUrl(rawUrl);
       if (resolved && /^https?:\/\//i.test(resolved)) {
-        pushChunk(`![${image.alt || "Product image"}](${resolved})`);
+        pushChunk(`![${alt}](${resolved})`);
+      }
+    };
+
+    const firstSrcsetUrl = (value: unknown) =>
+      String(value || "")
+        .split(",")
+        .map((part) => part.trim().split(/\s+/)[0])
+        .find(Boolean) || "";
+
+    for (const image of Array.from(document.images).slice(0, 120)) {
+      const alt = image.alt || "Product image";
+      pushImageUrl(image.currentSrc || image.src, alt);
+      pushImageUrl(image.getAttribute("data-src"), alt);
+      pushImageUrl(image.getAttribute("data-original"), alt);
+      pushImageUrl(image.getAttribute("data-lazy-src"), alt);
+      pushImageUrl(image.getAttribute("data-image"), alt);
+      pushImageUrl(firstSrcsetUrl(image.getAttribute("srcset")), alt);
+      pushImageUrl(firstSrcsetUrl(image.getAttribute("data-srcset")), alt);
+    }
+
+    for (const node of Array.from(document.querySelectorAll<HTMLElement>("*")).slice(
+      0,
+      2000,
+    )) {
+      const style = getComputedStyle(node);
+      const background = style.backgroundImage || "";
+      for (const match of background.matchAll(/url\(["']?([^"')]+)["']?\)/gi)) {
+        pushImageUrl(match[1], node.getAttribute("aria-label") || "Product image");
       }
     }
     return chunks.join("\n\n");
   });
 
   return compactVisibleText(text);
+}
+
+async function warmUpLazyAssets(page: import("playwright").Page, settleMs: number) {
+  const passes = Math.max(0, envNumber("LOCAL_BRIDGE_SCROLL_PASSES", 4));
+  if (passes <= 0) return;
+  const stepMs = Math.max(100, envNumber("LOCAL_BRIDGE_SCROLL_STEP_MS", 450));
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    await page.evaluate(() => {
+      window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+    });
+    await page.waitForTimeout(stepMs);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  if (settleMs > 0) await page.waitForTimeout(Math.min(settleMs, 2000));
 }
 
 async function capturePageText(url: string, timeoutMs: number, settleMs: number) {
@@ -254,6 +291,7 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     if (settleMs > 0) await page.waitForTimeout(settleMs);
+    await warmUpLazyAssets(page, settleMs);
 
     let text = await collectVisibleText(page);
     const allowInteractiveSolve = envFlag("LOCAL_BRIDGE_ALLOW_INTERACTIVE_SOLVE", true);
@@ -276,6 +314,7 @@ async function capturePageText(url: string, timeoutMs: number, settleMs: number)
       const start = Date.now();
       while (Date.now() - start < interactiveWaitMs) {
         await page.waitForTimeout(interactivePollMs);
+        await warmUpLazyAssets(page, settleMs);
         text = await collectVisibleText(page);
         if (!isBlockedSnapshotText(text)) break;
       }
