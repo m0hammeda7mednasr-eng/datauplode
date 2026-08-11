@@ -8,6 +8,7 @@ const server = read("server.ts");
 const scraper = read("src/server/services/scraper.ts");
 const readiness = read("src/server/routes/readiness.routes.ts");
 const databasePreflight = read("scripts/database-preflight.ts");
+const railwaySafeModePreflight = read("scripts/railway-safe-mode-preflight.ts");
 const databaseRuntime = read("src/server/db.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
@@ -125,6 +126,19 @@ const assertions: Array<[string, boolean]> = [
   [
     "runtime safe mode exits before background startup",
     /if \(!runtimeWritesEnabled\(\)\)[\s\S]*?return;[\s\S]*?jobRecoveryEnabled\(\)/.test(server),
+  ],
+  [
+    "Railway predeploy only allows catalog runtime writes with exact revision pins",
+    /function catalogWorkerRevisionAuthorized\(\)/.test(railwaySafeModePreflight) &&
+      /SYNC_SHEET1_CATALOG_REVISION/.test(railwaySafeModePreflight) &&
+      /SYNC_SHEET1_CATALOG_DEPLOYED_REVISION/.test(railwaySafeModePreflight) &&
+      /expected === deployed/.test(railwaySafeModePreflight) &&
+      /name === 'SYNC_RUNTIME_WRITE_ENABLED' && catalogRevisionAuthorized/.test(
+        railwaySafeModePreflight,
+      ) &&
+      !/name === 'SYNC_FIRST5_RECONCILE_ENABLED' && catalogRevisionAuthorized/.test(
+        railwaySafeModePreflight,
+      ),
   ],
   ["403 is classified as blocked source", /HTTP 403/.test(scraper) && /SOURCE_BLOCKED/.test(scraper)],
   [

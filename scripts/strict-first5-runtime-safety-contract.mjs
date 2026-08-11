@@ -15,6 +15,12 @@ const checks = [
   ['fallback requires full confidence threshold', /entry\.confidence\s*>=\s*120/.test(source)],
   ['weak score threshold is removed', !source.includes('score >= 20')],
   ['single-candidate auto-accept is removed', !/candidates\.length\s*===\s*1[\s\S]{0,220}return/.test(source)],
+  [
+    'transient Shopify search errors fail closed before missing-product create',
+    source.includes('const searchErrors: string[] = []') &&
+      source.includes('Shopify strict product search failed temporarily') &&
+      /if \(searchErrors\.length > 0\)[\s\S]*ambiguous:\s*true/.test(source),
+  ],
   ['Max multi-color guard exists', source.includes('Max product has multiple Shopify colors')],
   ['403 is not classified as out-of-stock', !/403[\s\S]{0,180}(out[- ]?of[- ]?stock|sold[- ]?out)/i.test(source)],
 ];

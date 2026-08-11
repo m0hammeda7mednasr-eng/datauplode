@@ -778,7 +778,7 @@ async function reconcileGroup(
       productCode,
       matchSource: located.matchSource,
       reason:
-        located.reason ||
+        (located as { reason?: string }).reason ||
         "More than one ACTIVE Shopify product matched with the same confidence. No automatic write was made.",
     };
   }

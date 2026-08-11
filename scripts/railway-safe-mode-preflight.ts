@@ -16,6 +16,29 @@ function normalize(value: string | undefined): string {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function enabled(name: string): boolean {
+  return TRUE_VALUES.has(normalize(process.env[name]));
+}
+
+function exactRevision(value: string | undefined): string {
+  const revision = String(value ?? '').trim();
+  return /^[0-9a-f]{40}$/i.test(revision) ? revision.toLowerCase() : '';
+}
+
+function catalogWorkerRevisionAuthorized(): boolean {
+  const expected = exactRevision(process.env.SYNC_SHEET1_CATALOG_REVISION);
+  const deployed = exactRevision(process.env.SYNC_SHEET1_CATALOG_DEPLOYED_REVISION);
+  return Boolean(
+    expected &&
+      deployed &&
+      expected === deployed &&
+      enabled('SYNC_RUNTIME_WRITE_ENABLED') &&
+      enabled('SYNC_POST_CANARY_BROAD_WRITES_ENABLED') &&
+      enabled('SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED') &&
+      !enabled('SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED'),
+  );
+}
+
 function isSupabaseHost(host: string): boolean {
   const normalizedHost = host.trim().toLowerCase().replace(/\.$/, '');
   return normalizedHost.endsWith('.supabase.com') || normalizedHost.endsWith('.supabase.co');
@@ -124,6 +147,7 @@ function main() {
   const missing: string[] = [];
   const invalid: Array<{ name: string; value: string }> = [];
   const open: string[] = [];
+  const catalogRevisionAuthorized = catalogWorkerRevisionAuthorized();
 
   for (const name of REQUIRED_CLOSED_GATES) {
     const raw = process.env[name];
@@ -135,6 +159,9 @@ function main() {
     }
 
     if (TRUE_VALUES.has(value)) {
+      if (name === 'SYNC_RUNTIME_WRITE_ENABLED' && catalogRevisionAuthorized) {
+        continue;
+      }
       open.push(name);
       continue;
     }
@@ -180,6 +207,7 @@ function main() {
     mode: 'production-safe-mode',
     requiredClosedGateCount: REQUIRED_CLOSED_GATES.length,
     first5RevisionAuthorized: Boolean(first5Revision),
+    catalogRevisionAuthorized,
     missing,
     invalid,
     open,
