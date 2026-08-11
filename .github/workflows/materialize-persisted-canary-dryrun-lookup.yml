@@ -1,0 +1,69 @@
+name: Materialize persisted canary dry-run lookup
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-persisted-canary-dryrun-lookup.yml
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - .github/workflows/materialize-persisted-canary-dryrun-lookup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Patch readiness to resolve persisted canary dry-run by exact ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/server/routes/readiness.routes.ts')
+          s = p.read_text()
+
+          old = '''    const canaryDryRun = latestCanary?.dryRunBatchId\n      ? observedAudits.find(\n          (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,\n        ) || null\n      : null;\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
+          new = '''    let canaryDryRun = latestCanary?.dryRunBatchId\n      ? observedAudits.find(\n          (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,\n        ) || null\n      : null;\n    if (!canaryDryRun && latestCanary?.dryRunBatchId) {\n      const persistedCanaryDryRun = await withTimeout(\n        prisma.importBatch.findFirst({\n          where: {\n            id: latestCanary.dryRunBatchId,\n            target: "catalog_audit",\n          },\n          select: {\n            id: true,\n            status: true,\n            createdAt: true,\n            updatedAt: true,\n            payloadJson: true,\n          },\n        }),\n        databaseTimeoutMs,\n      );\n      canaryDryRun = persistedCanaryDryRun\n        ? catalogAuditObservation(persistedCanaryDryRun)\n        : null;\n    }\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
+
+          if 'id: latestCanary.dryRunBatchId' not in s:
+            assert old in s, 'expected canaryDryRun block not found'
+            s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('scripts/readiness-platform-safety-contract.ts')
+          s = p.read_text()
+          if 'post-canary readiness resolves referenced dry-run outside the recent audit window' not in s:
+            needle = '''  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n'''
+            replacement = '''  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n  [\n    "post-canary readiness resolves referenced dry-run outside the recent audit window",\n    source.includes("if (!canaryDryRun && latestCanary?.dryRunBatchId)") &&\n      source.includes("prisma.importBatch.findFirst({") &&\n      source.includes("id: latestCanary.dryRunBatchId") &&\n      source.includes('target: "catalog_audit"') &&\n      source.includes("await withTimeout("),\n  ],\n  [\n    "persisted canary dry-run fallback remains exact-ID and target scoped",\n    source.includes("id: latestCanary.dryRunBatchId") &&\n      source.includes('target: "catalog_audit"') &&\n      !source.includes("findMany({\\n          where: { id: latestCanary.dryRunBatchId"),\n  ],\n];\n'''
+            assert needle in s, 'safety contract insertion point not found'
+            s = s.replace(needle, replacement, 1)
+          p.write_text(s)
+          PY
+
+      - name: Validate readiness safety contract
+        run: npx tsx scripts/readiness-platform-safety-contract.ts
+
+      - name: Commit materialized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No source changes required."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/server/routes/readiness.routes.ts scripts/readiness-platform-safety-contract.ts
+          git commit -m "Resolve persisted canary dry-run beyond readiness window"
+          git push origin HEAD:stabilize-supabase-railway
