@@ -57,6 +57,7 @@ type AuditResult = {
   variantsUpdated?: number;
   priceUpdated?: boolean;
   skuUpdated?: boolean;
+  readbackVerified?: boolean;
   reason?: string;
   skus?: string[];
 };
@@ -699,6 +700,7 @@ async function auditOneRow(client: any, row: AuditRow, dryRun: boolean): Promise
     ).length,
     priceUpdated,
     skuUpdated,
+    readbackVerified: true,
     skus: updates.map((entry) => entry.sku),
   };
 }
