@@ -7,9 +7,14 @@ on:
       - stabilize-supabase-railway
     paths:
       - .github/workflows/materialize-sync-job-blocker-diagnostics.yml
+      - src/server/routes/readiness.routes.ts
 
 permissions:
   contents: write
+
+concurrency:
+  group: materialize-sync-job-blocker-diagnostics-stabilize
+  cancel-in-progress: false
 
 jobs:
   materialize:
@@ -112,7 +117,6 @@ jobs:
           if missing:
               raise SystemExit(f'Materialization incomplete; missing: {missing}')
 
-          # Read-only diagnostics contract: expose metadata only, never job payload/result.
           sample_section_start = text.index('staleRunningJobSamples')
           sample_section_end = text.index('prisma.importBatch.findMany', sample_section_start)
           sample_section = text[sample_section_start:sample_section_end]
