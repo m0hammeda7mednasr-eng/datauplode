@@ -1,0 +1,204 @@
+name: Materialize and run targeted stale job quarantine
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - src/server/routes/sync-job-quarantine.routes.ts
+      - .github/workflows/materialize-and-run-stale-job-quarantine.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: dabdoob-targeted-stale-job-quarantine
+  cancel-in-progress: false
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+      TARGET_IDS_JSON: '["cmsnxcn1i000ypb10swaecmni","cmso1ry8f0013md10k7s2vwa0","cmso3rjop02hgmr10h14sgssn","cmso44ojl027xnx10tfky7md2","cmso4jjrb01x7pc10660pl2um","cmso50zvk01l5n41093xqydq4","cmso5tca70340pl10ggih0hin","cmsorlnoo0000n610cywi0x58"]'
+
+    steps:
+      - name: Checkout quarantine branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Mount fail-closed quarantine route idempotently
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('server.ts')
+          text = path.read_text()
+          import_line = 'import syncJobQuarantineRouter from "./src/server/routes/sync-job-quarantine.routes.js";\n'
+          anchor = 'import readinessRouter from "./src/server/routes/readiness.routes.js";\n'
+          if import_line not in text:
+              if anchor not in text:
+                  raise SystemExit('readiness import anchor not found')
+              text = text.replace(anchor, anchor + import_line, 1)
+          mount = '  app.use("/api", syncJobQuarantineRouter);\n'
+          mount_anchor = '  app.use("/api", readinessRouter);\n'
+          if mount not in text:
+              if mount_anchor not in text:
+                  raise SystemExit('readiness mount anchor not found')
+              text = text.replace(mount_anchor, mount_anchor + mount, 1)
+          header = '      "X-Sync-Job-Quarantine-Confirm",\n'
+          header_anchor = '      "X-Catalog-Audit-Write-Token",\n'
+          if header not in text:
+              if header_anchor not in text:
+                  raise SystemExit('CORS header anchor not found')
+              text = text.replace(header_anchor, header_anchor + header, 1)
+          fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-Sheet1-Reconcile-Run"'
+          old_fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sheet1-Reconcile-Run"'
+          text = text.replace(old_fallback, fallback)
+          path.write_text(text)
+
+      - name: Verify no outbound or replay path exists in quarantine route
+        shell: bash
+        run: |
+          set -euo pipefail
+          route=src/server/routes/sync-job-quarantine.routes.ts
+          grep -q 'MAX_ROWS = 20' "$route"
+          grep -q 'status: "running"' "$route"
+          grep -q 'status: "failed"' "$route"
+          grep -q 'stale_running_no_replay' "$route"
+          grep -q 'readBackVerified' "$route"
+          if grep -Eqi 'axios|fetch\(|ShopifyService|QueueService|enqueue|publishProduct|updateVariant|googleapis' "$route"; then
+            echo 'Unsafe outbound/replay primitive found in quarantine route.' >&2
+            exit 2
+          fi
+
+      - name: Commit materialized server mount if needed
+        id: materialize
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- server.ts; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add server.ts
+            git commit -m "Mount fail-closed stale job quarantine route"
+            git push origin HEAD:stabilize-supabase-railway
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Production Build Check on exact target SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.materialize.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            json="$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${TARGET_SHA}&per_page=100")"
+            state="$(JSON="$json" node - <<'NODE'
+          const body = JSON.parse(process.env.JSON || '{}');
+          const run = (body.workflow_runs || []).find((r) => r.name === 'Production Build Check');
+          if (!run) process.stdout.write('missing');
+          else if (run.status !== 'completed') process.stdout.write('pending');
+          else process.stdout.write(run.conclusion || 'unknown');
+          NODE
+            )"
+            echo "Production Build Check attempt ${attempt}: ${state}"
+            if [ "$state" = success ]; then exit 0; fi
+            if [ "$state" != missing ] && [ "$state" != pending ]; then
+              echo "Production Build Check did not succeed; quarantine not attempted." >&2
+              exit 2
+            fi
+            sleep 20
+          done
+          echo "Timed out waiting for exact-head Production Build Check; quarantine not attempted." >&2
+          exit 2
+
+      - name: Wait for exact Railway deployment and healthy Supabase binding
+        env:
+          TARGET_SHA: ${{ steps.materialize.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RAILWAY_SMOKE_BASE_URL"
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --max-time 30 --output readiness.json --write-out '%{http_code}' "${RAILWAY_SMOKE_BASE_URL%/}/api/ready" || true)"
+            state="$(TARGET_SHA="$TARGET_SHA" node - <<'NODE'
+          const fs = require('node:fs');
+          let body = {};
+          try { body = JSON.parse(fs.readFileSync('readiness.json', 'utf8')); } catch {}
+          const expected = String(process.env.TARGET_SHA || '').toLowerCase();
+          const actual = String(body?.deployment?.revision || '').toLowerCase();
+          const ok = body?.deployment?.revisionVerified === true && actual === expected && body?.database?.ok === true && body?.database?.target === 'supabase' && body?.database?.projectRefPinned === true && body?.database?.projectRefMatched === true && body?.configuration?.runtimeWriteGateEnabled === false;
+          process.stdout.write(ok ? 'ready' : `waiting:${actual || 'unknown'}`);
+          NODE
+            )"
+            echo "Railway attempt ${attempt}: HTTP ${code} ${state}"
+            if [ "$state" = ready ]; then exit 0; fi
+            sleep 20
+          done
+          echo "Exact Railway deployment/Supabase binding not verified; quarantine not attempted." >&2
+          exit 2
+
+      - name: Quarantine exactly the eight known stale jobs with no replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CATALOG_AUDIT_WRITE_TOKEN"
+          payload="$(TARGET_IDS_JSON="$TARGET_IDS_JSON" node - <<'NODE'
+          const ids = JSON.parse(process.env.TARGET_IDS_JSON);
+          process.stdout.write(JSON.stringify({ ids, staleMinutes: 10, confirm: 'QUARANTINE_STALE_RUNNING_NO_REPLAY' }));
+          NODE
+          )"
+          code="$(curl --silent --show-error --location --max-redirs 0 --max-time 60 \
+            --output quarantine.json --write-out '%{http_code}' \
+            --request POST \
+            --header 'accept: application/json' \
+            --header 'content-type: application/json' \
+            --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+            --header 'x-sync-job-quarantine-confirm: QUARANTINE_STALE_RUNNING_NO_REPLAY' \
+            --data "$payload" \
+            "${RAILWAY_SMOKE_BASE_URL%/}/api/admin/quarantine-stale-sync-jobs")"
+          cat quarantine.json
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "Targeted quarantine failed with HTTP ${code}; no replay or broad recovery attempted." >&2
+            exit 1
+          fi
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('quarantine.json', 'utf8'));
+          if (body?.success !== true || Number(body?.applied) !== 8 || Number(body?.readBackVerified) !== 8 || Number(body?.shopifyApiCalls) !== 0 || Number(body?.googleSheetWrites) !== 0) {
+            throw new Error('Exact quarantine/read-back contract failed');
+          }
+          NODE
+
+      - name: Verify queue read-back from production readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl --silent --show-error --max-time 30 --output readiness-after.json --write-out '%{http_code}' "${RAILWAY_SMOKE_BASE_URL%/}/api/ready" || true)"
+          HTTP_CODE="$code" node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('readiness-after.json', 'utf8'));
+          if (Number(body?.jobs?.running) !== 0 || Number(body?.jobs?.staleRunning) !== 0) {
+            throw new Error(`Queue read-back not clean: running=${body?.jobs?.running}, stale=${body?.jobs?.staleRunning}`);
+          }
+          console.log(JSON.stringify({
+            httpCode: process.env.HTTP_CODE,
+            revision: body?.deployment?.revision,
+            databaseOk: body?.database?.ok,
+            running: body?.jobs?.running,
+            staleRunning: body?.jobs?.staleRunning,
+            recentFailed: body?.jobs?.recentFailed,
+            latestDryRunId: body?.rollout?.latestDryRun?.id,
+            latestDryRunExpired: body?.rollout?.latestDryRunExpired,
+            broadWritesEnabled: body?.configuration?.runtimeWriteGateEnabled,
+          }, null, 2));
+          NODE
