@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL || 'https://datauplode-production.up.railway.app' }}
       CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
       TARGET_IDS_JSON: '["cmsnxcn1i000ypb10swaecmni","cmso1ry8f0013md10k7s2vwa0","cmso3rjop02hgmr10h14sgssn","cmso44ojl027xnx10tfky7md2","cmso4jjrb01x7pc10660pl2um","cmso50zvk01l5n41093xqydq4","cmso5tca70340pl10ggih0hin"]'
       EXPECTED_TARGET_COUNT: '7'
@@ -33,6 +33,16 @@ jobs:
         with:
           ref: stabilize-supabase-railway
           fetch-depth: 0
+
+      - name: Fail closed when maintenance credential is unavailable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RAILWAY_SMOKE_BASE_URL"
+          if [ -z "$CATALOG_AUDIT_WRITE_TOKEN" ]; then
+            echo 'CATALOG_AUDIT_WRITE_TOKEN is not available to GitHub Actions. Refusing targeted quarantine; no DB/Shopify/Sheet mutation attempted.' >&2
+            exit 2
+          fi
 
       - name: Mount fail-closed quarantine route idempotently
         shell: python
@@ -126,7 +136,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$RAILWAY_SMOKE_BASE_URL"
           for attempt in $(seq 1 30); do
             code="$(curl --silent --show-error --max-time 30 --output readiness.json --write-out '%{http_code}' "${RAILWAY_SMOKE_BASE_URL%/}/api/ready" || true)"
             state="$(TARGET_SHA="$TARGET_SHA" node - <<'NODE'
@@ -159,7 +168,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$CATALOG_AUDIT_WRITE_TOKEN"
           payload="$(TARGET_IDS_JSON="$TARGET_IDS_JSON" node - <<'NODE'
           const ids = JSON.parse(process.env.TARGET_IDS_JSON);
           process.stdout.write(JSON.stringify({ ids, staleMinutes: 10, confirm: 'QUARANTINE_STALE_RUNNING_NO_REPLAY' }));
