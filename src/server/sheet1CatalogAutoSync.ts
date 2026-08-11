@@ -490,7 +490,7 @@ function catalogRowHost(entry: CatalogRow) {
 }
 
 function isBlockedSourceReason(reason: unknown) {
-  return /blocked automated server access|No usable product HTML returned|ScraperAPI HTTP (?:403|499)|Reader fallbacks failed|Playwright returned non-product HTML|Managed bypass failed|HTTP 429/i.test(
+  return /blocked automated server access|No usable product HTML returned|ScraperAPI HTTP (?:403|499)|Reader fallbacks failed|Reader fallback returned an access-denied or missing page|Playwright returned non-product HTML|Managed bypass failed|HTTP 429|SHEIN snapshot returned a challenge or rate-limit page/i.test(
     String(reason || ""),
   );
 }
