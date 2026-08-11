@@ -233,6 +233,68 @@ function initialState(previous?: Partial<WorkerState>): WorkerState {
   };
 }
 
+function numericMax(values: Array<unknown>, fallback = 0): number {
+  return values.reduce<number>((max, value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(max, number) : max;
+  }, fallback);
+}
+
+function objectRecord(value: unknown): Record<string, string> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, string>)
+    : {};
+}
+
+function mergeResumeStates(states: Array<Partial<WorkerState>>): Partial<WorkerState> {
+  const validStates = states.filter((state) => state && typeof state === "object");
+  if (!validStates.length) return {};
+
+  const latest = validStates[0] || {};
+  const merged: Partial<WorkerState> = {
+    ...latest,
+    cycle: numericMax(validStates.map((state) => state.cycle)),
+    existingUpdated: numericMax(validStates.map((state) => state.existingUpdated)),
+    published: numericMax(validStates.map((state) => state.published)),
+    failed: numericMax(validStates.map((state) => state.failed)),
+    skipped: numericMax(validStates.map((state) => state.skipped)),
+    sheetCellsWritten: numericMax(validStates.map((state) => state.sheetCellsWritten)),
+    fingerprints: {},
+    verifiedFingerprints: {},
+    pendingSkuWrites: {},
+    hmPriceRetryFingerprints: {},
+    blockedHostRetryFingerprints: {},
+    issues: [],
+  };
+
+  for (const state of validStates.slice().reverse()) {
+    Object.assign(merged.fingerprints!, objectRecord(state.fingerprints));
+    Object.assign(
+      merged.verifiedFingerprints!,
+      objectRecord(state.verifiedFingerprints),
+    );
+    Object.assign(merged.pendingSkuWrites!, objectRecord(state.pendingSkuWrites));
+    Object.assign(
+      merged.hmPriceRetryFingerprints!,
+      objectRecord(state.hmPriceRetryFingerprints),
+    );
+    Object.assign(
+      merged.blockedHostRetryFingerprints!,
+      objectRecord(state.blockedHostRetryFingerprints),
+    );
+    if (Array.isArray(state.issues)) {
+      merged.issues!.push(...state.issues);
+    }
+    if (!merged.lastBatchId && state.lastBatchId) merged.lastBatchId = state.lastBatchId;
+    if (!merged.lastRunAt && state.lastRunAt) merged.lastRunAt = state.lastRunAt;
+  }
+
+  merged.issues = merged.issues!.slice(-200);
+  merged.sheetWritePending = Object.keys(merged.pendingSkuWrites || {}).length;
+  merged.verifiedRows = Object.keys(merged.verifiedFingerprints || {}).length;
+  return merged;
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -975,6 +1037,12 @@ async function runContinuousWorker() {
       }),
     },
   });
+  const resumeJobs = await prisma.syncJob.findMany({
+    where: { type: SHEET1_CATALOG_MARKER_TYPE },
+    orderBy: { createdAt: "desc" },
+    take: 25,
+    select: { result: true },
+  });
   const previous = await prisma.syncJob.findFirst({
     where: { type: SHEET1_CATALOG_MARKER_TYPE },
     orderBy: { createdAt: "desc" },
@@ -993,7 +1061,9 @@ async function runContinuousWorker() {
       },
     });
   }
-  const state = initialState(parseState(previous?.result));
+  const state = initialState(
+    mergeResumeStates(resumeJobs.map((job) => parseState(job.result))),
+  );
   const marker = await prisma.syncJob.create({
     data: {
       type: SHEET1_CATALOG_MARKER_TYPE,
