@@ -180,6 +180,89 @@ async function collectVisibleText(page: import("playwright").Page) {
         ?.trim() || "";
     if (metaPrice) pushChunk(`Price: ${metaCurrency} ${metaPrice}`.trim());
 
+    const extractCentrepointState = () => {
+      if (!location.hostname.toLowerCase().includes("centrepointstores.com")) {
+        return null;
+      }
+      for (const script of Array.from(document.scripts)) {
+        const raw = script.textContent || "";
+        if (!raw.includes("initialState")) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const encoded = parsed?.props?.initialState;
+          if (!encoded || typeof encoded !== "string") continue;
+          const decoded = JSON.parse(
+            decodeURIComponent(
+              Array.prototype.map
+                .call(atob(encoded), (char: string) =>
+                  `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+                )
+                .join(""),
+            ),
+          );
+          const product = decoded?.productPageReducerBL?.data;
+          if (product?.id || product?.sku || product?.name) return product;
+        } catch {}
+      }
+      return null;
+    };
+
+    const centrepointProduct = extractCentrepointState();
+    if (centrepointProduct) {
+      pushChunk(centrepointProduct.name ? `# ${centrepointProduct.name}` : "");
+      pushChunk(
+        centrepointProduct.sku ? `Product Code: ${centrepointProduct.sku}` : "",
+      );
+      const statePrice =
+        centrepointProduct?.priceInfo?.price?.amount ||
+        centrepointProduct?.price?.amount ||
+        centrepointProduct?.priceInfo?.priceTypeDetails?.salePrice?.bestPrice
+          ?.amount ||
+        centrepointProduct?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
+          ?.amount;
+      const stateCurrency =
+        centrepointProduct?.priceInfo?.price?.currency ||
+        centrepointProduct?.price?.currency ||
+        centrepointProduct?.currency ||
+        "AED";
+      if (statePrice) pushChunk(`Price: ${stateCurrency} ${statePrice}`.trim());
+      const basePrice =
+        centrepointProduct?.priceInfo?.priceTypeDetails?.basePrice?.bestPrice
+          ?.amount;
+      if (basePrice && basePrice !== statePrice) {
+        pushChunk(`Original price: ${stateCurrency} ${basePrice}`.trim());
+      }
+      const options = Array.isArray(centrepointProduct.options)
+        ? centrepointProduct.options
+        : [];
+      for (const option of options) {
+        const optionName = String(
+          option?.label || option?.attributeChoice?.attributeName || "",
+        );
+        const values = Array.isArray(option?.attributeChoice?.allowedValues)
+          ? option.attributeChoice.allowedValues
+          : [];
+        for (const value of values) {
+          const label = String(value?.label || value?.value || "").trim();
+          if (!label) continue;
+          if (/size/i.test(optionName)) pushChunk(label);
+          else if (/colou?r/i.test(optionName)) pushChunk(`Color: ${label}`);
+        }
+      }
+      for (const variant of Array.isArray(centrepointProduct.variants)
+        ? centrepointProduct.variants.slice(0, 40)
+        : []) {
+        const size = String(variant?.optionValues?.Size || "").trim();
+        if (size) pushChunk(size);
+        const variantPrice = variant?.priceInfo?.price?.amount;
+        const variantCurrency =
+          variant?.priceInfo?.price?.currency || stateCurrency;
+        if (variantPrice) {
+          pushChunk(`Price: ${variantCurrency} ${variantPrice}`.trim());
+        }
+      }
+    }
+
     const bodyText = document.body?.innerText || "";
     if (bodyText.trim()) pushChunk(bodyText);
 
