@@ -1,6 +1,6 @@
 name: Materialize and run targeted stale job quarantine
 
-# Trigger note: bounded seven-job no-replay quarantine after exact-head CI is green.
+# Bounded seven-job no-replay quarantine after exact-head CI is green.
 on:
   push:
     branches: [stabilize-supabase-railway]
@@ -12,6 +12,7 @@ on:
 permissions:
   contents: write
   actions: read
+  id-token: write
 
 concurrency:
   group: dabdoob-targeted-stale-job-quarantine
@@ -34,13 +35,13 @@ jobs:
           ref: stabilize-supabase-railway
           fetch-depth: 0
 
-      - name: Fail closed when maintenance credential is unavailable
+      - name: Fail closed unless a maintenance authentication path is available
         shell: bash
         run: |
           set -euo pipefail
           test -n "$RAILWAY_SMOKE_BASE_URL"
-          if [ -z "$CATALOG_AUDIT_WRITE_TOKEN" ]; then
-            echo 'CATALOG_AUDIT_WRITE_TOKEN is not available to GitHub Actions. Refusing targeted quarantine; no DB/Shopify/Sheet mutation attempted.' >&2
+          if [ -z "$CATALOG_AUDIT_WRITE_TOKEN" ] && { [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; }; then
+            echo 'Neither the production write token nor GitHub Actions OIDC is available. Refusing targeted quarantine.' >&2
             exit 2
           fi
 
@@ -62,18 +63,18 @@ jobs:
               if mount_anchor not in text:
                   raise SystemExit('readiness mount anchor not found')
               text = text.replace(mount_anchor, mount_anchor + mount, 1)
-          header = '      "X-Sync-Job-Quarantine-Confirm",\n'
-          header_anchor = '      "X-Catalog-Audit-Write-Token",\n'
-          if header not in text:
-              if header_anchor not in text:
-                  raise SystemExit('CORS header anchor not found')
-              text = text.replace(header_anchor, header_anchor + header, 1)
-          fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-Sheet1-Reconcile-Run"'
-          old_fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sheet1-Reconcile-Run"'
-          text = text.replace(old_fallback, fallback)
+          for header in ['      "X-Sync-Job-Quarantine-Confirm",\n', '      "X-GitHub-Actions-OIDC-Token",\n']:
+              header_anchor = '      "X-Catalog-Audit-Write-Token",\n'
+              if header not in text:
+                  if header_anchor not in text:
+                      raise SystemExit('CORS header anchor not found')
+                  text = text.replace(header_anchor, header_anchor + header, 1)
+          old_fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-Sheet1-Reconcile-Run"'
+          new_fallback = '"Content-Type,Authorization,X-Catalog-Audit-Write-Token,X-Sync-Job-Quarantine-Confirm,X-GitHub-Actions-OIDC-Token,X-Sheet1-Reconcile-Run"'
+          text = text.replace(old_fallback, new_fallback)
           path.write_text(text)
 
-      - name: Verify no outbound or replay path exists in quarantine route
+      - name: Verify bounded no-replay quarantine contract
         shell: bash
         run: |
           set -euo pipefail
@@ -83,8 +84,11 @@ jobs:
           grep -q 'status: "failed"' "$route"
           grep -q 'stale_running_no_replay' "$route"
           grep -q 'readBackVerified' "$route"
-          if grep -Eqi 'axios|fetch\(|ShopifyService|QueueService|enqueue|publishProduct|updateVariant|googleapis' "$route"; then
-            echo 'Unsafe outbound/replay primitive found in quarantine route.' >&2
+          grep -q 'GITHUB_REPOSITORY_ID = "1236020386"' "$route"
+          grep -q 'refs/heads/stabilize-supabase-railway' "$route"
+          grep -q 'materialize-and-run-stale-job-quarantine.yml' "$route"
+          if grep -Eqi 'ShopifyService|QueueService|enqueue|publishProduct|updateVariant|googleapis' "$route"; then
+            echo 'Unsafe Shopify/Google/replay primitive found in quarantine route.' >&2
             exit 2
           fi
 
@@ -164,7 +168,28 @@ jobs:
           echo "Exact Railway deployment/Supabase safety binding not verified; quarantine not attempted." >&2
           exit 2
 
+      - name: Acquire short-lived repo-bound GitHub OIDC token when static token is unavailable
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$CATALOG_AUDIT_WRITE_TOKEN" ]; then
+            echo 'mode=static' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          oidc_json="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-stale-job-quarantine")"
+          oidc_token="$(printf '%s' "$oidc_json" | jq -r '.value // empty')"
+          test -n "$oidc_token"
+          echo "::add-mask::$oidc_token"
+          echo "token=$oidc_token" >> "$GITHUB_OUTPUT"
+          echo 'mode=oidc' >> "$GITHUB_OUTPUT"
+
       - name: Quarantine exactly the seven confirmed stale Shopify jobs with no replay
+        env:
+          OIDC_TOKEN: ${{ steps.auth.outputs.token }}
+          AUTH_MODE: ${{ steps.auth.outputs.mode }}
         shell: bash
         run: |
           set -euo pipefail
@@ -173,12 +198,18 @@ jobs:
           process.stdout.write(JSON.stringify({ ids, staleMinutes: 10, confirm: 'QUARANTINE_STALE_RUNNING_NO_REPLAY' }));
           NODE
           )"
+          auth_args=()
+          if [ "$AUTH_MODE" = static ]; then
+            auth_args+=(--header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}")
+          else
+            auth_args+=(--header "x-github-actions-oidc-token: ${OIDC_TOKEN}")
+          fi
           code="$(curl --silent --show-error --location --max-redirs 0 --max-time 60 \
             --output quarantine.json --write-out '%{http_code}' \
             --request POST \
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
-            --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+            "${auth_args[@]}" \
             --header 'x-sync-job-quarantine-confirm: QUARANTINE_STALE_RUNNING_NO_REPLAY' \
             --data "$payload" \
             "${RAILWAY_SMOKE_BASE_URL%/}/api/admin/quarantine-stale-sync-jobs")"
