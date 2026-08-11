@@ -1,0 +1,96 @@
+name: Materialize phase-aware production readiness
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - .github/workflows/materialize-phase-aware-readiness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+      - name: Patch readiness fail-closed for post-canary phase
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/server/routes/readiness.routes.ts')
+          s = p.read_text()
+
+          old = '''  const canaryProvenanceValid =\n    summary.dryRun === false\n      ? Boolean(\n          dryRunBatchId &&\n            shopifyProductIds.length === 1 &&\n            provenanceShopifyProductId === shopifyProductIds[0],\n        )\n      : null;\n'''
+          new = old + '''  const readbackVerified =\n    summary.dryRun === false\n      ? Boolean(results.length === 1 && results[0]?.readbackVerified === true)\n      : null;\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    provenanceShopifyProductId,\n    canaryProvenanceValid,\n'''
+          new = '''    provenanceShopifyProductId,\n    canaryProvenanceValid,\n    readbackVerified,\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          marker = '''    const latestDryRunExpired = Boolean(\n      latestDryRun &&\n        (latestDryRunAgeMinutes === null || latestDryRunAgeMinutes > canaryDryRunMaxAge),\n    );\n\n'''
+          insert = marker + '''    const latestCanaryReadbackVerified = Boolean(\n      latestCanary &&\n        latestCanary.status === "COMPLETED" &&\n        latestCanary.dryRun === false &&\n        latestCanary.writeSheet === false &&\n        latestCanary.uniqueProductsProcessed === 1 &&\n        latestCanary.verified === 1 &&\n        latestCanary.missing === 0 &&\n        latestCanary.ambiguous === 0 &&\n        latestCanary.errors === 0 &&\n        latestCanary.shopifyProductIds.length === 1 &&\n        latestCanary.canaryProvenanceValid === true &&\n        latestCanary.readbackVerified === true &&\n        latestDryRun &&\n        latestCanary.dryRunBatchId === latestDryRun.id &&\n        latestCanary.shopifyProductId === latestDryRun.shopifyProductId,\n    );\n    const postCanaryWriteSafetyReady = Boolean(\n      runtimeWriteGateEnabled &&\n        postCanaryBroadWritesConfigured &&\n        configuration.sheet1CatalogAutostartEnabled &&\n        !inventoryAutostartConfigured &&\n        !jobRecoveryConfigured &&\n        !jobRecoveryShopifyWritesConfigured &&\n        !sheetImportAutostartConfigured &&\n        !configuration.catalogWriteGateEnabled &&\n        !configuration.catalogSheetWriteGateEnabled &&\n        catalogAuditDryRunConfigured &&\n        latestDryRunCanaryReady &&\n        latestCanaryReadbackVerified &&\n        pendingJobs === 0 &&\n        runningJobs === 0 &&\n        staleRunningJobs === 0 &&\n        recentFailedJobs === 0,\n    );\n    const phaseWriteSafetyReady =\n      productionWriteSafetyReady || postCanaryWriteSafetyReady;\n\n'''
+          assert marker in s
+          s = s.replace(marker, insert, 1)
+
+          old = '''      productionPlatformReady &&\n      (!productionEnvironment || productionWriteSafetyReady);\n'''
+          new = '''      productionPlatformReady &&\n      (!productionEnvironment || phaseWriteSafetyReady);\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''        writeSafetyReady: productionWriteSafetyReady,\n        ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady),\n'''
+          new = '''        writeSafetyReady: phaseWriteSafetyReady,\n        ready: productionPlatformReady && (!productionEnvironment || phaseWriteSafetyReady),\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''        latestDryRunCanaryReady,\n        latestCanary,\n'''
+          new = '''        latestDryRunCanaryReady,\n        latestCanary,\n        latestCanaryReadbackVerified,\n        postCanaryWriteSafetyReady,\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          p = Path('scripts/readiness-platform-safety-contract.ts')
+          s = p.read_text()
+          s = s.replace(
+            'source.includes("ready: productionPlatformReady && (!productionEnvironment || productionWriteSafetyReady)")',
+            'source.includes("ready: productionPlatformReady && (!productionEnvironment || phaseWriteSafetyReady)")',
+          )
+          s = s.replace(
+            'source.includes("(!productionEnvironment || productionWriteSafetyReady)")',
+            'source.includes("(!productionEnvironment || phaseWriteSafetyReady)")',
+          )
+          s = s.replace(
+            'source.includes("writeSafetyReady: productionWriteSafetyReady")',
+            'source.includes("writeSafetyReady: phaseWriteSafetyReady")',
+          )
+          needle = '''];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+          addition = '''  [\n    "post-canary readiness requires exact persisted Shopify read-back",\n    source.includes("latestCanary.readbackVerified === true") &&\n      source.includes("latestCanaryReadbackVerified"),\n  ],\n  [\n    "post-canary readiness requires dry-run to canary identity continuity",\n    source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId"),\n  ],\n  [\n    "post-canary broad readiness remains queue-clean fail-closed",\n    source.includes("postCanaryWriteSafetyReady") &&\n      source.includes("pendingJobs === 0") &&\n      source.includes("runningJobs === 0") &&\n      source.includes("staleRunningJobs === 0") &&\n      source.includes("recentFailedJobs === 0"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+          assert needle in s
+          s = s.replace(needle, addition, 1)
+          p.write_text(s)
+          PY
+      - name: Validate phase-aware readiness safety contract
+        run: npx tsx scripts/readiness-platform-safety-contract.ts
+      - name: Commit materialized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No source changes required."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/server/routes/readiness.routes.ts scripts/readiness-platform-safety-contract.ts
+          git commit -m "Make production readiness phase-aware after canary"
+          git push origin HEAD:stabilize-supabase-railway
