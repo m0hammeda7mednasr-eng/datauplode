@@ -1,6 +1,10 @@
 name: Materialize phase-aware production readiness
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-phase-aware-readiness.yml
   push:
     branches: [stabilize-supabase-railway]
     paths:
