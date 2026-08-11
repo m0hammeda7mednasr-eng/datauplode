@@ -43,6 +43,10 @@ jobs:
 
           p = Path('scripts/readiness-platform-safety-contract.ts')
           s = p.read_text()
+          s = s.replace(
+            'source.includes("const canaryDryRun = latestCanary?.dryRunBatchId")',
+            'source.includes("let canaryDryRun = latestCanary?.dryRunBatchId")',
+          )
           if 'post-canary readiness resolves referenced dry-run outside the recent audit window' not in s:
             needle = '''  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n'''
             replacement = '''  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n  [\n    "post-canary readiness resolves referenced dry-run outside the recent audit window",\n    source.includes("if (!canaryDryRun && latestCanary?.dryRunBatchId)") &&\n      source.includes("prisma.importBatch.findFirst({") &&\n      source.includes("id: latestCanary.dryRunBatchId") &&\n      source.includes('target: "catalog_audit"') &&\n      source.includes("await withTimeout("),\n  ],\n  [\n    "persisted canary dry-run fallback remains exact-ID and target scoped",\n    source.includes("id: latestCanary.dryRunBatchId") &&\n      source.includes('target: "catalog_audit"') &&\n      !source.includes("findMany({\\n          where: { id: latestCanary.dryRunBatchId"),\n  ],\n];\n'''
