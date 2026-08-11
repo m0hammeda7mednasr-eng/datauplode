@@ -384,11 +384,32 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     const latestCatalogAudit = observedAudits[0] || null;
     const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;
     const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;
-    const canaryDryRun = latestCanary?.dryRunBatchId
+    let canaryDryRun = latestCanary?.dryRunBatchId
       ? observedAudits.find(
           (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,
         ) || null
       : null;
+    if (!canaryDryRun && latestCanary?.dryRunBatchId) {
+      const persistedCanaryDryRun = await withTimeout(
+        prisma.importBatch.findFirst({
+          where: {
+            id: latestCanary.dryRunBatchId,
+            target: "catalog_audit",
+          },
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+            payloadJson: true,
+          },
+        }),
+        databaseTimeoutMs,
+      );
+      canaryDryRun = persistedCanaryDryRun
+        ? catalogAuditObservation(persistedCanaryDryRun)
+        : null;
+    }
     const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);
     const latestDryRunCanaryReady = isCanaryReadyDryRun(latestDryRun, canaryDryRunMaxAge);
     const latestDryRunExpired = Boolean(

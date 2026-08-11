@@ -254,7 +254,7 @@ const checks: Array<[string, boolean]> = [
   ],
   [
     "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",
-    source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") &&
+    source.includes("let canaryDryRun = latestCanary?.dryRunBatchId") &&
       source.includes("persistedCanaryDryRunVerified") &&
       !source.includes("catalogAuditDryRunConfigured &&\n        latestDryRunCanaryReady &&\n        latestCanaryReadbackVerified"),
   ],
@@ -262,6 +262,20 @@ const checks: Array<[string, boolean]> = [
     "post-canary read-back stays bound to the dry-run referenced by canary provenance",
     source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&
       source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),
+  ],
+  [
+    "post-canary readiness resolves referenced dry-run outside the recent audit window",
+    source.includes("if (!canaryDryRun && latestCanary?.dryRunBatchId)") &&
+      source.includes("prisma.importBatch.findFirst({") &&
+      source.includes("id: latestCanary.dryRunBatchId") &&
+      source.includes('target: "catalog_audit"') &&
+      source.includes("await withTimeout("),
+  ],
+  [
+    "persisted canary dry-run fallback remains exact-ID and target scoped",
+    source.includes("id: latestCanary.dryRunBatchId") &&
+      source.includes('target: "catalog_audit"') &&
+      !source.includes("findMany({\n          where: { id: latestCanary.dryRunBatchId"),
   ],
 ];
 
