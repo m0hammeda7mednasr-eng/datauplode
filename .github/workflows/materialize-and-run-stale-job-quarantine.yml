@@ -1,6 +1,6 @@
 name: Materialize and run targeted stale job quarantine
 
-# Trigger note: rerun only the bounded seven-job no-replay quarantine after exact-head CI is green.
+# Trigger note: bounded seven-job no-replay quarantine after exact-head CI is green.
 on:
   push:
     branches: [stabilize-supabase-railway]
@@ -103,15 +103,12 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 30); do
-            json="$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${TARGET_SHA}&per_page=100")"
-            state="$(JSON="$json" node - <<'NODE'
-          const body = JSON.parse(process.env.JSON || '{}');
-          const run = (body.workflow_runs || []).find((r) => r.name === 'Production Build Check');
-          if (!run) process.stdout.write('missing');
-          else if (run.status !== 'completed') process.stdout.write('pending');
-          else process.stdout.write(run.conclusion || 'unknown');
-          NODE
-            )"
+            state="$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${TARGET_SHA}&per_page=100" --jq '
+              [.workflow_runs[] | select(.name == "Production Build Check")] | first |
+              if . == null then "missing"
+              elif .status != "completed" then "pending"
+              else (.conclusion // "unknown") end
+            ')"
             echo "Production Build Check attempt ${attempt}: ${state}"
             if [ "$state" = success ]; then exit 0; fi
             if [ "$state" != missing ] && [ "$state" != pending ]; then
