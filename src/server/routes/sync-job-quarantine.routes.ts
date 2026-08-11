@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { prisma } from "../db.js";
 
 // Production-only maintenance path: exact stale SyncJob IDs, status transition only, never replay.
@@ -90,7 +90,7 @@ async function verifyGithubActionsOidc(token: string): Promise<boolean> {
   }
 }
 
-async function authorized(req: Parameters<Parameters<typeof router.post>[1]>[0]) {
+async function authorized(req: Request) {
   const configuredToken = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
   const suppliedToken = clean(req.header("x-catalog-audit-write-token"));
   if (configuredToken && suppliedToken && safeEqual(configuredToken, suppliedToken)) {
