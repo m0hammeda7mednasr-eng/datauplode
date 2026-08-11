@@ -14,6 +14,7 @@ import { applyDeterministicDabSkus } from "../src/server/services/dabSku.js";
 import type { NormalizedProduct } from "../src/server/services/scraper.js";
 import {
   configuredScraperApiKeyCount,
+  HmScraper,
   NextScraper,
   scraperApiStatusExhaustsKey,
 } from "../src/server/services/scraper.js";
@@ -278,5 +279,20 @@ assert.equal(nextSnapshot.variants[0].size, "3-6 Months (62-68cm)");
 assert.equal(nextSnapshot.variants.at(-1)?.size, "7-8 Years (122-128cm)");
 assert.equal(nextSnapshot.variants[0].price, 92);
 assert.equal(nextSnapshot.variants.at(-1)?.price, 114);
+
+assert.throws(
+  () =>
+    new HmScraper().scrapeSnapshot(
+      "https://ae.hm.com/en/buy-5-pack-motif-detail-socks-white-hello-kitty",
+      [
+        "# 5-pack motif-detail socks",
+        "TRY 5",
+        "Product code: 123456",
+        "Add to bag",
+      ].join("\n"),
+    ),
+  /trustworthy AED product price/,
+  "H&M UAE snapshots must reject non-AED fallback prices instead of publishing wrong products",
+);
 
 console.log("Google Sheet sync safety contract passed");

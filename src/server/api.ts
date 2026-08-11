@@ -199,6 +199,14 @@ function isUsableAnalyzeProduct(product: NormalizedProduct | undefined) {
   ) {
     return false;
   }
+  if (
+    (supplier.includes("h&m") || sourceUrl.includes("ae.hm.com")) &&
+    sourceUrl.includes("ae.hm.com") &&
+    (String(product.currency || "").toUpperCase() !== "AED" ||
+      Number(product.price) < 10)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -1326,6 +1334,12 @@ function collectCatalogQualityIssues(
     (currency !== "AED" || sourcePrice <= 1)
   ) {
     issues.push("untrusted Centrepoint reader fallback price");
+  }
+  if (
+    sourceUrl.toLowerCase().includes("ae.hm.com") &&
+    (currency !== "AED" || sourcePrice < 10)
+  ) {
+    issues.push("untrusted H&M UAE product price");
   }
   if (!variants.length) {
     issues.push("product has no variants");

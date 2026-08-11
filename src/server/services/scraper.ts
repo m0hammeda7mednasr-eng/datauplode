@@ -8477,8 +8477,21 @@ export class HmScraper implements SupplierScraper {
     return hostMatches(url, ["ae.hm.com", "hm.com"]);
   }
 
+  private assertTrustworthyHmPrice(product: NormalizedProduct, url: string) {
+    const host = new URL(url).hostname.toLowerCase();
+    if (!host.includes("ae.hm.com")) return;
+    const currency = String(product.currency || "").trim().toUpperCase();
+    const price = Number(product.price);
+    if (currency !== "AED" || !Number.isFinite(price) || price < 10) {
+      throw new Error(
+        "H&M UAE product did not expose a trustworthy AED product price",
+      );
+    }
+  }
+
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
     const product = parseGenericReaderMarkdown(snapshotText, url);
+    this.assertTrustworthyHmPrice(product, url);
     return {
       ...product,
       source: {
@@ -8502,7 +8515,16 @@ export class HmScraper implements SupplierScraper {
     });
     const fallback = extractGenericProductFromHtml(html, url, "H&M");
     const fallbackUsable =
-      fallback.price > 0 && !/client challenge|metadata/i.test(fallback.title);
+      fallback.price > 0 &&
+      !/client challenge|metadata/i.test(fallback.title) &&
+      (() => {
+        try {
+          this.assertTrustworthyHmPrice(fallback, url);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
     const $ = cheerio.load(html);
     const sku = cleanText(
       extractProductJsonLdFromHtml(html)?.sku ||
@@ -8539,6 +8561,7 @@ export class HmScraper implements SupplierScraper {
       ) {
         throw new Error("H&M GraphQL did not expose usable product data");
       }
+      this.assertTrustworthyHmPrice(normalized, url);
       return normalized;
     } catch (error: any) {
       if (
