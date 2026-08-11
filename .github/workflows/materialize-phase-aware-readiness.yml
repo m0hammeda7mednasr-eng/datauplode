@@ -62,10 +62,11 @@ jobs:
 
           p = Path('scripts/readiness-platform-safety-contract.ts')
           s = p.read_text()
-          s = s.replace(
-            'source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&\\n      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId")',
-            'source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId")',
-          )
+          old = '''    source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId"),'''
+          new = '''    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
           if 'post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness' not in s:
             needle = '''];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
             addition = '''  [\n    "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",\n    source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") &&\n      source.includes("persistedCanaryDryRunVerified") &&\n      !source.includes("catalogAuditDryRunConfigured &&\\n        latestDryRunCanaryReady &&\\n        latestCanaryReadbackVerified"),\n  ],\n  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
