@@ -6111,8 +6111,32 @@ export class SheinScraper implements SupplierScraper {
     return hostMatches(url, ["shein.com"]);
   }
 
+  private assertTrustworthySheinSnapshot(
+    product: NormalizedProduct,
+    snapshotText: string,
+  ) {
+    const combined = `${product.title || ""}\n${snapshotText || ""}`;
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        combined,
+      )
+    ) {
+      throw new Error(
+        "SHEIN snapshot returned a challenge or rate-limit page instead of a product",
+      );
+    }
+    const currency = String(product.currency || "").trim().toUpperCase();
+    if (!["AED", "USD"].includes(currency)) {
+      throw new Error("SHEIN snapshot did not expose a trusted product currency");
+    }
+    if (!product.images?.length) {
+      throw new Error("SHEIN snapshot did not expose product images");
+    }
+  }
+
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
     const product = parseGenericReaderMarkdown(snapshotText, url);
+    this.assertTrustworthySheinSnapshot(product, snapshotText);
     return normalizeProductOptionsAndVariants({
       ...product,
       source: {

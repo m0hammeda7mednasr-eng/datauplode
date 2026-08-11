@@ -207,6 +207,20 @@ function isUsableAnalyzeProduct(product: NormalizedProduct | undefined) {
   ) {
     return false;
   }
+  if (supplier.includes("shein") || sourceUrl.includes("shein.com")) {
+    const currency = String(product.currency || "").toUpperCase();
+    if (!["AED", "USD"].includes(currency)) return false;
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        title,
+      )
+    ) {
+      return false;
+    }
+    if (!Array.isArray(product.images) || product.images.length === 0) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -1340,6 +1354,18 @@ function collectCatalogQualityIssues(
     (currency !== "AED" || sourcePrice < 10)
   ) {
     issues.push("untrusted H&M UAE product price");
+  }
+  if (sourceUrl.toLowerCase().includes("shein.com")) {
+    if (!["AED", "USD"].includes(currency)) {
+      issues.push("untrusted SHEIN product currency");
+    }
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        title,
+      )
+    ) {
+      issues.push("SHEIN challenge/rate-limit page was parsed as product");
+    }
   }
   if (!variants.length) {
     issues.push("product has no variants");

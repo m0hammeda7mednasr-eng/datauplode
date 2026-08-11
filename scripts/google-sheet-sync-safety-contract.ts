@@ -17,6 +17,7 @@ import {
   HmScraper,
   NextScraper,
   scraperApiStatusExhaustsKey,
+  SheinScraper,
 } from "../src/server/services/scraper.js";
 import {
   FIRST_EIGHT_CATALOG_SHEETS,
@@ -299,6 +300,20 @@ assert.throws(
     ),
   /trustworthy AED product price/,
   "H&M UAE snapshots must reject non-AED fallback prices instead of publishing wrong products",
+);
+
+assert.throws(
+  () =>
+    new SheinScraper().scrapeSnapshot(
+      "https://ar.shein.com/SHEIN-3pcs-Newborn-Baby-Unisex-Cute-Cartoon-Print-Long-Sleeve-Footed-Jumpsuit-Pajama-Set-p-169508305.html",
+      [
+        "# You have too many requests, which exceeds our limit.",
+        "TRY 5",
+        "Add to bag",
+      ].join("\n"),
+    ),
+  /challenge or rate-limit page|trusted product currency/,
+  "SHEIN challenge/rate-limit snapshots must fail closed instead of publishing placeholder products",
 );
 
 console.log("Google Sheet sync safety contract passed");
