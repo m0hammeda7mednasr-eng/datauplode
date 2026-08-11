@@ -1,5 +1,6 @@
 name: Materialize and run targeted stale job quarantine
 
+# Trigger note: rerun only the bounded seven-job no-replay quarantine after exact-head CI is green.
 on:
   push:
     branches: [stabilize-supabase-railway]
