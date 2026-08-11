@@ -132,3 +132,4 @@ jobs:
           git push origin HEAD:stabilize-supabase-railway
 
 # retrigger: bounded blocker diagnostics only; no recovery or write mutation
+# retrigger-2: force materializer after exact-head readiness confirmed
