@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { prisma } from "../db.js";
 
+// Production-only maintenance path: exact stale SyncJob IDs, status transition only, never replay.
 const router = Router();
 const REQUIRED_CONFIRM = "QUARANTINE_STALE_RUNNING_NO_REPLAY";
 const MAX_ROWS = 20;
