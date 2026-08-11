@@ -380,6 +380,21 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       databaseTimeoutMs,
     );
 
+    const shopifyDbConnection = await withTimeout(
+      prisma.shopifyConnection.findFirst({
+        where: { isConnected: true, accessTokenEnc: { not: null } },
+        select: { shopDomain: true, accessTokenEnc: true },
+      }),
+      databaseTimeoutMs,
+    );
+    const shopifyDbConnectionConfigured = Boolean(
+      shopifyDbConnection?.shopDomain?.trim() &&
+        shopifyDbConnection?.accessTokenEnc?.trim(),
+    );
+    const shopifyConfigured =
+      (configuration.shopifyDomain && configuration.shopifyToken) ||
+      shopifyDbConnectionConfigured;
+
     const observedAudits = recentAudits.map((run) => catalogAuditObservation(run));
     const latestCatalogAudit = observedAudits[0] || null;
     const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;
@@ -472,8 +487,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     const productionMinimumReady =
       configuration.database &&
       configuration.encryptionKey &&
-      configuration.shopifyDomain &&
-      configuration.shopifyToken &&
+      shopifyConfigured &&
       configuration.googleSheet &&
       productionPlatformReady &&
       (!productionEnvironment || phaseWriteSafetyReady);
@@ -501,6 +515,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
       },
       configuration: {
         ...configuration,
+        shopifyDbConnectionConfigured,
+        shopifyConfigured,
         safeMode,
       },
       jobs: {

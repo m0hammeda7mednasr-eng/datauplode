@@ -277,6 +277,25 @@ const checks: Array<[string, boolean]> = [
       source.includes('target: "catalog_audit"') &&
       !source.includes("findMany({\n          where: { id: latestCanary.dryRunBatchId"),
   ],
+  [
+    "readiness accepts active encrypted DB Shopify connection",
+    source.includes("const shopifyDbConnection = await withTimeout(") &&
+      source.includes("prisma.shopifyConnection.findFirst({") &&
+      source.includes("isConnected: true") &&
+      source.includes("accessTokenEnc: { not: null }") &&
+      source.includes("const shopifyConfigured ="),
+  ],
+  [
+    "production readiness accepts Shopify DB connection without duplicate env secrets",
+    source.includes("shopifyConfigured &&") &&
+      !source.includes("configuration.shopifyDomain &&\n      configuration.shopifyToken &&\n      configuration.googleSheet"),
+  ],
+  [
+    "readiness reports DB Shopify availability without exposing encrypted token",
+    source.includes("shopifyDbConnectionConfigured,") &&
+      source.includes("shopifyConfigured,") &&
+      !source.includes("accessTokenEnc: shopifyDbConnection"),
+  ],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
