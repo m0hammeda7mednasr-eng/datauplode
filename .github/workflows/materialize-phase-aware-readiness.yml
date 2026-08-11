@@ -33,7 +33,10 @@ jobs:
 
           old = '''    const latestCatalogAudit = observedAudits[0] || null;\n    const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;\n    const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
           new = '''    const latestCatalogAudit = observedAudits[0] || null;\n    const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;\n    const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;\n    const canaryDryRun = latestCanary?.dryRunBatchId\n      ? observedAudits.find(\n          (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,\n        ) || null\n      : null;\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
-          if 'const canaryDryRun = latestCanary?.dryRunBatchId' not in s:
+          if (
+            'const canaryDryRun = latestCanary?.dryRunBatchId' not in s
+            and 'let canaryDryRun = latestCanary?.dryRunBatchId' not in s
+          ):
             assert old in s
             s = s.replace(old, new, 1)
 
@@ -69,7 +72,7 @@ jobs:
 
           if 'post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness' not in s:
             needle = '''];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
-            addition = '''  [\n    "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",\n    source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") &&\n      source.includes("persistedCanaryDryRunVerified") &&\n      !source.includes("catalogAuditDryRunConfigured &&\\n        latestDryRunCanaryReady &&\\n        latestCanaryReadbackVerified"),\n  ],\n  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+            addition = '''  [\n    "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",\n    (source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") ||\n      source.includes("let canaryDryRun = latestCanary?.dryRunBatchId")) &&\n      source.includes("persistedCanaryDryRunVerified") &&\n      !source.includes("catalogAuditDryRunConfigured &&\\n        latestDryRunCanaryReady &&\\n        latestCanaryReadbackVerified"),\n  ],\n  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
             assert needle in s
             s = s.replace(needle, addition, 1)
           p.write_text(s)
