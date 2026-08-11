@@ -1295,6 +1295,9 @@ function collectCatalogQualityIssues(
   const title = String(productData?.title || "").replace(/\s+/g, " ").trim();
   const currency = String(productData?.currency || "").trim().toUpperCase();
   const sourceSupplier = String(productData?.source?.supplier || "").trim();
+  const raw = productData?.raw && typeof productData.raw === "object"
+    ? productData.raw
+    : {};
   const variants = Array.isArray(normalizedVariants) ? normalizedVariants : [];
   const images = Array.isArray(normalizedImages) ? normalizedImages : [];
   const sourcePrice = Number(productData?.price);
@@ -1316,6 +1319,13 @@ function collectCatalogQualityIssues(
   }
   if (!PricingEngine.validatePrice(sourcePrice)) {
     issues.push("invalid product price");
+  }
+  if (
+    sourceUrl.toLowerCase().includes("centrepointstores.com") &&
+    (raw.readerFallback || raw.pastedSnapshotFallback) &&
+    (currency !== "AED" || sourcePrice <= 1)
+  ) {
+    issues.push("untrusted Centrepoint reader fallback price");
   }
   if (!variants.length) {
     issues.push("product has no variants");
@@ -1469,6 +1479,7 @@ function buildStoredProductQualityInput(product: any) {
     brand: product?.brand || "",
     currency: product?.currency || "",
     price: product?.price,
+    raw: parseJsonObject(product?.raw) || {},
     variants,
     images,
   };
