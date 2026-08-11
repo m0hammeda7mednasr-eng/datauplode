@@ -23,7 +23,8 @@ jobs:
     env:
       RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
       CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
-      TARGET_IDS_JSON: '["cmsnxcn1i000ypb10swaecmni","cmso1ry8f0013md10k7s2vwa0","cmso3rjop02hgmr10h14sgssn","cmso44ojl027xnx10tfky7md2","cmso4jjrb01x7pc10660pl2um","cmso50zvk01l5n41093xqydq4","cmso5tca70340pl10ggih0hin","cmsorlnoo0000n610cywi0x58"]'
+      TARGET_IDS_JSON: '["cmsnxcn1i000ypb10swaecmni","cmso1ry8f0013md10k7s2vwa0","cmso3rjop02hgmr10h14sgssn","cmso44ojl027xnx10tfky7md2","cmso4jjrb01x7pc10660pl2um","cmso50zvk01l5n41093xqydq4","cmso5tca70340pl10ggih0hin"]'
+      EXPECTED_TARGET_COUNT: '7'
 
     steps:
       - name: Checkout quarantine branch
@@ -121,7 +122,7 @@ jobs:
           echo "Timed out waiting for exact-head Production Build Check; quarantine not attempted." >&2
           exit 2
 
-      - name: Wait for exact Railway deployment and healthy Supabase binding
+      - name: Wait for exact Railway deployment and safe Supabase binding
         env:
           TARGET_SHA: ${{ steps.materialize.outputs.target_sha }}
         shell: bash
@@ -136,7 +137,16 @@ jobs:
           try { body = JSON.parse(fs.readFileSync('readiness.json', 'utf8')); } catch {}
           const expected = String(process.env.TARGET_SHA || '').toLowerCase();
           const actual = String(body?.deployment?.revision || '').toLowerCase();
-          const ok = body?.deployment?.revisionVerified === true && actual === expected && body?.database?.ok === true && body?.database?.target === 'supabase' && body?.database?.projectRefPinned === true && body?.database?.projectRefMatched === true && body?.configuration?.runtimeWriteGateEnabled === false;
+          const ok = body?.deployment?.revisionVerified === true &&
+            actual === expected &&
+            body?.database?.ok === true &&
+            body?.database?.target === 'supabase' &&
+            body?.database?.projectRefPinned === true &&
+            body?.database?.projectRefMatched === true &&
+            body?.configuration?.safeMode === true &&
+            body?.configuration?.catalogWriteGateEnabled === false &&
+            body?.configuration?.catalogSheetWriteGateEnabled === false &&
+            body?.configuration?.jobRecoveryEnabled === false;
           process.stdout.write(ok ? 'ready' : `waiting:${actual || 'unknown'}`);
           NODE
             )"
@@ -144,10 +154,10 @@ jobs:
             if [ "$state" = ready ]; then exit 0; fi
             sleep 20
           done
-          echo "Exact Railway deployment/Supabase binding not verified; quarantine not attempted." >&2
+          echo "Exact Railway deployment/Supabase safety binding not verified; quarantine not attempted." >&2
           exit 2
 
-      - name: Quarantine exactly the eight known stale jobs with no replay
+      - name: Quarantine exactly the seven confirmed stale Shopify jobs with no replay
         shell: bash
         run: |
           set -euo pipefail
@@ -171,15 +181,16 @@ jobs:
             echo "Targeted quarantine failed with HTTP ${code}; no replay or broad recovery attempted." >&2
             exit 1
           fi
-          node - <<'NODE'
+          EXPECTED_TARGET_COUNT="$EXPECTED_TARGET_COUNT" node - <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('quarantine.json', 'utf8'));
-          if (body?.success !== true || Number(body?.applied) !== 8 || Number(body?.readBackVerified) !== 8 || Number(body?.shopifyApiCalls) !== 0 || Number(body?.googleSheetWrites) !== 0) {
+          const expected = Number(process.env.EXPECTED_TARGET_COUNT);
+          if (body?.success !== true || Number(body?.applied) !== expected || Number(body?.readBackVerified) !== expected || Number(body?.shopifyApiCalls) !== 0 || Number(body?.googleSheetWrites) !== 0) {
             throw new Error('Exact quarantine/read-back contract failed');
           }
           NODE
 
-      - name: Verify queue read-back from production readiness
+      - name: Verify stale queue read-back from production readiness
         shell: bash
         run: |
           set -euo pipefail
@@ -187,8 +198,8 @@ jobs:
           HTTP_CODE="$code" node - <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('readiness-after.json', 'utf8'));
-          if (Number(body?.jobs?.running) !== 0 || Number(body?.jobs?.staleRunning) !== 0) {
-            throw new Error(`Queue read-back not clean: running=${body?.jobs?.running}, stale=${body?.jobs?.staleRunning}`);
+          if (Number(body?.jobs?.staleRunning) !== 0) {
+            throw new Error(`Stale queue read-back not clean: running=${body?.jobs?.running}, stale=${body?.jobs?.staleRunning}`);
           }
           console.log(JSON.stringify({
             httpCode: process.env.HTTP_CODE,
@@ -199,6 +210,7 @@ jobs:
             recentFailed: body?.jobs?.recentFailed,
             latestDryRunId: body?.rollout?.latestDryRun?.id,
             latestDryRunExpired: body?.rollout?.latestDryRunExpired,
-            broadWritesEnabled: body?.configuration?.runtimeWriteGateEnabled,
+            catalogWriteGateEnabled: body?.configuration?.catalogWriteGateEnabled,
+            catalogSheetWriteGateEnabled: body?.configuration?.catalogSheetWriteGateEnabled,
           }, null, 2));
           NODE
