@@ -14,6 +14,7 @@ import { applyDeterministicDabSkus } from "../src/server/services/dabSku.js";
 import type { NormalizedProduct } from "../src/server/services/scraper.js";
 import {
   configuredScraperApiKeyCount,
+  CentrepointScraper,
   HmScraper,
   NextScraper,
   scraperApiStatusExhaustsKey,
@@ -314,6 +315,30 @@ assert.throws(
     ),
   /challenge or rate-limit page|trusted product currency/,
   "SHEIN challenge/rate-limit snapshots must fail closed instead of publishing placeholder products",
+);
+
+const centrepointGlyphSnapshot = new CentrepointScraper().scrapeSnapshot(
+  "https://www.centrepointstores.com/ae/en/buy-pack-of-2-juniors-round-neck-short-sleeve-dress-with-floral-print/p/K35-A13-07-154MULTICOLORMULTISHADE",
+  [
+    "Title: Buy Pack of 2 Juniors Round Neck Short Sleeve Dress with Floral Print Online | Centrepoint UAE",
+    "1/8",
+    "\uE902 45",
+    "Pack of 2 Juniors Round Neck Short Sleeve Dress with Floral Print",
+    "Size:",
+    "0-3 MTHS",
+    "3-6 MTHS",
+    "![Product image](https://media.centrepointstores.com/i/centrepoint/K35-A13-07-154MULTICOLORMULTISHADE_01-2100.jpg)",
+  ].join("\n"),
+);
+assert.equal(
+  centrepointGlyphSnapshot.currency,
+  "AED",
+  "Centrepoint private-use currency glyph must be interpreted as AED only for Centrepoint snapshots",
+);
+assert.equal(
+  centrepointGlyphSnapshot.price,
+  45,
+  "Centrepoint private-use currency glyph snapshots must preserve the visible product price",
 );
 
 console.log("Google Sheet sync safety contract passed");

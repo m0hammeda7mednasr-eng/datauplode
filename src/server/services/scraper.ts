@@ -1034,28 +1034,28 @@ function parsePriceRange(value: any): { min: number; max: number } {
 
 function detectCurrency(text: string | undefined, fallback = "USD"): string {
   if (!text) return fallback;
-  if (/EGP|\u062c\s*\.?\s*\u0645/i.test(text)) return "EGP";
-  if (/AED|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645/i.test(text))
+  if (/\bEGP\b|\u062c\s*\.?\s*\u0645/i.test(text)) return "EGP";
+  if (/\bAED\b|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645/i.test(text))
     return "AED";
-  if (/SAR|\u0631\s*\.?\s*\u0633|\u0631\u064a\u0627\u0644/i.test(text))
+  if (/\bSAR\b|\u0631\s*\.?\s*\u0633|\u0631\u064a\u0627\u0644/i.test(text))
     return "SAR";
-  if (/QAR/i.test(text)) return "QAR";
-  if (/KWD/i.test(text)) return "KWD";
-  if (/BHD/i.test(text)) return "BHD";
-  if (/OMR/i.test(text)) return "OMR";
-  if (/MXN/i.test(text)) return "MXN";
-  if (/TRY|TL|\u20ba/i.test(text)) return "TRY";
-  if (/GBP|\u00a3/i.test(text)) return "GBP";
-  if (/EUR|\u20ac/i.test(text)) return "EUR";
-  if (/GBP|Ã‚Â£/i.test(text)) return "GBP";
-  if (/EUR|Ã¢â€šÂ¬/i.test(text)) return "EUR";
-  if (/USD|\$/i.test(text)) return "USD";
+  if (/\bQAR\b/i.test(text)) return "QAR";
+  if (/\bKWD\b/i.test(text)) return "KWD";
+  if (/\bBHD\b/i.test(text)) return "BHD";
+  if (/\bOMR\b/i.test(text)) return "OMR";
+  if (/\bMXN\b/i.test(text)) return "MXN";
+  if (/\b(?:TRY|TL)\b|\u20ba/i.test(text)) return "TRY";
+  if (/\bGBP\b|\u00a3/i.test(text)) return "GBP";
+  if (/\bEUR\b|\u20ac/i.test(text)) return "EUR";
+  if (/\bGBP\b|Ã‚Â£/i.test(text)) return "GBP";
+  if (/\bEUR\b|Ã¢â€šÂ¬/i.test(text)) return "EUR";
+  if (/\bUSD\b|\$/i.test(text)) return "USD";
   return fallback;
 }
 
 function looksLikeCurrencyText(text: string): boolean {
   return (
-    /(?:EGP|AED|SAR|QAR|KWD|BHD|OMR|MXN|TRY|GBP|EUR|USD|TL|\$|\u00a3|\u20ac|\u20ba|\u062c\s*\.?\s*\u0645|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645)/i.test(
+    /(?:\b(?:EGP|AED|SAR|QAR|KWD|BHD|OMR|MXN|TRY|GBP|EUR|USD|TL)\b|\$|\u00a3|\u20ac|\u20ba|\u062c\s*\.?\s*\u0645|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645)/i.test(
       text,
     ) || /(?:Ãƒâ€šÃ‚Â£|ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬)/i.test(text)
   );
@@ -8305,6 +8305,21 @@ function extractCentrepointDescription(
   return uniqueCleanValues([intro || fallback, ...details]).join("\n");
 }
 
+function normalizeCentrepointSnapshotText(snapshotText: string): string {
+  const lines = snapshotText.split(/\r?\n/);
+  const normalized: string[] = [];
+  for (const line of lines) {
+    normalized.push(line);
+    const privateCurrencyMatch = line.match(
+      /[\uE000-\uF8FF]\s*([0-9]+(?:[.,][0-9]+)?)/,
+    );
+    if (privateCurrencyMatch) {
+      normalized.push(`Price: AED ${privateCurrencyMatch[1]}`);
+    }
+  }
+  return normalized.join("\n");
+}
+
 function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
   const $ = cheerio.load(html);
   const product = extractGenericProductFromHtml(html, url, "Centrepoint");
@@ -8388,7 +8403,10 @@ export class CentrepointScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
-    const product = parseGenericReaderMarkdown(snapshotText, url);
+    const product = parseGenericReaderMarkdown(
+      normalizeCentrepointSnapshotText(snapshotText),
+      url,
+    );
     if (product.currency !== "AED" || product.price <= 1) {
       throw new Error(
         "Reader fallback did not expose a trustworthy Centrepoint AED product price",
