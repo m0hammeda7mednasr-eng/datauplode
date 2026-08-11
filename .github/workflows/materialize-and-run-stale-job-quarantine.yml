@@ -214,11 +214,26 @@ jobs:
             --data "$payload" \
             "${RAILWAY_SMOKE_BASE_URL%/}/api/admin/quarantine-stale-sync-jobs")"
           cat quarantine.json
-          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+          if [ "$code" = 409 ]; then
+            EXPECTED_TARGET_COUNT="$EXPECTED_TARGET_COUNT" node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('quarantine.json', 'utf8'));
+          const expected = Number(process.env.EXPECTED_TARGET_COUNT);
+          const invalid = Array.isArray(body?.invalid) ? body.invalid : [];
+          const alreadyQuarantined = body?.success === false &&
+            body?.code === 'SYNC_JOB_QUARANTINE_PRECONDITION_FAILED' &&
+            invalid.length === expected &&
+            invalid.every((row) => row?.status === 'failed');
+          if (!alreadyQuarantined) {
+            throw new Error('409 was not an exact already-quarantined no-op');
+          }
+          console.log(`Target already failed before quarantine POST; accepting verified no-op for ${expected} row(s).`);
+          NODE
+          elif [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
             echo "Targeted quarantine failed with HTTP ${code}; no replay or broad recovery attempted." >&2
             exit 1
-          fi
-          EXPECTED_TARGET_COUNT="$EXPECTED_TARGET_COUNT" node - <<'NODE'
+          else
+            EXPECTED_TARGET_COUNT="$EXPECTED_TARGET_COUNT" node - <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('quarantine.json', 'utf8'));
           const expected = Number(process.env.EXPECTED_TARGET_COUNT);
@@ -226,6 +241,7 @@ jobs:
             throw new Error('Exact quarantine/read-back contract failed');
           }
           NODE
+          fi
 
       - name: Verify stale queue read-back from production readiness
         shell: bash
