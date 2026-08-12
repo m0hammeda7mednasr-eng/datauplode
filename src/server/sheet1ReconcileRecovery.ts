@@ -4,6 +4,7 @@ const MARKER_TYPE = "ONE_TIME_SHEET1_RECONCILE:2026-08-09-sheet1-reconcile-v1";
 const CATALOG_MARKER_TYPE =
   "SHEET1_CATALOG_AUTO_SYNC:2026-08-09-v5-first-eight-5000-key-pool";
 const CATALOG_TAKEOVER_GRACE_MS = 45_000;
+const CATALOG_TAKEOVER_SWEEP_COUNT = 4;
 
 function enabled(name: string) {
   return String(process.env[name] || "").trim().toLowerCase() === "true";
@@ -87,16 +88,11 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function cancelOrphanedCatalogMarkers() {
+async function cancelOrphanedCatalogMarkersOnce(sweep: number) {
   if (!productionRailwayBranch() || catalogWorkerEnabledForCurrentRevision()) {
-    return;
+    return 0;
   }
 
-  // Railway briefly overlaps old/new revisions during deploy. Give the old
-  // process time to terminate, then clear only markers old enough to belong to
-  // that superseded process. This is status-only recovery: it never replays a
-  // job and never calls Shopify or Google Sheets.
-  await sleep(CATALOG_TAKEOVER_GRACE_MS);
   const cutoff = new Date(Date.now() - CATALOG_TAKEOVER_GRACE_MS);
   const orphaned = await prisma.syncJob.findMany({
     where: {
@@ -108,7 +104,7 @@ async function cancelOrphanedCatalogMarkers() {
     take: 20,
   });
 
-  if (!orphaned.length) return;
+  if (!orphaned.length) return 0;
 
   const takeoverAt = new Date();
   for (const job of orphaned) {
@@ -124,19 +120,41 @@ async function cancelOrphanedCatalogMarkers() {
           interruptedByRedeploy: true,
           replayed: false,
           takeoverAt: takeoverAt.toISOString(),
-          note: "Superseded Sheet1 catalog marker cancelled after Railway deploy grace period while the current revision is not authorized to autostart the catalog worker. No Shopify or Google Sheet action was replayed.",
+          takeoverSweep: sweep,
+          note: "Superseded Sheet1 catalog marker cancelled by bounded Railway takeover sweep while the current revision is not authorized to autostart the catalog worker. No Shopify or Google Sheet action was replayed.",
         }),
       },
     });
   }
 
   console.warn(
-    `[sheet1-catalog] cancelled ${orphaned.length} orphaned marker(s) after deployment takeover; replay=false`,
+    `[sheet1-catalog] takeover sweep ${sweep}/${CATALOG_TAKEOVER_SWEEP_COUNT} cancelled ${orphaned.length} orphaned marker(s); replay=false`,
   );
+  return orphaned.length;
+}
+
+function scheduleOrphanedCatalogMarkerSweeps() {
+  if (!productionRailwayBranch() || catalogWorkerEnabledForCurrentRevision()) {
+    return;
+  }
+
+  // Railway can overlap old/new revisions for longer than one grace window.
+  // Run a small bounded series of status-only sweeps so a marker created late
+  // by the superseded process cannot keep readiness stale indefinitely. The
+  // sweeps never replay work and never call Shopify or Google Sheets.
+  void (async () => {
+    for (let sweep = 1; sweep <= CATALOG_TAKEOVER_SWEEP_COUNT; sweep += 1) {
+      await sleep(CATALOG_TAKEOVER_GRACE_MS);
+      if (catalogWorkerEnabledForCurrentRevision()) return;
+      await cancelOrphanedCatalogMarkersOnce(sweep);
+    }
+  })().catch((error) => {
+    console.error("[sheet1-catalog] bounded takeover sweep failed", error);
+  });
 }
 
 export async function prepareSheet1ReconcileDeploymentTakeover() {
-  await cancelOrphanedCatalogMarkers();
+  scheduleOrphanedCatalogMarkerSweeps();
 
   if (!isolatedFirstFiveWorkerEnabled()) {
     console.log(
