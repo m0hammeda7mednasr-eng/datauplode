@@ -25,7 +25,7 @@ jobs:
     env:
       RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL || 'https://datauplode-production.up.railway.app' }}
       CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
-      TARGET_IDS_JSON: '["cmsp8wx8l0000ob10863wmdom"]'
+      TARGET_IDS_JSON: '["cmspaw6zl0000ob10ow6e0td2"]'
       EXPECTED_TARGET_COUNT: '1'
 
     steps:
