@@ -4531,6 +4531,7 @@ router.post("/imports/excel/process", async (req, res) => {
         : index + 2;
       const rawUrl = String(row?.url || "").trim();
       const normalizedUrl = normalizeAnalyzeCacheUrl(rawUrl);
+      const priceMultiplier = toPositiveSheetNumber(row?.priceMultiplier ?? row?.multiplier);
 
       const registerFailure = async (reason: string) => {
         let review: { sourceProductId: string; manualReviewId: string } | null = null;
@@ -4566,6 +4567,10 @@ router.post("/imports/excel/process", async (req, res) => {
         await registerFailure("Invalid product URL");
         continue;
       }
+      if (priceMultiplier === null) {
+        await registerFailure("Missing or invalid price multiplier");
+        continue;
+      }
       if (processedUrls.has(normalizedUrl)) {
         await registerFailure("Duplicate URL inside the same Excel batch");
         continue;
@@ -4578,11 +4583,18 @@ router.post("/imports/excel/process", async (req, res) => {
           excelRowNumber: rowNumber,
           mode: "file_upload",
         };
+        applyDeterministicDabSkus({
+          product: analyzed,
+          url: normalizedUrl,
+          multiplier: priceMultiplier,
+          existingProductSku: String(row?.sku || ""),
+        });
         setCachedAnalyzeProduct(normalizedUrl, analyzed);
         const publishResult = await publishPreparedProductToQueue({
           productData: analyzed,
           pricingRuleId: selectedPricingRuleId,
           collections,
+          priceMultiplier,
         });
 
         let verification:
