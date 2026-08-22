@@ -228,6 +228,19 @@ async function handleLegacySheet1Action(
   next: NextFunction,
 ) {
   const suppliedId = spreadsheetIdFromInput(req.body?.sheetUrl);
+  const adsSheetId = String(process.env.ADS_SHEET_IMPORT_SPREADSHEET_ID || "").trim();
+  const adsSheetImportEnabled = process.env.ADS_SHEET_IMPORT_ENABLED === "true";
+  const suppliedGid = spreadsheetGidFromInput(req.body?.sheetUrl);
+  const isApprovedAdsSheet =
+    adsSheetImportEnabled &&
+    Boolean(adsSheetId) &&
+    suppliedId === adsSheetId &&
+    (suppliedGid === "0" || suppliedGid === "1503940200");
+
+  if (isApprovedAdsSheet) {
+    return next();
+  }
+
   if (suppliedId && suppliedId !== SAFE_SHEET1_SPREADSHEET_ID) {
     return res.status(400).json({
       success: false,
@@ -237,7 +250,6 @@ async function handleLegacySheet1Action(
     });
   }
 
-  const suppliedGid = spreadsheetGidFromInput(req.body?.sheetUrl);
   if (suppliedGid === SHEET7_CATALOG_GID) {
     if (!sheet7CatalogWritesEnabled()) {
       return res.status(423).json({
