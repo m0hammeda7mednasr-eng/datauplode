@@ -4462,6 +4462,42 @@ router.get("/imports/excel/runs/:id", async (req, res) => {
   });
 });
 
+router.post("/imports/excel/process-async", async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (rows.length === 0) {
+    return res.status(400).json({ error: "rows is required" });
+  }
+
+  const payload = {
+    ...req.body,
+    rows,
+    // Background processing performs the same Shopify read-back verification.
+    waitForPublishCompletion: req.body?.waitForPublishCompletion !== false,
+  };
+  const port = Number(process.env.PORT || 8080);
+  const target = `http://127.0.0.1:${port}/api/imports/excel/process`;
+
+  res.status(202).json({
+    accepted: true,
+    rows: rows.length,
+    message: "Import accepted and is running in the background.",
+  });
+
+  void fetch(target, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        console.error("Background Excel import failed:", await response.text());
+      }
+    })
+    .catch((error) => {
+      console.error("Background Excel import request failed:", error);
+    });
+});
+
 router.post("/imports/excel/process", async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   const selectedPricingRuleId = asOptionalString(req.body?.pricingRuleId);
