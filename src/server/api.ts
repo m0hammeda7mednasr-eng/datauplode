@@ -5193,6 +5193,32 @@ router.get("/shopify/collections", async (req, res) => {
   }
 });
 
+router.post("/shopify/collections", async (req, res) => {
+  const title = String(req.body?.title || "").trim();
+  if (!title || title.length > 255) {
+    return res.status(400).json({ error: "A collection title between 1 and 255 characters is required" });
+  }
+
+  try {
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const existing = (await ShopifyService.getCollections(client)).find(
+      (collection: any) => String(collection.title || "").trim().toLocaleLowerCase() === title.toLocaleLowerCase(),
+    );
+    if (existing) {
+      return res.json({ collection: existing, created: false });
+    }
+
+    const collection = await ShopifyService.createCollection(client, title);
+    res.status(201).json({ collection, created: true });
+  } catch (error: any) {
+    if (isShopifyReconnectRequired(error)) {
+      return res.status(409).json({ error: error.message, code: "SHOPIFY_RECONNECT_REQUIRED" });
+    }
+    console.error("Failed to create Shopify collection:", error.message);
+    res.status(500).json({ error: error.message || "Failed to create Shopify collection" });
+  }
+});
+
 wrapAsyncRouterHandlers(router);
 
 router.use((error: any, req: Request, res: Response, next: NextFunction) => {

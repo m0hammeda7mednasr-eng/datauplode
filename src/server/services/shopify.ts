@@ -154,6 +154,34 @@ export class ShopifyService {
     return data.collections.edges.map((e: any) => e.node);
   }
 
+  static async createCollection(client: ShopifyGraphqlClient, title: string) {
+    const mutation = `
+      mutation CollectionCreate($input: CollectionInput!) {
+        collectionCreate(input: $input) {
+          collection {
+            id
+            title
+            handle
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    const data = await client.request(mutation, { input: { title } });
+    const result = data.collectionCreate;
+    const userErrors = result?.userErrors || [];
+    if (userErrors.length > 0) {
+      throw new Error(userErrors.map((error: any) => error.message).join("; "));
+    }
+    if (!result?.collection) {
+      throw new Error("Shopify did not return the created collection");
+    }
+    return result.collection;
+  }
+
   static async getPublications(client: ShopifyGraphqlClient) {
     const query = `
       query SalesChannelPublications {
