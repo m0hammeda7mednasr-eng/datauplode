@@ -5249,7 +5249,7 @@ function parseMarksAndSpencerHtml(
 
 export class MarksAndSpencerScraper implements SupplierScraper {
   canHandle(url: string): boolean {
-    return hostMatches(url, ["marksandspencerme.com"]);
+    return hostMatches(url, ["marksandspencerme.com", "marksandspencer.ae"]);
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
@@ -5278,7 +5278,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     try {
       const html = await fetchHtml(url, {
         "Accept-Language": "en-AE,en;q=0.9",
-        Referer: "https://www.marksandspencerme.com/en-ae/",
+        Referer: "https://www.marksandspencer.ae/en/",
       });
       return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
@@ -5288,7 +5288,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     try {
       const html = await fetchHtmlWithCurl(url, {
         "Accept-Language": "en-AE,en;q=0.9",
-        Referer: "https://www.marksandspencerme.com/en-ae/",
+        Referer: "https://www.marksandspencer.ae/en/",
       });
       return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
