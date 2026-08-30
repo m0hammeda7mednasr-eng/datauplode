@@ -8320,6 +8320,29 @@ function normalizeCentrepointSnapshotText(snapshotText: string): string {
   return normalized.join("\n");
 }
 
+function isCentrepointProductImageUrl(value: unknown): boolean {
+  const raw = cleanText(value);
+  if (!raw) return false;
+
+  try {
+    const parsed = new URL(raw);
+    return (
+      (parsed.hostname.toLowerCase() === "media.centrepointstores.com" &&
+        parsed.pathname.toLowerCase().startsWith("/i/centrepoint/")) ||
+      (parsed.hostname.toLowerCase() === "media.babyshopstores.com" &&
+        parsed.pathname.toLowerCase().startsWith("/i/lmg/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function filterCentrepointProductImages(
+  images: NormalizedProduct["images"],
+): NormalizedProduct["images"] {
+  return images.filter((image) => isCentrepointProductImageUrl(image.url));
+}
+
 function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
   const $ = cheerio.load(html);
   const product = extractGenericProductFromHtml(html, url, "Centrepoint");
@@ -8332,7 +8355,7 @@ function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
         ?.values?.[0] ||
       product.variants.find((variant) => variant.color)?.color,
   );
-  const images = [...product.images];
+  const images = filterCentrepointProductImages(product.images);
   const centrepointImageRegex =
     /https:\/\/media\.centrepointstores\.com\/i\/centrepoint\/[^"',\s?&<]+\.(?:jpg|jpeg|png|webp)/gi;
   for (const match of html.matchAll(centrepointImageRegex)) {
@@ -8423,6 +8446,7 @@ export class CentrepointScraper implements SupplierScraper {
         product.brand && product.brand !== "Generic"
           ? product.brand
           : "Centrepoint",
+      images: filterCentrepointProductImages(product.images),
       raw: {
         ...(product.raw || {}),
         pastedSnapshotFallback: true,
@@ -8482,6 +8506,7 @@ export class CentrepointScraper implements SupplierScraper {
           productId: getProductIdFromUrl(url),
         },
         brand: "Centrepoint",
+        images: filterCentrepointProductImages(product.images),
       };
     } catch (error: any) {
       errors.push(`reader: ${error.message}`);

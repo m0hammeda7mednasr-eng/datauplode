@@ -338,6 +338,8 @@ const centrepointGlyphSnapshot = new CentrepointScraper().scrapeSnapshot(
     "0-3 MTHS",
     "3-6 MTHS",
     "![Product image](https://media.centrepointstores.com/i/centrepoint/K35-A13-07-154MULTICOLORMULTISHADE_01-2100.jpg)",
+    "![Landmark product image](https://media.babyshopstores.com/i/lmg/166428744_01-2100.jpg)",
+    "![Apple Pay](https://centrepoint.a.bigcontent.io/v1/static/ecom_apple_pay)",
   ].join("\n"),
 );
 assert.equal(
@@ -349,6 +351,14 @@ assert.equal(
   centrepointGlyphSnapshot.price,
   45,
   "Centrepoint private-use currency glyph snapshots must preserve the visible product price",
+);
+assert.deepEqual(
+  centrepointGlyphSnapshot.images.map((image) => image.url),
+  [
+    "https://media.centrepointstores.com/i/centrepoint/K35-A13-07-154MULTICOLORMULTISHADE_01-2100.jpg",
+    "https://media.babyshopstores.com/i/lmg/166428744_01-2100.jpg",
+  ],
+  "Centrepoint snapshots must exclude payment and page-chrome images",
 );
 
 console.log("Google Sheet sync safety contract passed");
