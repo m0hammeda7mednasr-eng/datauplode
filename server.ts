@@ -112,6 +112,10 @@ function inventoryAutostartEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_INVENTORY_AUTOSTART");
 }
 
+function priceStockAutostartEnabled() {
+  return runtimeWritesEnabled() && envFlag("SYNC_PRICE_STOCK_AUTOSTART");
+}
+
 function sheetImportAutostartEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
 }
@@ -541,6 +545,13 @@ async function startServer() {
       QueueService.startInventoryMonitor();
     } else {
       console.log("Inventory monitor autostart disabled by SYNC_INVENTORY_AUTOSTART=false");
+    }
+
+    if (priceStockAutostartEnabled()) {
+      console.warn("Price/stock-only monitor autostart ENABLED");
+      QueueService.startPriceStockMonitor();
+    } else {
+      console.log("Price/stock-only monitor disabled by SYNC_PRICE_STOCK_AUTOSTART=false");
     }
 
     if (sheetImportAutostartEnabled()) {

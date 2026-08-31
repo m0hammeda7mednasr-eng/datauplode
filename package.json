@@ -15,6 +15,7 @@
     "env:check": "tsx scripts/check-env.ts",
     "safety:production": "tsx scripts/production-safety-contract.ts",
     "safety:quarantine-stale": "tsx scripts/quarantine-stale-sync-jobs-safety-contract.ts",
+    "safety:price-stock-sync": "tsx scripts/price-stock-sync-safety-contract.ts",
     "jobs:quarantine-stale": "tsx scripts/quarantine-stale-sync-jobs.ts",
     "test:sheet-sync": "tsx scripts/google-sheet-sync-safety-contract.ts",
     "smoke:production": "tsx scripts/production-smoke.ts",

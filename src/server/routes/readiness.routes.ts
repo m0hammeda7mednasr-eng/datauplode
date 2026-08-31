@@ -246,6 +246,7 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
   const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");
   const postCanaryBroadWritesConfigured = enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED");
   const inventoryAutostartConfigured = enabled("SYNC_INVENTORY_AUTOSTART");
+  const priceStockAutostartConfigured = enabled("SYNC_PRICE_STOCK_AUTOSTART");
   const jobRecoveryConfigured = enabled("SYNC_JOB_RECOVERY_ENABLED");
   const jobRecoveryShopifyWritesConfigured = enabled(
     "SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED",
@@ -289,6 +290,8 @@ router.get(["/ready", "/sync/readiness"], async (_req, res) => {
     postCanaryBroadWritesConfigured,
     inventoryAutostartConfigured,
     inventoryAutostartEnabled: runtimeWriteGateEnabled && inventoryAutostartConfigured,
+    priceStockAutostartConfigured,
+    priceStockAutostartEnabled: runtimeWriteGateEnabled && priceStockAutostartConfigured,
     jobRecoveryConfigured,
     jobRecoveryShopifyWritesConfigured,
     jobRecoveryEnabled:

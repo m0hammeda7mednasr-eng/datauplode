@@ -9,6 +9,10 @@ const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QU
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
 const INVENTORY_SYNC_BATCH_SIZE = Number(process.env.SYNC_INVENTORY_BATCH_SIZE || 25);
 const INVENTORY_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_INVENTORY_MIN_AGE_MINUTES || 30);
+const PRICE_STOCK_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_PRICE_STOCK_INTERVAL_MINUTES || 5);
+const PRICE_STOCK_SYNC_BATCH_SIZE = Number(process.env.SYNC_PRICE_STOCK_BATCH_SIZE || 50);
+const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN_AGE_MINUTES || 1440);
+const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
 const FULL_SOURCE_SYNC_ENABLED = process.env.SYNC_FULL_SOURCE_REFRESH !== 'false';
 const REBUILD_ON_VARIANT_CHANGE = process.env.SYNC_REBUILD_ON_VARIANT_CHANGE !== 'false';
 const SYNC_JOB_WAIT_TIMEOUT_MS = Number(process.env.SYNC_JOB_WAIT_TIMEOUT_MS || 15 * 60 * 1000);
@@ -31,6 +35,13 @@ type CatalogSyncOptions = {
 function inventorySyncCutoffDate(): Date {
   const minutes = Number.isFinite(INVENTORY_SYNC_MIN_AGE_MINUTES) && INVENTORY_SYNC_MIN_AGE_MINUTES > 0
     ? INVENTORY_SYNC_MIN_AGE_MINUTES
+    : 1440;
+  return new Date(Date.now() - minutes * 60 * 1000);
+}
+
+function priceStockSyncCutoffDate(): Date {
+  const minutes = Number.isFinite(PRICE_STOCK_SYNC_MIN_AGE_MINUTES) && PRICE_STOCK_SYNC_MIN_AGE_MINUTES > 0
+    ? PRICE_STOCK_SYNC_MIN_AGE_MINUTES
     : 1440;
   return new Date(Date.now() - minutes * 60 * 1000);
 }
@@ -744,6 +755,17 @@ function findMatchingStoredVariant(
   return lookup.get(`index:${freshIndex}`) || null;
 }
 
+function findStrictFreshVariant(sourceVariant: any, freshVariants: any[]) {
+  const sourceKeys = new Set(variantMatchKeys(sourceVariant));
+  const matches = freshVariants.filter((freshVariant) =>
+    variantMatchKeys(freshVariant).some((key) => sourceKeys.has(key)),
+  );
+
+  if (matches.length === 1) return matches[0];
+  if (freshVariants.length === 1) return freshVariants[0];
+  return null;
+}
+
 function diffVariantStructure(existingVariants: any[], freshVariants: any[]) {
   const existingKeys = existingVariants.map(primaryVariantKey);
   const freshKeys = freshVariants.map(primaryVariantKey);
@@ -903,12 +925,14 @@ export class QueueService {
   private static queue = new PQueue({ concurrency: 2 });
   private static inventoryMonitorStarted = false;
   private static inventoryMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private static priceStockMonitorStarted = false;
+  private static priceStockMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
   static async addTask(type: string, payload: any) {
-    if (type === 'SYNC_PRODUCT' && payload?.sourceProductId) {
+    if ((type === 'SYNC_PRODUCT' || type === 'SYNC_PRICE_STOCK') && payload?.sourceProductId) {
       const activeJobs = await prisma.syncJob.findMany({
         where: {
-          type: 'SYNC_PRODUCT',
+          type,
           status: { in: ['pending', 'running'] },
           createdAt: {
             gte: new Date(Date.now() - SYNC_JOB_WAIT_TIMEOUT_MS),
@@ -927,6 +951,18 @@ export class QueueService {
       });
 
       if (existingJob) return existingJob;
+    }
+
+    if (type === 'SYNC_PRICE_STOCK_BATCH') {
+      const existingBatch = await prisma.syncJob.findFirst({
+        where: {
+          type,
+          status: { in: ['pending', 'running'] },
+          createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existingBatch) return existingBatch;
     }
 
     const job = await prisma.syncJob.create({
@@ -967,6 +1003,8 @@ export class QueueService {
       'REPUBLISH_TO_SHOPIFY',
       'SYNC_PRODUCT',
       'SYNC_INVENTORY',
+      'SYNC_PRICE_STOCK',
+      'SYNC_PRICE_STOCK_BATCH',
     ];
     const jobs = await prisma.syncJob.findMany({
       where: {
@@ -1065,6 +1103,36 @@ export class QueueService {
     (initialTimer as any).unref?.();
 
     console.log(`Inventory monitor enabled: every ${intervalMinutes} minute(s), batch size ${INVENTORY_SYNC_BATCH_SIZE}`);
+  }
+
+  static startPriceStockMonitor() {
+    if (this.priceStockMonitorStarted) return;
+    if (process.env.SYNC_PRICE_STOCK_AUTOSTART !== 'true') {
+      console.log('Price/stock monitor disabled by SYNC_PRICE_STOCK_AUTOSTART');
+      return;
+    }
+    if (!hasShopifySyncRuntimeConfig()) {
+      console.warn('Price/stock monitor disabled: ENCRYPTION_KEY is missing in production.');
+      return;
+    }
+
+    const intervalMinutes = Number.isFinite(PRICE_STOCK_SYNC_INTERVAL_MINUTES) && PRICE_STOCK_SYNC_INTERVAL_MINUTES > 0
+      ? PRICE_STOCK_SYNC_INTERVAL_MINUTES
+      : 5;
+    const enqueue = async () => {
+      try {
+        await this.addTask('SYNC_PRICE_STOCK_BATCH', { reason: 'scheduled' });
+      } catch (error: any) {
+        console.error('Failed to queue scheduled price/stock sync:', error.message);
+      }
+    };
+
+    this.priceStockMonitorStarted = true;
+    this.priceStockMonitorTimer = setInterval(() => void enqueue(), intervalMinutes * 60 * 1000);
+    (this.priceStockMonitorTimer as any).unref?.();
+    const initialTimer = setTimeout(() => void enqueue(), 10_000);
+    (initialTimer as any).unref?.();
+    console.log(`Price/stock-only monitor enabled: every ${intervalMinutes} minute(s), batch size ${PRICE_STOCK_SYNC_BATCH_SIZE}`);
   }
 
   private static async waitForJobCompletion(jobId: string, timeoutMs = SYNC_JOB_WAIT_TIMEOUT_MS) {
@@ -1551,6 +1619,258 @@ export class QueueService {
     return summary;
   }
 
+  private static async syncProductPriceStockOnly(
+    sourceProductId: string,
+    jobId: string,
+    options: CatalogSyncOptions = {},
+  ) {
+    const product = await prisma.sourceProduct.findUnique({
+      where: { id: sourceProductId },
+      include: {
+        variants: { include: { shopifyVariant: true } },
+        shopifyProduct: true,
+        supplier: true,
+      },
+    });
+
+    if (!product) throw new Error('Source product not found');
+    if (product.syncStatus === 'paused') {
+      return { skipped: true, reason: 'Product sync is paused', sourceProductId };
+    }
+    if (!product.shopifyProduct?.syncEnabled) {
+      return { skipped: true, reason: 'Product is not enabled and linked to Shopify', sourceProductId };
+    }
+
+    const syncPrice = Boolean(product.shopifyProduct.syncPrice);
+    const syncInventory = Boolean(product.shopifyProduct.syncInventory);
+    if (!syncPrice && !syncInventory) {
+      return { skipped: true, reason: 'Price and inventory sync are disabled', sourceProductId };
+    }
+
+    // A successful full scrape is the proof that the supplier state is trustworthy.
+    // Any network/parser failure aborts before Shopify is mutated.
+    const freshProduct = normalizeFreshProductPrices(
+      await scraperService.scrape(product.url),
+      options,
+    );
+    if (!freshProduct.variants.length) {
+      throw new Error('Supplier returned no variants; price/stock write was blocked');
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const inventoryLocation = syncInventory
+      ? await ShopifyService.getInventoryLocation(client)
+      : null;
+    const liveVariants = await ShopifyService.getProductInventoryVariants(
+      client,
+      product.shopifyProduct.shopifyId,
+    );
+    const liveById = new Map(liveVariants.map((variant: any) => [variant.id, variant]));
+    const pricingRule = syncPrice ? await resolvePricingRule(product, options) : null;
+    const priceUpdates: Array<{ id: string; price: string }> = [];
+    const inventoryUpdates: Array<{ inventoryItemId: string; quantity: number }> = [];
+    const expected = new Map<string, { price?: number; quantity?: number }>();
+    const dbVariantUpdates: Array<{
+      sourceVariantId: string;
+      shopifyVariantId: string;
+      price: number | null;
+      available: boolean;
+      stockStatus: string;
+    }> = [];
+    let unmatchedVariants = 0;
+
+    for (const sourceVariant of product.variants) {
+      const shopifyVariant = sourceVariant.shopifyVariant;
+      if (!shopifyVariant) continue;
+      const liveVariant: any = liveById.get(shopifyVariant.shopifyId);
+      if (!liveVariant) throw new Error(`Linked Shopify variant is missing: ${shopifyVariant.shopifyId}`);
+
+      const freshVariant = findStrictFreshVariant(sourceVariant, freshProduct.variants);
+      if (!freshVariant) {
+        unmatchedVariants += 1;
+        continue;
+      }
+
+      const freshPrice = toPositiveNumber(freshVariant.price) || toPositiveNumber(freshProduct.price);
+      const targetPrice = syncPrice ? calculatedVariantPrice(freshPrice, pricingRule) : null;
+      const stockStatus = freshVariant.available === false || freshVariant.stockStatus === 'out_of_stock'
+        ? 'out_of_stock'
+        : freshVariant.stockStatus === 'low_stock'
+          ? 'low_stock'
+          : 'in_stock';
+      const quantity = getInventoryQuantityForStatus(stockStatus);
+      const expectation: { price?: number; quantity?: number } = {};
+
+      if (syncPrice && targetPrice) {
+        expectation.price = targetPrice;
+        if (!moneyClose(liveVariant.price, targetPrice)) {
+          priceUpdates.push({ id: shopifyVariant.shopifyId, price: formatShopifyPrice(targetPrice) });
+        }
+      }
+
+      if (syncInventory) {
+        const inventoryItemId = cleanOptionText(liveVariant.inventoryItem?.id);
+        if (!inventoryItemId) throw new Error(`Shopify inventory item is missing: ${shopifyVariant.shopifyId}`);
+        expectation.quantity = quantity;
+        if (Number(liveVariant.inventoryQuantity) !== quantity) {
+          inventoryUpdates.push({ inventoryItemId, quantity });
+        }
+      }
+
+      expected.set(shopifyVariant.shopifyId, expectation);
+      dbVariantUpdates.push({
+        sourceVariantId: sourceVariant.id,
+        shopifyVariantId: shopifyVariant.id,
+        price: freshPrice,
+        available: stockStatus !== 'out_of_stock',
+        stockStatus,
+      });
+    }
+
+    if (expected.size === 0) {
+      throw new Error('No supplier variants could be matched safely; Shopify was not changed');
+    }
+
+    if (priceUpdates.length) {
+      const response = await ShopifyService.updateVariantsBulk(
+        client,
+        product.shopifyProduct.shopifyId,
+        priceUpdates,
+      );
+      const errors = response.productVariantsBulkUpdate?.userErrors || [];
+      if (errors.length) throw new Error(`Shopify Price Sync Error: ${errors[0].message}`);
+    }
+
+    if (inventoryUpdates.length && inventoryLocation) {
+      const response = await ShopifyService.setInventoryQuantities(client, {
+        locationId: inventoryLocation.id,
+        quantities: inventoryUpdates,
+        referenceDocumentUri: `gid://syncly/PriceStockSync/${jobId}`,
+      });
+      const errors = response.inventorySetQuantities?.userErrors || [];
+      if (errors.length) throw new Error(`Shopify Inventory Error: ${errors[0].message}`);
+    }
+
+    const readback = await ShopifyService.getProductInventoryVariants(
+      client,
+      product.shopifyProduct.shopifyId,
+    );
+    const readbackById = new Map(readback.map((variant: any) => [variant.id, variant]));
+    for (const [variantId, expectation] of expected) {
+      const actual: any = readbackById.get(variantId);
+      if (!actual) throw new Error(`Shopify read-back variant is missing: ${variantId}`);
+      if (expectation.price !== undefined && !moneyClose(actual.price, expectation.price)) {
+        throw new Error(`Shopify price read-back failed for ${variantId}`);
+      }
+      if (expectation.quantity !== undefined && Number(actual.inventoryQuantity) !== expectation.quantity) {
+        throw new Error(`Shopify inventory read-back failed for ${variantId}`);
+      }
+    }
+
+    const summary = {
+      mode: 'price_stock_only',
+      sourceProductId,
+      shopifyProductId: product.shopifyProduct.shopifyId,
+      sourceUrl: product.url,
+      variantsMatched: expected.size,
+      unmatchedVariants,
+      pricesUpdated: priceUpdates.length,
+      inventoryUpdated: inventoryUpdates.length,
+      imagesTouched: 0,
+      detailsTouched: 0,
+      variantsRebuilt: 0,
+      readbackVerified: true,
+    };
+
+    await prisma.$transaction([
+      ...dbVariantUpdates.flatMap((entry) => [
+        prisma.sourceVariant.update({
+          where: { id: entry.sourceVariantId },
+          data: {
+            ...(entry.price ? { price: entry.price } : {}),
+            available: entry.available,
+            stockStatus: entry.stockStatus,
+          },
+        }),
+        ...(entry.price ? [prisma.shopifyVariant.update({
+          where: { id: entry.shopifyVariantId },
+          data: { price: calculatedVariantPrice(entry.price, pricingRule) },
+        })] : []),
+      ]),
+      prisma.sourceProduct.update({
+        where: { id: product.id },
+        data: {
+          price: freshProduct.price,
+          syncStatus: 'active',
+          lastScrapedAt: new Date(),
+        },
+      }),
+      prisma.auditLog.create({
+        data: {
+          sourceProductId: product.id,
+          action: 'SYNC_PRICE_STOCK_ONLY',
+          details: JSON.stringify(summary),
+        },
+      }),
+    ]);
+
+    return summary;
+  }
+
+  private static async queuePriceStockSyncBatch() {
+    const take = Number.isFinite(PRICE_STOCK_SYNC_BATCH_SIZE) && PRICE_STOCK_SYNC_BATCH_SIZE > 0
+      ? Math.floor(PRICE_STOCK_SYNC_BATCH_SIZE)
+      : 50;
+    const candidates = await prisma.sourceProduct.findMany({
+      where: {
+        syncStatus: { not: 'paused' },
+        lastScrapedAt: { lte: priceStockSyncCutoffDate() },
+        shopifyProduct: {
+          is: {
+            syncEnabled: true,
+            OR: [{ syncInventory: true }, { syncPrice: true }],
+          },
+        },
+      },
+      select: { id: true },
+      orderBy: { lastScrapedAt: 'asc' },
+      take: Math.max(take * 4, take),
+    });
+
+    const recentCutoff = new Date(
+      Date.now() - Math.max(5, PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES) * 60 * 1000,
+    );
+    const recentJobs = await prisma.syncJob.findMany({
+      where: {
+        type: 'SYNC_PRICE_STOCK',
+        createdAt: { gte: recentCutoff },
+        status: { in: ['pending', 'running', 'failed'] },
+      },
+      select: { payload: true },
+      orderBy: { createdAt: 'desc' },
+      take: Math.max(take * 10, 500),
+    });
+    const recentlyAttempted = new Set<string>();
+    for (const job of recentJobs) {
+      try {
+        const id = cleanOptionText(JSON.parse(job.payload || '{}').sourceProductId);
+        if (id) recentlyAttempted.add(id);
+      } catch {}
+    }
+
+    const selected = candidates.filter((product) => !recentlyAttempted.has(product.id)).slice(0, take);
+    let queued = 0;
+    for (const product of selected) {
+      const job = await this.addTask('SYNC_PRICE_STOCK', {
+        sourceProductId: product.id,
+        reason: 'scheduled_price_stock_only',
+      });
+      if (job.status === 'pending') queued += 1;
+    }
+
+    return { queued, candidates: candidates.length, skippedRecent: candidates.length - selected.length };
+  }
+
   private static async queueInventorySyncBatch() {
     const take = Number.isFinite(INVENTORY_SYNC_BATCH_SIZE) && INVENTORY_SYNC_BATCH_SIZE > 0
       ? Math.floor(INVENTORY_SYNC_BATCH_SIZE)
@@ -2022,6 +2342,15 @@ export class QueueService {
           }
           case 'SYNC_INVENTORY':
             result = await this.queueInventorySyncBatch();
+            break;
+          case 'SYNC_PRICE_STOCK': {
+            const { sourceProductId } = payload;
+            if (!sourceProductId) throw new Error('Missing sourceProductId');
+            result = await this.syncProductPriceStockOnly(sourceProductId, jobId, payload);
+            break;
+          }
+          case 'SYNC_PRICE_STOCK_BATCH':
+            result = await this.queuePriceStockSyncBatch();
             break;
           default:
             throw new Error(`Unknown job type: ${job.type}`);
