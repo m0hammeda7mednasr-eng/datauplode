@@ -452,6 +452,7 @@ export class ShopifyService {
               title
               price
               sku
+              inventoryQuantity
               inventoryItem {
                 id
                 sku

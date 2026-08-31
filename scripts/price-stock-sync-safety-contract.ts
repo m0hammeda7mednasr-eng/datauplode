@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 
 const queue = fs.readFileSync('src/server/services/queue.ts', 'utf8');
+const shopify = fs.readFileSync('src/server/services/shopify.ts', 'utf8');
 const server = fs.readFileSync('server.ts', 'utf8');
 const railway = fs.readFileSync('.env.railway.example', 'utf8');
 
@@ -15,6 +16,7 @@ const isolated = queue.slice(start, end);
 
 requireContract(isolated.includes('await scraperService.scrape(product.url)'), 'supplier must be refreshed before writes');
 requireContract(isolated.includes('readbackVerified: true'), 'Shopify read-back must be required');
+requireContract(/getProductInventoryVariants[\s\S]*?inventoryQuantity[\s\S]*?inventoryItem/.test(shopify), 'Shopify read-back must request inventoryQuantity');
 requireContract(isolated.includes('imagesTouched: 0'), 'audit must prove images are untouched');
 requireContract(isolated.includes('detailsTouched: 0'), 'audit must prove details are untouched');
 requireContract(isolated.includes('variantsRebuilt: 0'), 'audit must prove variants are never rebuilt');
