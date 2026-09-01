@@ -13,6 +13,15 @@ const PRICE_STOCK_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_PRICE_STOCK_IN
 const PRICE_STOCK_SYNC_BATCH_SIZE = Number(process.env.SYNC_PRICE_STOCK_BATCH_SIZE || 50);
 const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN_AGE_MINUTES || 1440);
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
+const PRICE_STOCK_TARGET_SPREADSHEET_IDS = new Set(
+  String(
+    process.env.SYNC_PRICE_STOCK_SPREADSHEET_IDS ||
+      '1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w,13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI',
+  )
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
 const FULL_SOURCE_SYNC_ENABLED = process.env.SYNC_FULL_SOURCE_REFRESH !== 'false';
 const REBUILD_ON_VARIANT_CHANGE = process.env.SYNC_REBUILD_ON_VARIANT_CHANGE !== 'false';
 const SYNC_JOB_WAIT_TIMEOUT_MS = Number(process.env.SYNC_JOB_WAIT_TIMEOUT_MS || 15 * 60 * 1000);
@@ -624,6 +633,39 @@ function getImportMeta(product: any): Record<string, any> {
   const parsed = parseProductRaw(product?.raw);
   const importMeta = parsed?.import;
   return importMeta && typeof importMeta === 'object' ? importMeta : {};
+}
+
+function spreadsheetIdFromValue(value: any): string {
+  const text = cleanOptionText(value);
+  if (!text) return '';
+  const match = text.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return match?.[1] || (/^[a-zA-Z0-9_-]{20,}$/.test(text) ? text : '');
+}
+
+function isPriceStockTargetProduct(product: any): boolean {
+  const importMeta = getImportMeta(product);
+  const explicitSheetIds = [
+    importMeta.spreadsheetId,
+    importMeta.sheetSpreadsheetId,
+    importMeta.sheetUrl,
+    importMeta.spreadsheetUrl,
+  ]
+    .map(spreadsheetIdFromValue)
+    .filter(Boolean);
+
+  if (explicitSheetIds.length > 0) {
+    return explicitSheetIds.some((id) => PRICE_STOCK_TARGET_SPREADSHEET_IDS.has(id));
+  }
+
+  // Older imports predate spreadsheet provenance. They are admitted only when
+  // all three durable sheet markers exist: row number, multiplier, and SKU.
+  const rowNumber = Number(importMeta.excelRowNumber || importMeta.sheetRowNumber);
+  const hasSheetRow = Number.isSafeInteger(rowNumber) && rowNumber > 0;
+  const hasMultiplier = Boolean(toPositiveNumber(importMeta.sheetPriceMultiplier));
+  const hasSku = (product?.variants || []).some((variant: any) =>
+    cleanOptionText(variant?.shopifyVariant?.sku || variant?.sku),
+  );
+  return hasSheetRow && hasMultiplier && hasSku;
 }
 
 function cleanStringList(values: any): string[] {
@@ -1640,6 +1682,9 @@ export class QueueService {
     if (!product.shopifyProduct?.syncEnabled) {
       return { skipped: true, reason: 'Product is not enabled and linked to Shopify', sourceProductId };
     }
+    if (!isPriceStockTargetProduct(product)) {
+      return { skipped: true, reason: 'Product is outside the two authorized spreadsheets', sourceProductId };
+    }
 
     const syncPrice = Boolean(product.shopifyProduct.syncPrice);
     const syncInventory = Boolean(product.shopifyProduct.syncInventory);
@@ -1832,9 +1877,13 @@ export class QueueService {
           },
         },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        raw: true,
+        variants: { select: { sku: true, shopifyVariant: { select: { sku: true } } } },
+      },
       orderBy: { lastScrapedAt: 'asc' },
-      take: Math.max(take * 4, take),
+      take: Math.max(take * 10, 500),
     });
 
     const recentCutoff = new Date(
@@ -1858,7 +1907,10 @@ export class QueueService {
       } catch {}
     }
 
-    const selected = candidates.filter((product) => !recentlyAttempted.has(product.id)).slice(0, take);
+    const eligibleCandidates = candidates.filter(isPriceStockTargetProduct);
+    const selected = eligibleCandidates
+      .filter((product) => !recentlyAttempted.has(product.id))
+      .slice(0, take);
     let queued = 0;
     for (const product of selected) {
       const job = await this.addTask('SYNC_PRICE_STOCK', {
@@ -1868,7 +1920,13 @@ export class QueueService {
       if (job.status === 'pending') queued += 1;
     }
 
-    return { queued, candidates: candidates.length, skippedRecent: candidates.length - selected.length };
+    return {
+      queued,
+      candidates: candidates.length,
+      eligibleCandidates: eligibleCandidates.length,
+      skippedOutsideAuthorizedSheets: candidates.length - eligibleCandidates.length,
+      skippedRecent: eligibleCandidates.length - selected.length,
+    };
   }
 
   private static async queueInventorySyncBatch() {
