@@ -17,6 +17,15 @@ function compact(value: unknown) {
   return clean(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function shortHash(value: unknown, length = 8) {
+  return crypto
+    .createHash("sha1")
+    .update(clean(value))
+    .digest("hex")
+    .slice(0, length)
+    .toUpperCase();
+}
+
 export function isDabSku(value: unknown) {
   return /^DAB-[A-Z0-9]+-[A-Z0-9-]+$/i.test(clean(value));
 }
@@ -48,6 +57,14 @@ function canonicalUrl(value: string) {
   }
 }
 
+function leftiesColorId(url: string) {
+  try {
+    return compact(new URL(url).searchParams.get("colorId"));
+  } catch {
+    return "";
+  }
+}
+
 function urlProductCode(url: string) {
   try {
     const path = new URL(url).pathname;
@@ -68,17 +85,39 @@ function formatProductCode(value: unknown) {
   return `${code.slice(0, -3)}-${code.slice(-3)}`;
 }
 
+function boundedProductCode(value: unknown, identity: string) {
+  const formatted = formatProductCode(value);
+  if (!formatted) return "";
+  if (formatted.length <= 26) return formatted;
+
+  // Long source slugs (notably H&M) often share their first 26 characters
+  // across different colours/patterns. Preserve a readable prefix but reserve
+  // an 8-character stable hash so distinct source products cannot collapse to
+  // the same DAB product code after truncation.
+  const hash = shortHash(identity || formatted, 8);
+  const prefix = compact(value).slice(0, Math.max(1, 26 - hash.length - 1));
+  return `${prefix}-${hash}`;
+}
+
 export function dabProductCode(url: string, sourceProductId?: string) {
   const brand = dabBrandCode(url);
   const fromUrl = urlProductCode(url);
-  const raw = brand === "NXT" && fromUrl ? fromUrl : compact(sourceProductId) || fromUrl;
-  if (raw) return formatProductCode(raw).slice(0, 26);
-  return crypto
-    .createHash("sha1")
-    .update(canonicalUrl(url))
-    .digest("hex")
-    .slice(0, 10)
-    .toUpperCase();
+  let raw = brand === "NXT" && fromUrl ? fromUrl : compact(sourceProductId) || fromUrl;
+
+  // Lefties reuses the same numeric productId for colour-specific product
+  // pages. colorId is therefore part of the source-product identity and must
+  // participate in the deterministic SKU product code.
+  if (brand === "LFT") {
+    const colorId = leftiesColorId(url);
+    if (raw && colorId) raw = `${raw}${colorId}`;
+  }
+
+  if (raw) {
+    const identity = `${brand}|${clean(sourceProductId)}|${canonicalUrl(url)}|${leftiesColorId(url)}`;
+    return boundedProductCode(raw, identity);
+  }
+
+  return shortHash(canonicalUrl(url), 10);
 }
 
 function sizeToken(variant: NormalizedProduct["variants"][number]) {
@@ -128,9 +167,12 @@ export function applyDeterministicDabSkus(params: {
     .map((variant, index) => ({ index, size: sizeToken(variant) }))
     .sort((left, right) => sizeRank(left.size) - sizeRank(right.size) || left.index - right.index);
   const canonicalIndex = ranked[0]?.index ?? 0;
-  const preferredSku = isDabSku(params.existingProductSku)
-    ? clean(params.existingProductSku).toUpperCase().slice(0, 64)
-    : "";
+  const expectedProductPrefix = `DAB-${brand}-${productCode}-`;
+  const existingSku = clean(params.existingProductSku).toUpperCase().slice(0, 64);
+  const preferredSku =
+    isDabSku(existingSku) && existingSku.startsWith(expectedProductPrefix)
+      ? existingSku
+      : "";
   const used = new Set<string>();
   let canonicalSku = "";
 
@@ -140,7 +182,10 @@ export function applyDeterministicDabSkus(params: {
     let sku = index === canonicalIndex && preferredSku ? preferredSku : base;
     if (used.has(sku)) {
       const color = token(variant.color || variant.optionValues?.Color || "", 10);
-      const suffix = color ? `${color}-${index + 1}` : String(index + 1);
+      const variantIdentity = clean(
+        variant.sourceVariantId || variant.sku || `${color}|${size}|${index}`,
+      );
+      const suffix = shortHash(variantIdentity, 6);
       sku = `${base.slice(0, Math.max(1, 63 - suffix.length))}-${suffix}`;
     }
     used.add(sku);
