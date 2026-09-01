@@ -116,6 +116,24 @@ function priceStockAutostartEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_PRICE_STOCK_AUTOSTART");
 }
 
+function exactRevision(value: unknown) {
+  const revision = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(revision) ? revision : "";
+}
+
+function fullCatalogAutostartEnabled() {
+  const expected = exactRevision(process.env.SYNC_FULL_CATALOG_REVISION);
+  const deployed = exactRevision(
+    process.env.RAILWAY_GIT_COMMIT_SHA || process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA,
+  );
+  return (
+    runtimeWritesEnabled() &&
+    envFlag("SYNC_FULL_CATALOG_AUTOSTART") &&
+    Boolean(expected) &&
+    expected === deployed
+  );
+}
+
 function sheetImportAutostartEnabled() {
   return runtimeWritesEnabled() && envFlag("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED");
 }
@@ -552,6 +570,13 @@ async function startServer() {
       QueueService.startPriceStockMonitor();
     } else {
       console.log("Price/stock-only monitor disabled by SYNC_PRICE_STOCK_AUTOSTART=false");
+    }
+
+    if (fullCatalogAutostartEnabled()) {
+      console.warn("Safe full-catalog monitor autostart ENABLED");
+      QueueService.startFullCatalogMonitor();
+    } else {
+      console.log("Full-catalog monitor disabled by SYNC_FULL_CATALOG_AUTOSTART=false");
     }
 
     if (sheetImportAutostartEnabled()) {

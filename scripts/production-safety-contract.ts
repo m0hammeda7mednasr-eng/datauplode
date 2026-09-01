@@ -12,10 +12,46 @@ const railwaySafeModePreflight = read("scripts/railway-safe-mode-preflight.ts");
 const databaseRuntime = read("src/server/db.ts");
 const canaryReadBack = read("scripts/shopify-canary-readback.ts");
 const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.yml");
+const fullCatalogSync = read("src/server/services/fullCatalogSync.ts");
+const shopifyService = read("src/server/services/shopify.ts");
+const queue = read("src/server/services/queue.ts");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
   ["inventory autostart default off", /SYNC_INVENTORY_AUTOSTART=false/.test(envExample)],
+  ["full-catalog autostart default off", /SYNC_FULL_CATALOG_AUTOSTART=false/.test(envExample)],
+  [
+    "full-catalog autostart requires runtime write gate and exact revision",
+    /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
+      /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
+      /RAILWAY_GIT_COMMIT_SHA/.test(server),
+  ],
+  [
+    "full-catalog writes use synchronous in-place productSet",
+    /productSet\([\s\S]*identifier:\s*\$identifier[\s\S]*synchronous:\s*\$synchronous/.test(shopifyService) &&
+      /identifier:\s*\{\s*id:\s*productId\s*\}/.test(shopifyService) &&
+      /synchronous:\s*true/.test(shopifyService),
+  ],
+  [
+    "full-catalog sync never deletes the Shopify product",
+    !/deleteProduct|restDelete|productDelete/.test(fullCatalogSync),
+  ],
+  [
+    "full-catalog sync requires exact read-back",
+    /live\?\.id\s*===\s*shopifyProductId/.test(fullCatalogSync) &&
+      /live\.media\.length\s*===\s*files\.length/.test(fullCatalogSync) &&
+      /live\.variants\.length\s*===\s*variants\.length/.test(fullCatalogSync) &&
+      /variantsMatch/.test(fullCatalogSync),
+  ],
+  [
+    "full-catalog sync rejects suspicious images and duplicate SKUs",
+    /isLikelyProductImageSource/.test(fullCatalogSync) &&
+      /new Set\(skus\)\.size\s*!==\s*skus\.length/.test(fullCatalogSync),
+  ],
+  [
+    "full-catalog rolling batch remains capped at five",
+    /Math\.min\(5,\s*Math\.floor\(FULL_CATALOG_SYNC_BATCH_SIZE\)\)/.test(queue),
+  ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [
     "sheet import autostart default off",

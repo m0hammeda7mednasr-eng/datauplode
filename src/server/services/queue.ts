@@ -4,6 +4,7 @@ import { ShopifyService } from './shopify.js';
 import { PricingEngine } from './pricing.js';
 import { ScraperService, type NormalizedProduct } from './scraper.js';
 import { applyDeterministicDabSkus } from './dabSku.js';
+import { syncFullProductCatalog } from './fullCatalogSync.js';
 
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
@@ -13,6 +14,10 @@ const PRICE_STOCK_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_PRICE_STOCK_IN
 const PRICE_STOCK_SYNC_BATCH_SIZE = Number(process.env.SYNC_PRICE_STOCK_BATCH_SIZE || 50);
 const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN_AGE_MINUTES || 1440);
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
+const FULL_CATALOG_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_FULL_CATALOG_INTERVAL_MINUTES || 10);
+const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 5);
+const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
+const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
 const PRICE_STOCK_TARGET_SPREADSHEET_IDS = new Set(
   String(
     process.env.SYNC_PRICE_STOCK_SPREADSHEET_IDS ||
@@ -969,6 +974,8 @@ export class QueueService {
   private static inventoryMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private static priceStockMonitorStarted = false;
   private static priceStockMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private static fullCatalogMonitorStarted = false;
+  private static fullCatalogMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
   static async addTask(type: string, payload: any) {
     if ((type === 'SYNC_PRODUCT' || type === 'SYNC_PRICE_STOCK') && payload?.sourceProductId) {
@@ -995,7 +1002,7 @@ export class QueueService {
       if (existingJob) return existingJob;
     }
 
-    if (type === 'SYNC_PRICE_STOCK_BATCH') {
+    if (type === 'SYNC_PRICE_STOCK_BATCH' || type === 'SYNC_FULL_CATALOG_BATCH') {
       const existingBatch = await prisma.syncJob.findFirst({
         where: {
           type,
@@ -1047,6 +1054,7 @@ export class QueueService {
       'SYNC_INVENTORY',
       'SYNC_PRICE_STOCK',
       'SYNC_PRICE_STOCK_BATCH',
+      'SYNC_FULL_CATALOG_BATCH',
     ];
     const jobs = await prisma.syncJob.findMany({
       where: {
@@ -1175,6 +1183,36 @@ export class QueueService {
     const initialTimer = setTimeout(() => void enqueue(), 10_000);
     (initialTimer as any).unref?.();
     console.log(`Price/stock-only monitor enabled: every ${intervalMinutes} minute(s), batch size ${PRICE_STOCK_SYNC_BATCH_SIZE}`);
+  }
+
+  static startFullCatalogMonitor() {
+    if (this.fullCatalogMonitorStarted) return;
+    if (process.env.SYNC_FULL_CATALOG_AUTOSTART !== 'true') {
+      console.log('Full-catalog monitor disabled by SYNC_FULL_CATALOG_AUTOSTART');
+      return;
+    }
+    if (!hasShopifySyncRuntimeConfig()) {
+      console.warn('Full-catalog monitor disabled: ENCRYPTION_KEY is missing in production.');
+      return;
+    }
+
+    const intervalMinutes = Number.isFinite(FULL_CATALOG_SYNC_INTERVAL_MINUTES) && FULL_CATALOG_SYNC_INTERVAL_MINUTES > 0
+      ? FULL_CATALOG_SYNC_INTERVAL_MINUTES
+      : 10;
+    const enqueue = async () => {
+      try {
+        await this.addTask('SYNC_FULL_CATALOG_BATCH', { reason: 'scheduled_safe_catalog_set' });
+      } catch (error: any) {
+        console.error('Failed to queue scheduled full-catalog sync:', error.message);
+      }
+    };
+
+    this.fullCatalogMonitorStarted = true;
+    this.fullCatalogMonitorTimer = setInterval(() => void enqueue(), intervalMinutes * 60 * 1000);
+    (this.fullCatalogMonitorTimer as any).unref?.();
+    const initialTimer = setTimeout(() => void enqueue(), 15_000);
+    (initialTimer as any).unref?.();
+    console.log(`Full-catalog monitor enabled: every ${intervalMinutes} minute(s), batch size ${FULL_CATALOG_SYNC_BATCH_SIZE}`);
   }
 
   private static async waitForJobCompletion(jobId: string, timeoutMs = SYNC_JOB_WAIT_TIMEOUT_MS) {
@@ -1946,6 +1984,81 @@ export class QueueService {
     };
   }
 
+  private static async syncFullCatalogBatch() {
+    const take = Number.isFinite(FULL_CATALOG_SYNC_BATCH_SIZE) && FULL_CATALOG_SYNC_BATCH_SIZE > 0
+      ? Math.min(5, Math.floor(FULL_CATALOG_SYNC_BATCH_SIZE))
+      : 5;
+    const minAgeDays = Number.isFinite(FULL_CATALOG_SYNC_MIN_AGE_DAYS) && FULL_CATALOG_SYNC_MIN_AGE_DAYS > 0
+      ? FULL_CATALOG_SYNC_MIN_AGE_DAYS
+      : 30;
+    const failureRetryMinutes = Number.isFinite(FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES) && FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES > 0
+      ? FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES
+      : 60;
+    const successCutoff = new Date(Date.now() - minAgeDays * 24 * 60 * 60 * 1000);
+    const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
+    const candidates = await prisma.sourceProduct.findMany({
+      where: {
+        syncStatus: { not: 'paused' },
+        url: { contains: 'centrepointstores.com', mode: 'insensitive' },
+        raw: { contains: 'sheetPriceMultiplier' },
+        shopifyProduct: { is: { syncEnabled: true } },
+        AND: [
+          {
+            auditLogs: {
+              none: { action: 'SYNC_PRODUCT_CATALOG_SET', createdAt: { gte: successCutoff } },
+            },
+          },
+          {
+            auditLogs: {
+              none: { action: 'SYNC_PRODUCT_CATALOG_FAILED', createdAt: { gte: failureCutoff } },
+            },
+          },
+        ],
+      },
+      select: { id: true, title: true, updatedAt: true },
+      orderBy: { updatedAt: 'asc' },
+      take,
+    });
+    if (candidates.length === 0) {
+      return { selected: 0, completed: 0, failed: 0, readbackVerified: 0 };
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const location = await ShopifyService.getInventoryLocation(client);
+    const results: any[] = [];
+    let failed = 0;
+    for (const candidate of candidates) {
+      try {
+        results.push(await syncFullProductCatalog({
+          prisma,
+          sourceProductId: candidate.id,
+          client,
+          location,
+        }));
+      } catch (error: any) {
+        failed += 1;
+        const message = cleanOptionText(error?.message || error).slice(0, 2000);
+        await prisma.auditLog.create({
+          data: {
+            sourceProductId: candidate.id,
+            action: 'SYNC_PRODUCT_CATALOG_FAILED',
+            details: JSON.stringify({ message, shopifyWriteMayHaveStarted: message.includes('could not be verified') }),
+          },
+        });
+        results.push({ success: false, sourceProductId: candidate.id, title: candidate.title, error: message });
+        if (message.includes('could not be verified')) break;
+      }
+    }
+
+    return {
+      selected: candidates.length,
+      completed: results.filter((result) => result.success).length,
+      failed,
+      readbackVerified: results.filter((result) => result.readbackVerified).length,
+      results,
+    };
+  }
+
   private static async queueInventorySyncBatch() {
     const take = Number.isFinite(INVENTORY_SYNC_BATCH_SIZE) && INVENTORY_SYNC_BATCH_SIZE > 0
       ? Math.floor(INVENTORY_SYNC_BATCH_SIZE)
@@ -2426,6 +2539,9 @@ export class QueueService {
           }
           case 'SYNC_PRICE_STOCK_BATCH':
             result = await this.queuePriceStockSyncBatch();
+            break;
+          case 'SYNC_FULL_CATALOG_BATCH':
+            result = await this.syncFullCatalogBatch();
             break;
           default:
             throw new Error(`Unknown job type: ${job.type}`);

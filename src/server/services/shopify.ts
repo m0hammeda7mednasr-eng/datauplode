@@ -264,6 +264,98 @@ export class ShopifyService {
     return data.product || null;
   }
 
+  static async getProductCatalogSnapshot(client: ShopifyGraphqlClient, productId: string) {
+    const query = `
+      query ProductCatalogSnapshot($id: ID!) {
+        product(id: $id) {
+          id
+          handle
+          title
+          descriptionHtml
+          vendor
+          status
+          media(first: 250) {
+            nodes {
+              id
+              alt
+              mediaContentType
+              ... on MediaImage {
+                image { url }
+              }
+            }
+          }
+          variants(first: 250) {
+            nodes {
+              id
+              title
+              price
+              sku
+              inventoryQuantity
+              selectedOptions { name value }
+              media(first: 10) {
+                nodes { id alt mediaContentType }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await client.request(query, { id: productId });
+    const product = data.product || null;
+    if (!product) return null;
+    return {
+      ...product,
+      media: product.media?.nodes || [],
+      variants: product.variants?.nodes || [],
+    };
+  }
+
+  static async setProductCatalog(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    input: Record<string, any>,
+  ) {
+    const mutation = `
+      mutation SetProductCatalog(
+        $identifier: ProductSetIdentifiers
+        $input: ProductSetInput!
+        $synchronous: Boolean!
+      ) {
+        productSet(
+          identifier: $identifier
+          input: $input
+          synchronous: $synchronous
+        ) {
+          product {
+            id
+            handle
+            title
+            descriptionHtml
+            status
+            media(first: 250) { nodes { id alt mediaContentType status } }
+            variants(first: 250) {
+              nodes {
+                id
+                title
+                price
+                sku
+                inventoryQuantity
+                selectedOptions { name value }
+                media(first: 10) { nodes { id alt mediaContentType status } }
+              }
+            }
+          }
+          userErrors { code field message }
+        }
+      }
+    `;
+    return client.request(mutation, {
+      identifier: { id: productId },
+      input,
+      synchronous: true,
+    });
+  }
+
   static async updateProductStatus(client: ShopifyGraphqlClient, productId: string, status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED') {
     const mutation = `
       mutation productUpdateStatus($product: ProductUpdateInput!) {
