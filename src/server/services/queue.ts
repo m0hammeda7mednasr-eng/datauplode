@@ -2469,6 +2469,39 @@ export class QueueService {
           } catch {}
         }
 
+        if (job.type === 'SYNC_PRICE_STOCK') {
+          try {
+            const payload = JSON.parse(job.payload || '{}');
+            const sourceProductId = cleanOptionText(payload.sourceProductId);
+            if (sourceProductId) {
+              await queueDbRetry('priceStockSync.recordFailedAttempt', () =>
+                prisma.$transaction([
+                  prisma.sourceProduct.update({
+                    where: { id: sourceProductId },
+                    // Move a blocked supplier page to the back of the daily
+                    // rolling queue so it cannot starve the rest of the catalog.
+                    data: { lastScrapedAt: new Date() },
+                  }),
+                  prisma.auditLog.create({
+                    data: {
+                      sourceProductId,
+                      action: 'SYNC_PRICE_STOCK_FAILED',
+                      details: JSON.stringify({
+                        mode: 'price_stock_only',
+                        error: cleanOptionText(error?.message || error).slice(0, 2000),
+                        retryAfterMinutes: PRICE_STOCK_SYNC_MIN_AGE_MINUTES,
+                        shopifyMutationsAssumed: false,
+                      }),
+                    },
+                  }),
+                ]),
+              );
+            }
+          } catch (attemptError: any) {
+            console.error('Failed to record price/stock retry age:', attemptError?.message || attemptError);
+          }
+        }
+
         try {
           const payload = JSON.parse(job.payload || '{}');
           if (
