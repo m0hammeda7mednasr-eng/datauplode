@@ -1796,21 +1796,38 @@ export class QueueService {
       if (errors.length) throw new Error(`Shopify Inventory Error: ${errors[0].message}`);
     }
 
-    const readback = await ShopifyService.getProductInventoryVariants(
-      client,
-      product.shopifyProduct.shopifyId,
-    );
-    const readbackById = new Map(readback.map((variant: any) => [variant.id, variant]));
-    for (const [variantId, expectation] of expected) {
-      const actual: any = readbackById.get(variantId);
-      if (!actual) throw new Error(`Shopify read-back variant is missing: ${variantId}`);
-      if (expectation.price !== undefined && !moneyClose(actual.price, expectation.price)) {
-        throw new Error(`Shopify price read-back failed for ${variantId}`);
+    let readbackVerified = false;
+    let readbackFailure = 'Shopify read-back did not match the expected price and inventory';
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const readback = await ShopifyService.getProductInventoryVariants(
+        client,
+        product.shopifyProduct.shopifyId,
+      );
+      const readbackById = new Map(readback.map((variant: any) => [variant.id, variant]));
+      const mismatch = [...expected.entries()].find(([variantId, expectation]) => {
+        const actual: any = readbackById.get(variantId);
+        if (!actual) {
+          readbackFailure = `Shopify read-back variant is missing: ${variantId}`;
+          return true;
+        }
+        if (expectation.price !== undefined && !moneyClose(actual.price, expectation.price)) {
+          readbackFailure = `Shopify price read-back failed for ${variantId}`;
+          return true;
+        }
+        if (expectation.quantity !== undefined && Number(actual.inventoryQuantity) !== expectation.quantity) {
+          readbackFailure = `Shopify inventory read-back failed for ${variantId}`;
+          return true;
+        }
+        return false;
+      });
+
+      if (!mismatch) {
+        readbackVerified = true;
+        break;
       }
-      if (expectation.quantity !== undefined && Number(actual.inventoryQuantity) !== expectation.quantity) {
-        throw new Error(`Shopify inventory read-back failed for ${variantId}`);
-      }
+      if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
     }
+    if (!readbackVerified) throw new Error(readbackFailure);
 
     const summary = {
       mode: 'price_stock_only',

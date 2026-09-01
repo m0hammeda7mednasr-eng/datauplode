@@ -15,6 +15,7 @@ const isolated = queue.slice(start, end);
 
 requireContract(isolated.includes('await scraperService.scrape(product.url)'), 'supplier must be refreshed before writes');
 requireContract(isolated.includes('readbackVerified: true'), 'Shopify read-back must be required');
+requireContract(isolated.includes('attempt <= 5'), 'Shopify read-back must tolerate bounded inventory propagation delay');
 requireContract(isolated.includes('imagesTouched: 0'), 'audit must prove images are untouched');
 requireContract(isolated.includes('detailsTouched: 0'), 'audit must prove details are untouched');
 requireContract(isolated.includes('variantsRebuilt: 0'), 'audit must prove variants are never rebuilt');
