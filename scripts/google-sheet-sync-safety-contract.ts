@@ -17,6 +17,7 @@ import {
   CentrepointScraper,
   HmScraper,
   NextScraper,
+  parseCentrepointHtml,
   scraperApiStatusExhaustsKey,
   SheinScraper,
 } from "../src/server/services/scraper.js";
@@ -65,6 +66,42 @@ assert.match(
   apiSource,
   /cachedImages\.length > 0[\s\S]*cachedVariants\.length > 0/,
   "blocked-source fallback must require cached images and variants before publish",
+);
+
+const centrepointNoSizeFixture = parseCentrepointHtml(
+  `<script type="application/ld+json">${JSON.stringify({
+    "@type": "Product",
+    name: "Test diaper bag",
+    image: "https://media.centrepointstores.com/i/centrepoint/123456789_01-2100.jpg",
+    color: "Grey",
+    offers: {
+      "@type": "Offer",
+      priceCurrency: "AED",
+      price: 99,
+      availability: "https://schema.org/InStock",
+    },
+  })}</script><div data-color="breadcrumb">Home Baby Diapering</div>`,
+  "https://www.centrepointstores.com/ae/en/buy-test/p/123456789",
+);
+assert.equal(
+  centrepointNoSizeFixture.variants.length,
+  1,
+  "Centrepoint products without size controls must produce one real product variant",
+);
+assert.equal(
+  centrepointNoSizeFixture.variants[0].color,
+  "Grey",
+  "Centrepoint breadcrumb text must never become a color variant",
+);
+assert.match(
+  apiSource,
+  /params\.skipExistingProducts === true[\s\S]*already_linked_to_shopify_missing_only_guard/,
+  "missing-only imports must have a server-side guard against linked Shopify products",
+);
+assert.match(
+  apiSource,
+  /params\.allowBlockedSheetFallback !== false[\s\S]*isLikelyBlockedImportError/,
+  "audited imports must be able to fail closed when a supplier blocks scraping",
 );
 assert.match(
   scraperSource,

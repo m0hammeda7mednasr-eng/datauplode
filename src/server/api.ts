@@ -2594,6 +2594,8 @@ export async function processGoogleSheetBatch(params: {
   waitForPublishCompletion?: boolean;
   mode?: "sheet_link" | "auto_sync";
   createMissingProducts?: boolean;
+  skipExistingProducts?: boolean;
+  allowBlockedSheetFallback?: boolean;
 }) {
   await ensureShopifyConnection();
   const selectedPricingRuleId = asOptionalString(params.pricingRuleId);
@@ -2763,6 +2765,28 @@ export async function processGoogleSheetBatch(params: {
     if (!isHttpUrl(normalizedUrl)) {
       await registerFailure("Invalid product URL");
       continue;
+    }
+
+    if (params.skipExistingProducts === true) {
+      const existingLink = linkedUrls.has(normalizedUrl)
+        ? { id: undefined }
+        : await prisma.sourceProduct.findFirst({
+            where: {
+              url: normalizedUrl,
+              shopifyProduct: { isNot: null },
+            },
+            select: { id: true },
+          });
+      if (existingLink) {
+        skipped.push({
+          rowNumber: row.rowNumber,
+          url: normalizedUrl,
+          reason: "already_linked_to_shopify_missing_only_guard",
+          sourceProductId: existingLink.id,
+        });
+        seenMap[fingerprintHash] = Date.now();
+        continue;
+      }
     }
 
     const rowCollectionNames = row.collection
@@ -3145,7 +3169,12 @@ export async function processGoogleSheetBatch(params: {
             sourceProductId: existing?.id,
           });
         }
-      } else if (isLikelyBlockedImportError(error) && row.price !== null && PricingEngine.validatePrice(row.price)) {
+      } else if (
+        params.allowBlockedSheetFallback !== false &&
+        isLikelyBlockedImportError(error) &&
+        row.price !== null &&
+        PricingEngine.validatePrice(row.price)
+      ) {
         try {
           const fallbackProduct = await buildBlockedSheetFallbackProduct({
             url: normalizedUrl,
@@ -3611,6 +3640,9 @@ async function publishPreparedProductToQueue(params: {
         variants: { create: variantRecords },
       },
     });
+  }, {
+    maxWait: 10_000,
+    timeout: 30_000,
   });
 
   const job = await QueueService.addTask("PUBLISH_TO_SHOPIFY", {
@@ -4277,6 +4309,8 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
   const createManualReview = req.body?.createManualReview !== false;
   const processOnlyNewRows = req.body?.processOnlyNewRows === true;
   const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
+  const skipExistingProducts = req.body?.skipExistingProducts === true;
+  const allowBlockedSheetFallback = req.body?.allowBlockedSheetFallback !== false;
 
   if (!sheetUrl) {
     return res.status(400).json({ error: "sheetUrl is required" });
@@ -4291,6 +4325,8 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
       createManualReview,
       processOnlyNewRows,
       waitForPublishCompletion,
+      skipExistingProducts,
+      allowBlockedSheetFallback,
       mode: processOnlyNewRows ? "auto_sync" : "sheet_link",
     });
     res.json(result);

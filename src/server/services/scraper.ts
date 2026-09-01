@@ -8343,7 +8343,7 @@ function filterCentrepointProductImages(
   return images.filter((image) => isCentrepointProductImageUrl(image.url));
 }
 
-function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
+export function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
   const $ = cheerio.load(html);
   const product = extractGenericProductFromHtml(html, url, "Centrepoint");
   const jsonLdProduct = extractProductJsonLdFromHtml(html);
@@ -8393,7 +8393,19 @@ function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
         stockStatus,
         imageUrl: images[0]?.url,
       }))
-    : product.variants;
+    : [
+        {
+          sourceVariantId: productId || "centrepoint-default",
+          sku: productId || "CP-DEFAULT",
+          color: color || undefined,
+          price: product.price,
+          currency: product.currency,
+          optionValues: buildVariantOptionValues(color),
+          available: stockStatus !== "out_of_stock",
+          stockStatus,
+          imageUrl: images[0]?.url,
+        },
+      ];
 
   return normalizeProductOptionsAndVariants({
     ...product,
