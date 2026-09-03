@@ -1,5 +1,6 @@
 name: Fix Shopify Catalog Throttling
 
+# second push intentionally triggers this workflow after registration on main
 on:
   push:
     branches: [main]
@@ -88,8 +89,6 @@ jobs:
           throw new Error(`Shopify API error: ${errors[0].message}`);
         }
 
-        // Pace sequential catalog reads using Shopify's live cost bucket instead of
-        // immediately consuming the next page and provoking a THROTTLED response.
         if (requestedQueryCost > 0 && restoreRate > 0 && currentlyAvailable < requestedQueryCost) {
           const refillMs = Math.ceil(((requestedQueryCost - currentlyAvailable) / restoreRate) * 1000) + 100;
           await sleep(Math.min(10000, Math.max(0, refillMs)));
