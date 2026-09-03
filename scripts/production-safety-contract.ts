@@ -15,6 +15,7 @@ const canaryReadBackWorkflow = read(".github/workflows/shopify-canary-readback.y
 const fullCatalogSync = read("src/server/services/fullCatalogSync.ts");
 const shopifyService = read("src/server/services/shopify.ts");
 const queue = read("src/server/services/queue.ts");
+const shopifyCatalogLinkRoutes = read("src/server/routes/shopify-catalog-link.routes.ts");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
@@ -81,6 +82,19 @@ const assertions: Array<[string, boolean]> = [
     /new PQueue\(\{\s*concurrency:\s*2\s*\}\)/.test(queue) &&
       /typeHint\s*===\s*'SYNC_FULL_CATALOG_BATCH'\s*\?\s*100\s*:\s*0/.test(queue) &&
       /\{\s*priority\s*\}/.test(queue),
+  ],
+  [
+    "Shopify-first catalog scan is deduplicated and throttle-aware",
+    /let scanPromise: Promise<CatalogScan> \| null = null/.test(shopifyCatalogLinkRoutes) &&
+      /if \(scanPromise\) return scanPromise/.test(shopifyCatalogLinkRoutes) &&
+      /SHOPIFY_THROTTLE_RETRIES/.test(shopifyCatalogLinkRoutes) &&
+      /Retry-After/.test(shopifyCatalogLinkRoutes),
+  ],
+  [
+    "Shopify-first catalog scan bounds nested connection cost",
+    /SHOPIFY_PRODUCTS_PER_PAGE = 25/.test(shopifyCatalogLinkRoutes) &&
+      /SHOPIFY_VARIANTS_PER_PRODUCT = 20/.test(shopifyCatalogLinkRoutes) &&
+      /SHOPIFY_PAGE_DELAY_MS/.test(shopifyCatalogLinkRoutes),
   ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [

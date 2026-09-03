@@ -10,9 +10,13 @@ const BIG_SPREADSHEET_ID = "1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w";
 const LEGACY_SPREADSHEET_ID = "13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI";
 const RECONCILE_JOB_TYPE = "SHOPIFY_CATALOG_LINK_RECONCILE:2026-09-03-v1";
 const RECONCILE_CONFIRMATION = "LINK_EXACT_SHOPIFY_CATALOG";
-const SNAPSHOT_TTL_MS = 2 * 60 * 1000;
+const SNAPSHOT_TTL_MS = 10 * 60 * 1000;
 const SHEET_INDEX_TTL_MS = 10 * 60 * 1000;
-const MAX_SHOPIFY_PAGES = 300;
+const SHOPIFY_PRODUCTS_PER_PAGE = 25;
+const SHOPIFY_VARIANTS_PER_PRODUCT = 20;
+const MAX_SHOPIFY_PAGES = 800;
+const SHOPIFY_PAGE_DELAY_MS = 150;
+const SHOPIFY_THROTTLE_RETRIES = 5;
 
 const SHEETS = [
   { spreadsheetId: BIG_SPREADSHEET_ID, spreadsheetName: "dap_data", sheetName: "الورقة1", gid: 0, priority: 0 },
@@ -104,10 +108,31 @@ type CatalogScan = {
 
 let snapshotCache: { expiresAt: number; scan: CatalogScan } | null = null;
 let sheetIndexCache: { expiresAt: number; index: SheetIndex } | null = null;
+let scanPromise: Promise<CatalogScan> | null = null;
 let reconcilePromise: Promise<void> | null = null;
 
 function clean(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isShopifyThrottle(error: unknown) {
+  return /throttl|rate limit|http 429/i.test(clean((error as any)?.message || error));
+}
+
+async function requestShopifyCatalogPage(client: any, query: string, after: string | null) {
+  for (let attempt = 0; attempt <= SHOPIFY_THROTTLE_RETRIES; attempt += 1) {
+    try {
+      return await client.request(query, { after });
+    } catch (error) {
+      if (!isShopifyThrottle(error) || attempt === SHOPIFY_THROTTLE_RETRIES) throw error;
+      await sleep(Math.min(8_000, 1_000 * 2 ** attempt));
+    }
+  }
+  throw new Error("Shopify catalog request exhausted its retry budget");
 }
 
 function normalizeSku(value: unknown) {
@@ -338,11 +363,12 @@ async function readShopifyCatalog() {
   const products: ShopifyCatalogProduct[] = [];
   let after: string | null = null;
   let pages = 0;
+  let hasMore = true;
 
-  while (pages < MAX_SHOPIFY_PAGES) {
-    const data: any = await client.request(`
+  while (hasMore && pages < MAX_SHOPIFY_PAGES) {
+    const data: any = await requestShopifyCatalogPage(client, `
       query SyncEngineCatalogLink($after: String) {
-        products(first: 50, after: $after, sortKey: ID) {
+        products(first: ${SHOPIFY_PRODUCTS_PER_PAGE}, after: $after, sortKey: ID) {
           nodes {
             id
             title
@@ -357,7 +383,7 @@ async function readShopifyCatalog() {
                 ... on MediaImage { image { url } }
               }
             }
-            variants(first: 250) {
+            variants(first: ${SHOPIFY_VARIANTS_PER_PRODUCT}) {
               nodes {
                 id
                 sku
@@ -371,7 +397,7 @@ async function readShopifyCatalog() {
           pageInfo { hasNextPage endCursor }
         }
       }
-    `, { after });
+    `, after);
 
     const page = data?.products;
     for (const product of page?.nodes || []) {
@@ -399,13 +425,17 @@ async function readShopifyCatalog() {
     }
 
     pages += 1;
-    if (!page?.pageInfo?.hasNextPage) break;
+    hasMore = page?.pageInfo?.hasNextPage === true;
+    if (!hasMore) break;
     after = clean(page.pageInfo.endCursor);
     if (!after) throw new Error("Shopify pagination returned hasNextPage without an endCursor");
+    await sleep(SHOPIFY_PAGE_DELAY_MS);
   }
 
-  if (pages >= MAX_SHOPIFY_PAGES) {
-    throw new Error(`Shopify catalog exceeded the safe ${MAX_SHOPIFY_PAGES * 50}-product scan limit`);
+  if (hasMore) {
+    throw new Error(
+      `Shopify catalog exceeded the safe ${MAX_SHOPIFY_PAGES * SHOPIFY_PRODUCTS_PER_PAGE}-product scan limit`,
+    );
   }
 
   return { shopDomain: connection.shopDomain, products, pages };
@@ -513,11 +543,7 @@ function rowView(row: CatalogSheetRow | null | undefined) {
   };
 }
 
-async function scanCatalog(force = false): Promise<CatalogScan> {
-  if (!force && snapshotCache && snapshotCache.expiresAt > Date.now()) {
-    return snapshotCache.scan;
-  }
-
+async function buildCatalogScan(force = false): Promise<CatalogScan> {
   const [sheetIndex, shopifyCatalog, dbLinks] = await Promise.all([
     loadSheetIndex(force),
     readShopifyCatalog(),
@@ -678,6 +704,30 @@ async function scanCatalog(force = false): Promise<CatalogScan> {
   };
   snapshotCache = { expiresAt: Date.now() + SNAPSHOT_TTL_MS, scan };
   return scan;
+}
+
+async function scanCatalog(force = false): Promise<CatalogScan> {
+  if (!force && snapshotCache && snapshotCache.expiresAt > Date.now()) {
+    return snapshotCache.scan;
+  }
+  if (scanPromise) return scanPromise;
+
+  const staleScan = snapshotCache?.scan || null;
+  scanPromise = buildCatalogScan(force);
+  try {
+    return await scanPromise;
+  } catch (error) {
+    if (staleScan) {
+      console.warn("Shopify catalog refresh failed; serving the last successful snapshot", {
+        error: clean((error as any)?.message || error),
+        generatedAt: staleScan.generatedAt,
+      });
+      return staleScan;
+    }
+    throw error;
+  } finally {
+    scanPromise = null;
+  }
 }
 
 function optionMap(selectedOptions: Array<{ name: string; value: string }>) {
@@ -1054,7 +1104,9 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Shopify catalog link-state failed", error);
-    return res.status(500).json({
+    const throttled = isShopifyThrottle(error);
+    if (throttled) res.setHeader("Retry-After", "30");
+    return res.status(throttled ? 503 : 500).json({
       success: false,
       code: "SHOPIFY_CATALOG_LINK_STATE_FAILED",
       error: clean(error?.message || error),
