@@ -1,0 +1,111 @@
+name: Catalog Live Reconcile
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/catalog-live-reconcile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-live-reconcile
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      API_BASE: https://datauplode-production.up.railway.app
+    steps:
+      - name: Trigger persistent catalog refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --retry 5 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            "$API_BASE/api/shopify-catalog/link-state?refresh=true&offset=0&limit=1" \
+            | tee /tmp/catalog.json \
+            | jq '{success,counts,latestJob,scan}'
+
+      - name: Wait for full Shopify index
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 50); do
+            curl --fail-with-body --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$API_BASE/api/shopify-catalog/link-state?offset=0&limit=1" > /tmp/catalog.json
+
+            total=$(jq -r '.counts.shopifyTotal // 0' /tmp/catalog.json)
+            status=$(jq -r '.latestJob.status // "none"' /tmp/catalog.json)
+            type=$(jq -r '.latestJob.type // "none"' /tmp/catalog.json)
+            read=$(jq -r '.scan.shopifyProductsRead // .latestJob.result.shopifyProductsRead // 0' /tmp/catalog.json)
+            echo "attempt=$attempt total=$total indexed=$read job=$type status=$status"
+
+            if [ "$total" -ge 14000 ] && [ "$status" = "completed" ]; then
+              ready=1
+              break
+            fi
+            if [ "$status" = "failed" ]; then
+              jq '{counts,latestJob,scan}' /tmp/catalog.json
+              exit 1
+            fi
+            sleep 20
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Full catalog index did not become ready in time"
+            jq '{counts,latestJob,scan}' /tmp/catalog.json
+            exit 1
+          fi
+          jq '{counts,latestJob,scan}' /tmp/catalog.json
+
+      - name: Link all exact matches
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            -X POST "$API_BASE/api/shopify-catalog/reconcile" \
+            -H 'Content-Type: application/json' \
+            --data '{"confirm":"LINK_EXACT_SHOPIFY_CATALOG"}' \
+            | tee /tmp/reconcile.json \
+            | jq .
+
+      - name: Wait for exact-link reconcile
+        shell: bash
+        run: |
+          set -euo pipefail
+          done_ok=0
+          for attempt in $(seq 1 70); do
+            curl --fail-with-body --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$API_BASE/api/shopify-catalog/link-state?offset=0&limit=1" > /tmp/catalog.json
+
+            status=$(jq -r '.latestJob.status // "none"' /tmp/catalog.json)
+            type=$(jq -r '.latestJob.type // "none"' /tmp/catalog.json)
+            linked=$(jq -r '.latestJob.result.linked // 0' /tmp/catalog.json)
+            total=$(jq -r '.counts.shopifyTotal // 0' /tmp/catalog.json)
+            ready=$(jq -r '.counts.matchedReady // 0' /tmp/catalog.json)
+            review=$(jq -r '.counts.needsReview // 0' /tmp/catalog.json)
+            no_match=$(jq -r '.counts.needsLink // 0' /tmp/catalog.json)
+            echo "attempt=$attempt total=$total job=$type status=$status linked_this_job=$linked ready=$ready review=$review no_match=$no_match"
+
+            if [[ "$type" == SHOPIFY_CATALOG_LINK_RECONCILE:* ]] && [ "$status" = "completed" ]; then
+              done_ok=1
+              break
+            fi
+            if [[ "$type" == SHOPIFY_CATALOG_LINK_RECONCILE:* ]] && [ "$status" = "failed" ]; then
+              jq '{counts,latestJob,scan}' /tmp/catalog.json
+              exit 1
+            fi
+            sleep 20
+          done
+
+          if [ "$done_ok" -ne 1 ]; then
+            echo "Exact-link reconcile did not finish in time"
+            jq '{counts,latestJob,scan}' /tmp/catalog.json
+            exit 1
+          fi
+          jq '{counts,latestJob,scan}' /tmp/catalog.json
