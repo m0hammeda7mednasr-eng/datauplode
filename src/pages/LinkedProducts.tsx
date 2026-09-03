@@ -92,6 +92,7 @@ async function loadCatalog(search: string, status: string, offset: number, refre
         refresh: refresh ? 'true' : undefined,
       },
     });
+    if (data?.warming) throw new Error('Shopify catalog snapshot is warming');
     return data;
   } catch (error: any) {
     const status = Number(error?.response?.status || 0);
