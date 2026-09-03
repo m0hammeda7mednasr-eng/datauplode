@@ -10,12 +10,10 @@ function isCatalogLinkQuery(query: string) {
 function makeCatalogLinkQuerySafe(query: string) {
   if (!isCatalogLinkQuery(query)) return query;
 
-  return query
-    .replace(
-      /products\(first:\s*50,\s*after:\s*\$after,\s*sortKey:\s*ID\)/,
-      "products(first: 10, after: $after, sortKey: ID)",
-    )
-    .replace(/variants\(first:\s*250\)/g, "variants(first: 50)");
+  // Keep 50 products per page so the existing 300-page guard can cover the
+  // full ~15k-product catalog. Reduce only the nested variant connection so
+  // Shopify does not receive the original 50 x 250 nested query cost.
+  return query.replace(/variants\(first:\s*250\)/g, "variants(first: 15)");
 }
 
 function retryableShopifyError(error: any) {
@@ -61,4 +59,4 @@ ShopifyGraphqlClient.prototype.request = (async function patchedShopifyRequest<T
   throw new Error("Shopify request exhausted automatic retries");
 }) as typeof ShopifyGraphqlClient.prototype.request;
 
-console.log("[shopify-hotfix] catalog query safety + retry patch active");
+console.log("[shopify-hotfix] full-catalog scan + bounded variant query + retry patch active");
