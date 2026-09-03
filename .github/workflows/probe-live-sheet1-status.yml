@@ -69,4 +69,4 @@ jobs:
             echo '```'
           } > issue-body.md
           gh issue edit 5 --repo "$GITHUB_REPOSITORY" --body-file issue-body.md
-          # read-only live status refresh 2026-09-03 23:00 Cairo after branch alignment
+          # legacy Railway source trigger; code content remains aligned with main
