@@ -15,6 +15,7 @@ const CACHE_TABLE = "ShopifyCatalogIndexV2";
 const PAGE_SIZE = 50;
 const VARIANT_SAMPLE_SIZE = 10;
 const MAX_SHOPIFY_PAGES = 2000;
+const STALE_CATALOG_JOB_MS = 5 * 60 * 1000;
 const SHEET_INDEX_TTL_MS = 10 * 60 * 1000;
 
 const SHEETS = [
@@ -654,7 +655,22 @@ async function updateJob(jobId: string, result: Record<string, any>, status?: st
   });
 }
 
-async function runCatalogJob(jobId: string, linkExact: boolean) {
+function jobResult(job: { result?: string | null } | null | undefined) {
+  return parseJson(job?.result);
+}
+
+function jobHeartbeat(job: { result?: string | null; startedAt?: Date | null; createdAt?: Date | null }) {
+  const result = jobResult(job);
+  const value = result.lastPageAt || job.startedAt || job.createdAt;
+  const timestamp = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function isStaleCatalogJob(job: { result?: string | null; startedAt?: Date | null; createdAt?: Date | null }) {
+  return Date.now() - jobHeartbeat(job) > STALE_CATALOG_JOB_MS;
+}
+
+async function runCatalogJob(jobId: string, linkExact: boolean, resumeAfter: string | null = null) {
   const started = Date.now();
   const result: Record<string, any> = {
     stage: "starting",
@@ -668,6 +684,8 @@ async function runCatalogJob(jobId: string, linkExact: boolean) {
     needsLink: 0,
     failed: 0,
     scraperApiCreditsUsed: 0,
+    resumed: Boolean(resumeAfter),
+    nextCursor: resumeAfter,
   };
   try {
     await ensureCacheTable();
@@ -678,7 +696,7 @@ async function runCatalogJob(jobId: string, linkExact: boolean) {
     result.sheetErrors = sheetIndex.errors.length;
     await updateJob(jobId, result);
     const client = await ShopifyService.getClientFromDb(prisma);
-    let after: string | null = null;
+    let after: string | null = resumeAfter;
     let pages = 0;
     result.stage = linkExact ? "linking_exact_matches" : "indexing_shopify";
     while (pages < MAX_SHOPIFY_PAGES) {
@@ -732,6 +750,7 @@ async function runCatalogJob(jobId: string, linkExact: boolean) {
       result.shopifyPagesRead = pages;
       result.shopifyProductsRead += page.products.length;
       result.lastPageAt = new Date().toISOString();
+      result.nextCursor = page.hasNextPage ? page.endCursor : null;
       result.elapsedSeconds = Math.round((Date.now() - started) / 1000);
       await updateJob(jobId, result);
       if (!page.hasNextPage) break;
@@ -757,10 +776,29 @@ async function startBackgroundJob(linkExact: boolean) {
   if (currentPromise) return { alreadyRunning: true, job: null };
   const type = linkExact ? RECONCILE_JOB_TYPE : REFRESH_JOB_TYPE;
   const existing = await prisma.syncJob.findFirst({
-    where: { type, status: { in: ["pending", "running"] } },
+    where: { type: { startsWith: "SHOPIFY_CATALOG_" }, status: { in: ["pending", "running"] } },
     orderBy: { createdAt: "desc" },
   });
-  if (existing) return { alreadyRunning: true, job: existing };
+  if (existing && !isStaleCatalogJob(existing)) return { alreadyRunning: true, job: existing };
+
+  let resumeAfter: string | null = null;
+  if (existing) {
+    const previous = jobResult(existing);
+    if (existing.type === type) resumeAfter = clean(previous.nextCursor) || null;
+    await prisma.syncJob.updateMany({
+      where: { id: existing.id, status: { in: ["pending", "running"] } },
+      data: {
+        status: "failed",
+        completedAt: new Date(),
+        result: JSON.stringify({
+          ...previous,
+          stage: "stale_recovered",
+          error: "Catalog worker heartbeat expired; a replacement worker was started automatically.",
+          recoveredAt: new Date().toISOString(),
+        }),
+      },
+    });
+  }
   const job = await prisma.syncJob.create({
     data: {
       type,
@@ -772,10 +810,11 @@ async function startBackgroundJob(linkExact: boolean) {
         googleSheetWrites: 0,
         scraperApiCreditsUsed: 0,
         requestedAt: new Date().toISOString(),
+        resumeAfter,
       }),
     },
   });
-  const promise = runCatalogJob(job.id, linkExact).finally(() => {
+  const promise = runCatalogJob(job.id, linkExact, resumeAfter).finally(() => {
     if (linkExact) reconcilePromise = null;
     else refreshPromise = null;
   });
@@ -793,6 +832,23 @@ async function latestCatalogJob() {
   });
   if (!job) return null;
   return { ...job, result: parseJson(job.result) };
+}
+
+async function knownShopifyCatalogTotal(indexedTotal: number) {
+  const jobs = await prisma.syncJob.findMany({
+    where: { type: { startsWith: "SHOPIFY_CATALOG_" } },
+    orderBy: { createdAt: "desc" },
+    take: 25,
+    select: { result: true },
+  });
+  return jobs.reduce((known, job) => {
+    const result = jobResult(job);
+    return Math.max(
+      known,
+      Number(result.shopifyProducts || 0),
+      result.stage === "completed" ? Number(result.shopifyProductsRead || 0) : 0,
+    );
+  }, indexedTotal);
 }
 
 async function dbCounts() {
@@ -1020,11 +1076,11 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     });
     const grouped = await prisma.$queryRawUnsafe<any[]>(`SELECT "matchStatus", COUNT(*)::int AS count FROM "${CACHE_TABLE}" GROUP BY "matchStatus"`);
     const group = new Map(grouped.map((entry) => [String(entry.matchStatus), Number(entry.count || 0)]));
-    const shopifyTotal = [...group.values()].reduce((sum, count) => sum + count, 0);
+    const indexedTotal = [...group.values()].reduce((sum, count) => sum + count, 0);
     const activeSync = group.get("active") || 0;
     const pausedOrLinked = group.get("linked") || 0;
     const counts = {
-      shopifyTotal,
+      shopifyTotal: await knownShopifyCatalogTotal(indexedTotal),
       linked: activeSync + pausedOrLinked,
       activeSync,
       matchedReady: group.get("matched") || 0,
@@ -1034,7 +1090,8 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     };
     const connection = await prisma.shopifyConnection.findFirst({ where: { isConnected: true }, select: { shopDomain: true } });
     const latestJob = await latestCatalogJob();
-    if (!autoRefreshStarted && !refresh && latestJob?.status !== "running" && latestJob?.status !== "pending") {
+    const latestJobIsStale = latestJob && ["pending", "running"].includes(latestJob.status) && isStaleCatalogJob(latestJob);
+    if (!autoRefreshStarted && !refresh && (!latestJob || !["pending", "running"].includes(latestJob.status) || latestJobIsStale)) {
       autoRefreshStarted = true;
       setTimeout(() => {
         void startBackgroundJob(false).catch((error) => console.error("[shopify-catalog] automatic refresh start failed:", error));
@@ -1054,6 +1111,8 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
       scan: {
         mode: "database_first_background_shopify_index",
         shopifyProductsRead: Number(latestJob?.result?.shopifyProductsRead || counts.shopifyTotal),
+        indexedTotal,
+        pendingProducts: Math.max(0, counts.shopifyTotal - indexedTotal),
         shopifyPagesRead: Number(latestJob?.result?.shopifyPagesRead || 0),
         sheetRowsRead: Number(latestJob?.result?.sheetRowsRead || 0),
         scraperApiCreditsUsed: 0,

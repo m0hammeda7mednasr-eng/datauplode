@@ -85,22 +85,23 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "Shopify-first catalog scan is deduplicated and throttle-aware",
-    /let scanPromise: Promise<CatalogScan> \| null = null/.test(shopifyCatalogLinkRoutes) &&
-      /if \(scanPromise\) return scanPromise/.test(shopifyCatalogLinkRoutes) &&
-      /SHOPIFY_THROTTLE_RETRIES/.test(shopifyCatalogLinkRoutes) &&
-      /Retry-After/.test(shopifyCatalogLinkRoutes),
+    /let refreshPromise: Promise<void> \| null = null/.test(shopifyCatalogLinkRoutes) &&
+      /if \(currentPromise\) return \{ alreadyRunning: true/.test(shopifyCatalogLinkRoutes) &&
+      /shopifyRequestWithBackoff/.test(shopifyCatalogLinkRoutes) &&
+      /maxAttempts = 9/.test(shopifyCatalogLinkRoutes),
   ],
   [
     "Shopify-first catalog scan bounds nested connection cost",
-    /SHOPIFY_PRODUCTS_PER_PAGE = 25/.test(shopifyCatalogLinkRoutes) &&
-      /SHOPIFY_VARIANTS_PER_PRODUCT = 20/.test(shopifyCatalogLinkRoutes) &&
-      /SHOPIFY_PAGE_DELAY_MS/.test(shopifyCatalogLinkRoutes),
+    /PAGE_SIZE = 50/.test(shopifyCatalogLinkRoutes) &&
+      /VARIANT_SAMPLE_SIZE = 10/.test(shopifyCatalogLinkRoutes) &&
+      /setTimeout\(resolve, 250\)/.test(shopifyCatalogLinkRoutes),
   ],
   [
-    "Shopify-first catalog endpoint warms snapshots without blocking HTTP",
-    /if \(!snapshotCache\)[\s\S]*void scanCatalog\(force\)[\s\S]*status\(202\)[\s\S]*warming: true/.test(
-      shopifyCatalogLinkRoutes,
-    ),
+    "Shopify-first catalog endpoint persists progress and recovers stale workers",
+    /ShopifyCatalogIndexV2/.test(shopifyCatalogLinkRoutes) &&
+      /isStaleCatalogJob/.test(shopifyCatalogLinkRoutes) &&
+      /nextCursor/.test(shopifyCatalogLinkRoutes) &&
+      /void startBackgroundJob\(false\)/.test(shopifyCatalogLinkRoutes),
   ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [

@@ -214,6 +214,10 @@ export default function LinkedProducts() {
 
       {catalog?.legacy && <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">The full Shopify catalog scan is temporarily unavailable. Showing verified database-linked products and current sync totals while Shopify recovers.</div>}
 
+      {!catalog?.legacy && Number(catalog?.scan?.pendingProducts || 0) > 0 && <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs font-bold text-sky-900">
+        Catalog indexing is in progress: {Number(catalog?.scan?.indexedTotal || 0).toLocaleString()} of {Number(counts.shopifyTotal || 0).toLocaleString()} Shopify products are currently searchable. Existing matches remain available while the remaining products are indexed.
+      </div>}
+
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Metric label="Shopify Products" value={counts.shopifyTotal} tone="slate" />
         <Metric label="Linked" value={counts.linked} tone="blue" />
