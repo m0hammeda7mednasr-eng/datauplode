@@ -1,0 +1,44 @@
+name: Railway Readiness Probe
+
+on:
+  push:
+    branches:
+      - probe/railway-readiness-20260904
+    paths:
+      - .github/workflows/railway-readiness-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Railway readiness read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl --silent --show-error --max-time 25 --output ready.json --write-out '%{http_code}' https://datauplode-production.up.railway.app/api/ready || true)"
+          echo "HTTP_STATUS=$code"
+          node <<'NODE'
+          const fs = require('node:fs');
+          let b = {};
+          try { b = JSON.parse(fs.readFileSync('ready.json', 'utf8')); }
+          catch { console.log('READY_JSON_PARSE=false'); process.exit(0); }
+          const out = {
+            databaseOk: b?.database?.ok === true,
+            databaseTarget: b?.database?.target || null,
+            projectRefPinned: b?.database?.projectRefPinned === true,
+            projectRefMatched: b?.database?.projectRefMatched === true,
+            revision: b?.deployment?.revision || null,
+            revisionVerified: b?.deployment?.revisionVerified === true,
+            branch: b?.deployment?.branch || null,
+            productionEnvironment: b?.platform?.productionEnvironment === true,
+            writeSafetyReady: b?.platform?.writeSafetyReady === true,
+            safeMode: b?.configuration?.safeMode === true,
+            runtimeWriteGateEnabled: b?.configuration?.runtimeWriteGateEnabled === true,
+            shopifyConfigured: b?.configuration?.shopifyConfigured ?? null,
+          };
+          console.log('READINESS=' + JSON.stringify(out));
+          NODE
