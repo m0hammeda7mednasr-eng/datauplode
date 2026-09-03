@@ -19,6 +19,12 @@ const FULL_CATALOG_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_FULL_CATALOG_
 const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 5);
 const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
+const FULL_CATALOG_TARGET_DOMAINS = String(
+  process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "centrepointstores.com,next.ae",
+)
+  .split(",")
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
 const PRICE_STOCK_TARGET_SPREADSHEET_IDS = new Set(
   String(
     process.env.SYNC_PRICE_STOCK_SPREADSHEET_IDS ||
@@ -1999,10 +2005,9 @@ export class QueueService {
     const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
     const candidateWhere: Prisma.SourceProductWhereInput = {
         syncStatus: { not: 'paused' },
-        OR: [
-          { url: { contains: 'centrepointstores.com', mode: 'insensitive' } },
-          { url: { contains: 'next.ae', mode: 'insensitive' } },
-        ],
+        OR: FULL_CATALOG_TARGET_DOMAINS.map((domain) => ({
+          url: { contains: domain, mode: 'insensitive' as const },
+        })),
         raw: { contains: 'sheetPriceMultiplier' },
         shopifyProduct: { is: { syncEnabled: true } },
         AND: [
