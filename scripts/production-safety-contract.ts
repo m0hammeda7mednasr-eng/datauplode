@@ -58,6 +58,12 @@ const assertions: Array<[string, boolean]> = [
       /new Set\(skus\)\.size\s*!==\s*skus\.length/.test(fullCatalogSync),
   ],
   [
+    "full-catalog sync has an exact supplier allowlist",
+    /host === "www\.centrepointstores\.com"/.test(fullCatalogSync) &&
+      /host === "www\.next\.ae"/.test(fullCatalogSync) &&
+      /Only linked Centrepoint and Next UAE products/.test(fullCatalogSync),
+  ],
+  [
     "full-catalog rolling batch remains capped at five",
     /Math\.min\(5,\s*Math\.floor\(FULL_CATALOG_SYNC_BATCH_SIZE\)\)/.test(queue),
   ],

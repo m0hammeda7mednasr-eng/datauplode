@@ -24,6 +24,18 @@ function parseRaw(value: string | null | undefined) {
   }
 }
 
+function isSupportedCatalogSource(url: string) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "www.centrepointstores.com" ||
+      host === "centrepointstores.com" ||
+      host === "www.next.ae" ||
+      host === "next.ae";
+  } catch {
+    return false;
+  }
+}
+
 function filenameFor(url: string, index: number) {
   try {
     const name = new URL(url).pathname.split("/").filter(Boolean).at(-1);
@@ -77,8 +89,8 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
       shopifyProduct: { include: { variants: true } },
     },
   });
-  if (!product?.shopifyProduct || !product.url.includes("centrepointstores.com")) {
-    throw new Error("Only linked Centrepoint products are enabled for full catalog sync");
+  if (!product?.shopifyProduct || !isSupportedCatalogSource(product.url)) {
+    throw new Error("Only linked Centrepoint and Next UAE products are enabled for full catalog sync");
   }
 
   const oldRaw = parseRaw(product.raw);

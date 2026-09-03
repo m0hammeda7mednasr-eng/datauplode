@@ -1999,7 +1999,10 @@ export class QueueService {
     const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
     const candidateWhere: Prisma.SourceProductWhereInput = {
         syncStatus: { not: 'paused' },
-        url: { contains: 'centrepointstores.com', mode: 'insensitive' },
+        OR: [
+          { url: { contains: 'centrepointstores.com', mode: 'insensitive' } },
+          { url: { contains: 'next.ae', mode: 'insensitive' } },
+        ],
         raw: { contains: 'sheetPriceMultiplier' },
         shopifyProduct: { is: { syncEnabled: true } },
         AND: [
