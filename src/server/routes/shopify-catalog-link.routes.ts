@@ -1046,7 +1046,25 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     const offset = Math.max(0, Number(req.query.offset || 0) || 0);
     const search = clean(req.query.search).toLowerCase();
     const status = clean(req.query.status).toLowerCase();
-    const scan = await scanCatalog(force);
+    if (!snapshotCache) {
+      void scanCatalog(force).catch((error) => {
+        console.error("Background Shopify catalog warm-up failed", error);
+      });
+      res.setHeader("Retry-After", "30");
+      return res.status(202).json({
+        success: true,
+        warming: true,
+        retryAfterSeconds: 30,
+        message: "Shopify catalog snapshot is warming in the background.",
+      });
+    }
+
+    if (force || snapshotCache.expiresAt <= Date.now()) {
+      void scanCatalog(force).catch((error) => {
+        console.error("Background Shopify catalog refresh failed", error);
+      });
+    }
+    const scan = snapshotCache.scan;
     const latestJob = await prisma.syncJob.findFirst({
       where: { type: RECONCILE_JOB_TYPE },
       orderBy: { createdAt: "desc" },

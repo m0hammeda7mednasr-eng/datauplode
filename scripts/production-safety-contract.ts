@@ -96,6 +96,12 @@ const assertions: Array<[string, boolean]> = [
       /SHOPIFY_VARIANTS_PER_PRODUCT = 20/.test(shopifyCatalogLinkRoutes) &&
       /SHOPIFY_PAGE_DELAY_MS/.test(shopifyCatalogLinkRoutes),
   ],
+  [
+    "Shopify-first catalog endpoint warms snapshots without blocking HTTP",
+    /if \(!snapshotCache\)[\s\S]*void scanCatalog\(force\)[\s\S]*status\(202\)[\s\S]*warming: true/.test(
+      shopifyCatalogLinkRoutes,
+    ),
+  ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [
     "sheet import autostart default off",
