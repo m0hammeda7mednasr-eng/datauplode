@@ -52,6 +52,12 @@ const assertions: Array<[string, boolean]> = [
     "full-catalog rolling batch remains capped at five",
     /Math\.min\(5,\s*Math\.floor\(FULL_CATALOG_SYNC_BATCH_SIZE\)\)/.test(queue),
   ],
+  [
+    "full-catalog batch has queue priority without increasing concurrency",
+    /new PQueue\(\{\s*concurrency:\s*2\s*\}\)/.test(queue) &&
+      /typeHint\s*===\s*'SYNC_FULL_CATALOG_BATCH'\s*\?\s*100\s*:\s*0/.test(queue) &&
+      /\{\s*priority\s*\}/.test(queue),
+  ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [
     "sheet import autostart default off",

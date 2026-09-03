@@ -1023,7 +1023,7 @@ export class QueueService {
     });
 
     // Start processing async
-    this.processJob(job.id);
+    this.processJob(job.id, type);
     
     return job;
   }
@@ -1107,7 +1107,7 @@ export class QueueService {
           data: { status: 'pending', startedAt: null },
         });
       }
-      this.processJob(job.id);
+      this.processJob(job.id, job.type);
     }
 
     if (jobs.length > 0) {
@@ -2098,7 +2098,8 @@ export class QueueService {
     };
   }
 
-  private static processJob(jobId: string) {
+  private static processJob(jobId: string, typeHint?: string) {
+    const priority = typeHint === 'SYNC_FULL_CATALOG_BATCH' ? 100 : 0;
     void this.queue.add(async () => {
       let job: any = null;
       try {
@@ -2650,6 +2651,6 @@ export class QueueService {
           );
         }
       }
-    });
+    }, { priority });
   }
 }
