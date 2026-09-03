@@ -94,21 +94,26 @@ async function loadCatalog(search: string, status: string, offset: number, refre
     });
     return data;
   } catch (error: any) {
-    if (error?.response?.status !== 404) throw error;
-    const { data } = await axios.get('/api/products', { params: { limit: 200 } });
+    const status = Number(error?.response?.status || 0);
+    if (status === 401 || status === 403) throw error;
+    const [{ data }, { data: stats }] = await Promise.all([
+      axios.get('/api/products', { params: { limit: 200 } }),
+      axios.get('/api/products/stats'),
+    ]);
     const items = Array.isArray(data) ? data.map(legacyProduct) : [];
-    const activeSync = items.filter((item) => item.matchStatus === 'active').length;
+    const linked = Number(stats?.totalLinked || items.length);
+    const activeSync = Number(stats?.activeSync || 0);
     return {
       success: true,
       legacy: true,
       counts: {
-        shopifyTotal: items.length,
-        linked: items.length,
+        shopifyTotal: linked,
+        linked,
         activeSync,
         matchedReady: 0,
         needsLink: 0,
-        needsReview: 0,
-        pausedOrLinked: items.length - activeSync,
+        needsReview: Number(stats?.pendingReview || 0),
+        pausedOrLinked: Math.max(0, linked - activeSync),
       },
       filteredTotal: items.length,
       offset: 0,
@@ -206,7 +211,7 @@ export default function LinkedProducts() {
         </div>
       </div>
 
-      {catalog?.legacy && <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">The new frontend is live but Railway is still serving the older backend revision. Until Railway rolls forward, this page falls back to the previous DB-linked list.</div>}
+      {catalog?.legacy && <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800">The full Shopify catalog scan is temporarily unavailable. Showing verified database-linked products and current sync totals while Shopify recovers.</div>}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Metric label="Shopify Products" value={counts.shopifyTotal} tone="slate" />
