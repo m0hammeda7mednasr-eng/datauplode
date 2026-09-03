@@ -4,6 +4,7 @@ import axios from "axios";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
+import { reserveScraperApiCredits } from "./scraperCreditBudget.js";
 
 export interface NormalizedProduct {
   source: {
@@ -728,10 +729,19 @@ async function fetchHtmlViaManagedBypassProvider(
   url: string,
   options: ManagedBypassOptions,
 ): Promise<string> {
-  noteProviderUsage(provider);
   if (provider === "scraperapi") {
+    const estimatedCredits = options.ultraPremium
+      ? (options.jsRender ? 75 : 30)
+      : options.premium && options.jsRender
+        ? 25
+        : options.premium || options.jsRender
+          ? 10
+          : 1;
+    await reserveScraperApiCredits(url, estimatedCredits);
+    noteProviderUsage(provider, estimatedCredits);
     return fetchHtmlViaScraperApi(url, options);
   }
+  noteProviderUsage(provider);
   if (provider === "zenrows") {
     return fetchHtmlViaZenRows(url, options);
   }
@@ -8851,7 +8861,7 @@ export class NextScraper implements SupplierScraper {
           try {
             const fastBypassOptions: ManagedBypassOptions = {
               deviceType: envBypassDevice("NEXT_FAST_BYPASS_DEVICE", "mobile"),
-              jsRender: false,
+              jsRender: envFlag("NEXT_FAST_BYPASS_RENDER", false),
               premium: envFlag("NEXT_FAST_BYPASS_PREMIUM", false),
             };
             const html = envFlag("NEXT_FAST_BYPASS_RACE", true)
@@ -8987,7 +8997,7 @@ export class NextScraper implements SupplierScraper {
           try {
             const bypassOptions: ManagedBypassOptions = {
               deviceType: envBypassDevice("NEXT_BYPASS_DEVICE", "mobile"),
-              jsRender: false,
+              jsRender: envFlag("NEXT_BYPASS_RENDER", false),
               premium: envFlag("NEXT_BYPASS_PREMIUM", false),
             };
             const html = envFlag("NEXT_BYPASS_RACE", true)

@@ -78,6 +78,10 @@ type GroupResult = {
   skuChanged?: boolean;
   readbackVerified?: boolean;
   matchSource?: "database" | "shopify_fallback";
+  variantLinks?: Array<{
+    shopifyVariantId: string;
+    sourceVariantIndex: number;
+  }>;
   sheetWritten?: boolean;
   reason?: string;
 };
@@ -1000,6 +1004,7 @@ const mapped = product.variants.map((current: any) => {
     multiplier: group.multiplier,
     productCode,
     shopifyProductId: product.id,
+    shopifyHandle: clean(product.handle),
     shopifyTitle: product.title,
     expectedSku,
     canonicalSize,
@@ -1009,6 +1014,10 @@ const mapped = product.variants.map((current: any) => {
     skuChanged,
     readbackVerified: true,
     matchSource: located.matchSource,
+    variantLinks: mapped.map((entry: any) => ({
+      shopifyVariantId: clean(entry.current.id),
+      sourceVariantIndex: sourceVariants.indexOf(entry.source),
+    })),
   };
 }
 

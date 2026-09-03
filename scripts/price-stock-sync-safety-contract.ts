@@ -3,6 +3,8 @@ import fs from 'node:fs';
 const queue = fs.readFileSync('src/server/services/queue.ts', 'utf8');
 const server = fs.readFileSync('server.ts', 'utf8');
 const railway = fs.readFileSync('.env.railway.example', 'utf8');
+const scraper = fs.readFileSync('src/server/services/scraper.ts', 'utf8');
+const budget = fs.readFileSync('src/server/services/scraperCreditBudget.ts', 'utf8');
 
 function requireContract(condition: boolean, message: string) {
   if (!condition) throw new Error(`Price/stock sync safety contract failed: ${message}`);
@@ -26,6 +28,9 @@ requireContract(/^SYNC_PRICE_STOCK_MIN_AGE_MINUTES=1440$/m.test(railway), 'defau
 requireContract(queue.includes('isPriceStockTargetProduct(product)'), 'every product sync must enforce the two-sheet allowlist');
 requireContract(queue.includes('hasSheetRow && hasMultiplier && hasSku'), 'legacy sheet products must require row, multiplier, and SKU provenance');
 requireContract(queue.includes("action: 'SYNC_PRICE_STOCK_FAILED'"), 'failed supplier checks must be audited');
+requireContract(scraper.includes('reserveScraperApiCredits(url, estimatedCredits)'), 'ScraperAPI calls must reserve weighted credits');
+requireContract(budget.includes('SCRAPERAPI_MONTHLY_CREDIT_LIMIT'), 'ScraperAPI must support a durable monthly credit cap');
+requireContract(budget.includes('SCRAPERAPI_DAILY_CREDIT_LIMIT'), 'ScraperAPI must support a durable daily credit cap');
 requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked products must move behind the daily rolling queue');
 requireContract(railway.includes('1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w,13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI'), 'Railway must pin both authorized spreadsheets');
 

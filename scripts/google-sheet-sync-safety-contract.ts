@@ -39,6 +39,17 @@ assert.equal(
   `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=93159589`,
   "fragment-only gid must not silently fall back to Sheet 1",
 );
+
+assert.match(
+  apiSource,
+  /params\.createMissingProducts === false \|\| params\.linkExistingProductsOnly/,
+  "existing-only linking must never fall through to product creation",
+);
+assert.match(
+  apiSource,
+  /persistVerifiedExistingShopifyLink\(/,
+  "verified existing products must be persisted as durable links",
+);
 assert.equal(Object.keys(APPROVED_CATALOG_SHEETS).length, 8, "only the approved first eight tabs may use catalog writes");
 assert.equal(FIRST_EIGHT_CATALOG_SHEETS.length, 8, "the continuous worker must cover eight tabs");
 assert.equal(MAX_CATALOG_TARGET_ROWS, 5000, "the approved run must be hard-capped at 5000 unique products");

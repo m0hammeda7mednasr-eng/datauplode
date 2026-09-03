@@ -19,6 +19,7 @@ import { ShopifyService } from "./services/shopify.js";
 import { PersistentJsonCache } from "./services/persistentCache.js";
 import { reconcileExistingShopifyProductForImport } from "./firstFiveSheetsReconcile.js";
 import { applyDeterministicDabSkus } from "./services/dabSku.js";
+import { persistVerifiedExistingShopifyLink } from "./services/existingShopifyLink.js";
 import scraperRoutes from "./routes/scraper.routes.js";
 import sourceCapabilityRoutes from "./routes/source-capability.routes.js";
 import { CategoryDiscoveryService } from "./scraper/services/CategoryDiscoveryService.js";
@@ -126,6 +127,25 @@ export const APPROVED_CATALOG_SHEETS: Record<string, string> = {
   "93159589": "\u0627\u0644\u0648\u0631\u0642\u06297",
   "916372394": "\u0627\u0644\u0648\u0631\u0642\u06298",
   "202697256": "\u0627\u0644\u0648\u0631\u0642\u062920",
+};
+
+const MAIN_SHEET_EXISTING_LINK_SHEETS: Record<string, string> = {
+  ...APPROVED_CATALOG_SHEETS,
+  "1264806944": "\u0627\u0644\u0648\u0631\u0642\u06299",
+  "106757984": "\u0627\u0644\u0648\u0631\u0642\u062911",
+  "1841878091": "\u0627\u0644\u0648\u0631\u0642\u062912",
+  "1219566712": "\u0627\u0644\u0648\u0631\u0642\u062913",
+  "1526682180": "\u0627\u0644\u0648\u0631\u0642\u062916",
+  "1122116162": "\u0627\u0644\u0648\u0631\u0642\u062918",
+  "16172014": "\u0627\u0644\u0648\u0631\u0642\u062919",
+  "1993452910": "\u0627\u0644\u0648\u0631\u0642\u062921",
+  "282692873": "\u0627\u0644\u0648\u0631\u0642\u062922",
+  "770232216": "\u0627\u0644\u0648\u0631\u0642\u062923",
+  "1210585516": "\u0627\u0644\u0648\u0631\u0642\u062924",
+  "307824540": "\u0627\u0644\u0648\u0631\u0642\u062925",
+  "1459453928": "\u0627\u0644\u0648\u0631\u0642\u062926",
+  "4356284": "\u0627\u0644\u0648\u0631\u0642\u062927",
+  "422632561": "\u0627\u0644\u0648\u0631\u0642\u062928",
 };
 
 let googleSheetAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
@@ -2596,6 +2616,7 @@ export async function processGoogleSheetBatch(params: {
   createMissingProducts?: boolean;
   skipExistingProducts?: boolean;
   allowBlockedSheetFallback?: boolean;
+  linkExistingProductsOnly?: boolean;
 }) {
   await ensureShopifyConnection();
   const selectedPricingRuleId = asOptionalString(params.pricingRuleId);
@@ -2606,12 +2627,20 @@ export async function processGoogleSheetBatch(params: {
   const approvedCatalogGid = (() => {
     try {
       const gid = new URL(sheetData.csvUrl).searchParams.get("gid") || "0";
-      return APPROVED_CATALOG_SHEETS[gid] ? gid : null;
+      const allowedSheets = params.linkExistingProductsOnly
+        ? MAIN_SHEET_EXISTING_LINK_SHEETS
+        : APPROVED_CATALOG_SHEETS;
+      return allowedSheets[gid] ? gid : null;
     } catch {
       return null;
     }
   })();
   const isApprovedCatalogSheet = approvedCatalogGid !== null;
+  const approvedCatalogSheetName = approvedCatalogGid
+    ? (params.linkExistingProductsOnly
+        ? MAIN_SHEET_EXISTING_LINK_SHEETS[approvedCatalogGid]
+        : APPROVED_CATALOG_SHEETS[approvedCatalogGid])
+    : null;
   const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
   const requestedRowNumbers = Array.isArray(params.rowNumbers)
     ? params.rowNumbers
@@ -2895,6 +2924,7 @@ export async function processGoogleSheetBatch(params: {
     }
 
     if (
+      !params.linkExistingProductsOnly &&
       shouldDeferMissingCatalogRow(
         isApprovedCatalogSheet,
         linkedUrls.has(normalizedUrl),
@@ -2964,7 +2994,7 @@ export async function processGoogleSheetBatch(params: {
             multiplier: row.priceMultiplier || 1,
             collection: row.collection,
             sheetId: Number(approvedCatalogGid),
-            sheetName: APPROVED_CATALOG_SHEETS[approvedCatalogGid],
+            sheetName: approvedCatalogSheetName || "Google Sheet",
             existingSku: row.sku,
             fresh,
           });
@@ -3003,6 +3033,22 @@ export async function processGoogleSheetBatch(params: {
         }
 
         if (reconciliation.status === "verified" && reconciliation.shopifyProductId) {
+          let linkedSourceProductId: string | undefined;
+          if (params.linkExistingProductsOnly) {
+            const persisted = await persistVerifiedExistingShopifyLink({
+              fresh: analyzed,
+              shopifyProductId: reconciliation.shopifyProductId,
+              shopifyHandle: reconciliation.shopifyHandle,
+              multiplier: row.priceMultiplier || 1,
+              sheetUrl: params.sheetUrl,
+              sheetName: approvedCatalogSheetName || "Google Sheet",
+              sheetId: Number(approvedCatalogGid),
+              rowNumber: row.rowNumber,
+              collection: row.collection,
+              variantLinks: reconciliation.variantLinks || [],
+            });
+            linkedSourceProductId = persisted.sourceProductId;
+          }
           successful.push({
             rowNumber: row.rowNumber,
             url: normalizedUrl,
@@ -3011,6 +3057,7 @@ export async function processGoogleSheetBatch(params: {
             priceOverride: row.price,
             priceMultiplier: row.priceMultiplier,
             collection: row.collection,
+            sourceProductId: linkedSourceProductId,
             verification: {
               shopifyId: reconciliation.shopifyProductId,
               variantsExpected: reconciliation.variantsChecked,
@@ -3084,7 +3131,7 @@ export async function processGoogleSheetBatch(params: {
         }
 
 
-        if (params.createMissingProducts === false) {
+        if (params.createMissingProducts === false || params.linkExistingProductsOnly) {
           skipped.push({
             rowNumber: row.rowNumber,
             url: normalizedUrl,
@@ -3329,6 +3376,7 @@ export async function processGoogleSheetBatch(params: {
       pricingRuleId: selectedPricingRuleId,
       defaultCollections: params.defaultCollections || [],
       createMissingProducts: params.createMissingProducts !== false,
+      linkExistingProductsOnly: params.linkExistingProductsOnly === true,
     },
   });
 
@@ -4320,6 +4368,7 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
   const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
   const skipExistingProducts = req.body?.skipExistingProducts === true;
   const allowBlockedSheetFallback = req.body?.allowBlockedSheetFallback !== false;
+  const linkExistingProductsOnly = req.body?.linkExistingProductsOnly === true;
 
   if (!sheetUrl) {
     return res.status(400).json({ error: "sheetUrl is required" });
@@ -4336,6 +4385,8 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
       waitForPublishCompletion,
       skipExistingProducts,
       allowBlockedSheetFallback,
+      linkExistingProductsOnly,
+      createMissingProducts: linkExistingProductsOnly ? false : undefined,
       mode: processOnlyNewRows ? "auto_sync" : "sheet_link",
     });
     res.json(result);
