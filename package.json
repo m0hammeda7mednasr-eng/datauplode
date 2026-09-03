@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "node --watch-path=server.ts --watch-path=src/server --import tsx server.ts",
-    "start": "node --import tsx --import ./src/server/catalog-runtime-hotfix.ts server.ts",
+    "start": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "env:check": "tsx scripts/check-env.ts",
