@@ -1,65 +1,59 @@
-# Railway Environment Variables
+# Railway production variables
 
-This file intentionally contains placeholders only. Never commit live database passwords, Supabase service-role keys, Shopify secrets, scraper provider keys, or encryption keys.
+> Security rule: **never commit real API keys, Shopify tokens, database passwords, or encryption keys to this repository.** Set secret values only in Railway Variables / the deployment secret store.
 
-## Core runtime
+## URLs
 
 ```env
-NODE_ENV=production
-HOST=0.0.0.0
-PORT=3000
-
 APP_URL=https://datauplode-production.up.railway.app
 FRONTEND_URL=https://datauplode.vercel.app
-CORS_ORIGINS=https://datauplode.vercel.app,https://datauplode-production.up.railway.app
-
-SUPABASE_PROJECT_REF=YOUR_PROJECT_REF
-DATABASE_URL=postgresql://postgres.YOUR_PROJECT_REF:URL_ENCODED_PASSWORD@YOUR_SESSION_POOLER_HOST:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20
-ENCRYPTION_KEY=GENERATE_A_PRIVATE_RANDOM_VALUE_32_CHARS_OR_MORE
+CORS_ORIGINS=https://datauplode-production.up.railway.app,https://datauplode.vercel.app
 ```
 
-## Safe rollout gates
+## Database and encryption
+
+Set these in Railway only:
 
 ```env
-SYNC_RUNTIME_WRITE_ENABLED=false
-SYNC_PRICING_RULE_SEED_ENABLED=false
-SYNC_INVENTORY_AUTOSTART=false
-SYNC_JOB_RECOVERY_ENABLED=false
-SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false
-SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false
-SYNC_SHEET7_CATALOG_ENABLED=false
-SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED=false
-SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED=false
-SYNC_SHEET1_CATALOG_REVISION=
-SYNC_SHEET1_CATALOG_BATCH_SIZE=20
-SYNC_SHEET1_CATALOG_POLL_MS=1800000
-
-CATALOG_AUDIT_DRY_RUN=true
-CATALOG_AUDIT_WRITE_ENABLED=false
-CATALOG_AUDIT_SHEET_WRITE_ENABLED=false
-CATALOG_AUDIT_CANARY_MAX_ROWS=1
+DATABASE_URL=<set-in-railway>
+DIRECT_URL=<set-in-railway-if-required>
+ENCRYPTION_KEY=<set-in-railway>
 ```
 
-## Optional integrations
+## Shopify
 
-Set Shopify, Google, and scraper-provider credentials only in Railway Variables or another secret manager. Do not put live values in this repository.
+Production Shopify credentials must remain in Railway / the encrypted `ShopifyConnection` record. Do not commit them here.
 
-## Railway public networking
-
-Use the Railway-provided public domain with target port `3000` when `PORT=3000` is set explicitly. The application binds to `0.0.0.0:$PORT`.
-
-Healthcheck path:
-
-```text
-/api/health
+```env
+SHOPIFY_SHOP_DOMAIN=<set-in-railway-if-env-credentials-are-used>
+SHOPIFY_ACCESS_TOKEN=<set-in-railway-if-env-credentials-are-used>
 ```
 
-Readiness diagnostics remain available separately at:
+## ScraperAPI
 
-```text
-/api/ready
+Rotate any key that has ever been committed to Git history, then store the new value in Railway only.
+
+```env
+SCRAPERAPI_KEY=<set-in-railway>
+# Or, when intentionally using a pool:
+# SCRAPERAPI_KEYS=<set-in-railway>
+
+# Operational slice: keep 20,000 of the 100,000 Hobby credits outside this app.
+SCRAPERAPI_MONTHLY_CREDIT_LIMIT=80000
+SCRAPERAPI_BILLING_CYCLE_DAY=3
+
+# For the current billing cycle only, set this to credits already consumed
+# before the new guard is deployed. Reset to 0 at the next renewal.
+SCRAPERAPI_CYCLE_OPENING_USED_CREDITS=0
+
+# Optional explicit daily override. If omitted, the app derives a daily pace
+# from the 80,000-credit operational cap and the actual billing-cycle length.
+# SCRAPERAPI_DAILY_CREDIT_LIMIT=2667
+
+# Expensive modes should be enabled only for sources that actually need them.
+SCRAPERAPI_RENDER=false
+SCRAPERAPI_PREMIUM=false
+SCRAPERAPI_ULTRA_PREMIUM=false
 ```
 
-## Secret rotation
-
-If a secret was ever committed to Git history, deleting it from the latest file is not enough. Rotate/revoke the exposed credential at its provider and replace the Railway variable with the new value.
+For the Sep 3, 2026 -> Oct 3, 2026 cycle, after rotating the exposed key, set `SCRAPERAPI_CYCLE_OPENING_USED_CREDITS` to the ScraperAPI dashboard usage observed at the moment of rotation so the app cannot consume the reserved 20,000 credits.
