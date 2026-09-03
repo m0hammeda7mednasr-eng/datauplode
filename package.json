@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "node --watch-path=server.ts --watch-path=src/server --import tsx server.ts",
-    "start": "tsx server.ts",
+    "start": "tsx server-runtime.ts",
     "build": "vite build",
     "preview": "vite preview",
     "env:check": "tsx scripts/check-env.ts",
