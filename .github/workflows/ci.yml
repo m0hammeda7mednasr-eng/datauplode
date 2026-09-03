@@ -8,9 +8,155 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  patch-shopify-throttle:
+    if: github.event_name == 'push' && github.event.head_commit.message == 'Run Shopify throttle patch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Patch Shopify throttling and catalog query cost
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          shopify = Path('src/server/services/shopify.ts')
+          text = shopify.read_text()
+          pattern = re.compile(r"  async request<T = any>\(query: string, variables: any = \{\}\): Promise<T> \{.*?\n  \}\n\n  async restDelete", re.S)
+          replacement = r'''  async request<T = any>(query: string, variables: any = {}): Promise<T> {
+    if (!this.config.accessToken || !this.config.shopDomain) {
+      throw new Error('Shopify credentials not configured');
+    }
+
+    const maxAttempts = 8;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await axios.post(
+          this.endpoint,
+          { query, variables },
+          {
+            timeout: 30000,
+            headers: {
+              'X-Shopify-Access-Token': this.config.accessToken,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+
+        const payload = response.data || {};
+        const { data, errors, extensions } = payload;
+        const cost = extensions?.cost || {};
+        const throttleStatus = cost?.throttleStatus || {};
+        const requestedQueryCost = Number(cost?.requestedQueryCost ?? cost?.requestedCost ?? 0);
+        const currentlyAvailable = Number(throttleStatus?.currentlyAvailable ?? 0);
+        const restoreRate = Number(throttleStatus?.restoreRate ?? 0);
+        const throttled = Array.isArray(errors) && errors.some((entry: any) => {
+          const code = String(entry?.extensions?.code || '').toUpperCase();
+          const message = String(entry?.message || '');
+          return code === 'THROTTLED' || /throttled|rate limit/i.test(message);
+        });
+
+        if (throttled) {
+          if (attempt >= maxAttempts) {
+            throw new Error(`Shopify API remained throttled after ${maxAttempts} attempts`);
+          }
+          const deficit = Math.max(0, requestedQueryCost - currentlyAvailable);
+          const costWaitMs = restoreRate > 0 && deficit > 0
+            ? Math.ceil((deficit / restoreRate) * 1000) + 250
+            : 0;
+          const backoffMs = Math.min(15000, 1000 * (2 ** (attempt - 1)));
+          const waitMs = Math.max(1000, costWaitMs, backoffMs);
+          console.warn(`Shopify GraphQL throttled; retrying in ${waitMs}ms (attempt ${attempt}/${maxAttempts})`);
+          await sleep(waitMs);
+          continue;
+        }
+
+        if (errors && errors.length > 0) {
+          console.error('Shopify GraphQL Errors:', errors);
+          throw new Error(`Shopify API error: ${errors[0].message}`);
+        }
+
+        if (requestedQueryCost > 0 && restoreRate > 0 && currentlyAvailable < requestedQueryCost) {
+          const refillMs = Math.ceil(((requestedQueryCost - currentlyAvailable) / restoreRate) * 1000) + 100;
+          await sleep(Math.min(10000, Math.max(0, refillMs)));
+        }
+
+        return data as T;
+      } catch (error: any) {
+        const status = Number(error?.response?.status || 0);
+        const retryAfterSeconds = Number(error?.response?.headers?.['retry-after'] || 0);
+        const retryableHttp = status === 429 || [500, 502, 503, 504].includes(status);
+        if (retryableHttp && attempt < maxAttempts) {
+          const headerWaitMs = retryAfterSeconds > 0 ? Math.ceil(retryAfterSeconds * 1000) : 0;
+          const backoffMs = Math.min(15000, 1000 * (2 ** (attempt - 1)));
+          const waitMs = Math.max(1000, headerWaitMs, backoffMs);
+          console.warn(`Shopify HTTP ${status}; retrying in ${waitMs}ms (attempt ${attempt}/${maxAttempts})`);
+          await sleep(waitMs);
+          continue;
+        }
+        if (status === 429) {
+          throw new Error('Shopify rate limit exceeded after automatic retries.');
+        }
+        throw error;
+      }
+    }
+
+    throw new Error('Shopify API request exhausted automatic retries');
+  }
+
+  async restDelete'''
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit('Could not patch ShopifyGraphqlClient.request exactly once')
+          shopify.write_text(new_text)
+
+          route = Path('src/server/routes/shopify-catalog-link.routes.ts')
+          r = route.read_text()
+          r = r.replace('const MAX_SHOPIFY_PAGES = 300;', 'const MAX_SHOPIFY_PAGES = 1000;')
+          r = r.replace('variants(first: 250) {', 'variants(first: 100) {', 1)
+          r = r.replace('more than 250 variants', 'more than 100 variants')
+          route.write_text(r)
+          PY
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Commit verified throttle fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/services/shopify.ts src/server/routes/shopify-catalog-link.routes.ts
+          git commit -m 'Handle Shopify GraphQL throttling during catalog scans'
+          git push origin HEAD:main
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
