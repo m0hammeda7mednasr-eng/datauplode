@@ -2,6 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const expectedRevision = String(process.env.EXPECTED_REVISION || '').trim().toLowerCase();
 const baseUrl = 'https://datauplode-production.up.railway.app';
+// Rollout probe: harmless source-only change used to verify Railway deploys this exact branch head.
 
 if (!/^[0-9a-f]{40}$/.test(expectedRevision)) {
   throw new Error('Rollout watcher requires an exact 40-char EXPECTED_REVISION.');
