@@ -15,12 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Probe Railway readiness read-only
+      - name: Probe Railway readiness and catalog stats read-only
         shell: bash
         run: |
           set -euo pipefail
-          code="$(curl --silent --show-error --max-time 25 --output ready.json --write-out '%{http_code}' https://datauplode-production.up.railway.app/api/ready || true)"
-          echo "HTTP_STATUS=$code"
+          base="https://datauplode-production.up.railway.app"
+          code="$(curl --silent --show-error --max-time 25 --output ready.json --write-out '%{http_code}' "$base/api/ready" || true)"
+          echo "READY_HTTP_STATUS=$code"
           node <<'NODE'
           const fs = require('node:fs');
           let b = {};
@@ -42,3 +43,20 @@ jobs:
           };
           console.log('READINESS=' + JSON.stringify(out));
           NODE
+
+          stats_code="$(curl --silent --show-error --max-time 25 --output stats.json --write-out '%{http_code}' "$base/api/products/stats" || true)"
+          echo "STATS_HTTP_STATUS=$stats_code"
+          if [[ "$stats_code" == "200" ]]; then
+            node <<'NODE'
+          const fs=require('node:fs');
+          let b={};try{b=JSON.parse(fs.readFileSync('stats.json','utf8'))}catch{}
+          const s=b?.stats||b||{};
+          console.log('PRODUCT_STATS=' + JSON.stringify({totalLinked:s.totalLinked??null,activeSync:s.activeSync??null,pendingReview:s.pendingReview??null}));
+          NODE
+          else
+            echo "PRODUCT_STATS_BODY=$(head -c 500 stats.json | tr '\n' ' ')"
+          fi
+
+          route_code="$(curl --silent --show-error --max-time 25 --output route.txt --write-out '%{http_code}' -X POST -H 'content-type: application/json' --data '{}' "$base/api/shopify-catalog/reconcile" || true)"
+          echo "CATALOG_ROUTE_HTTP_STATUS=$route_code"
+          echo "CATALOG_ROUTE_BODY=$(head -c 500 route.txt | tr '\n' ' ')"
