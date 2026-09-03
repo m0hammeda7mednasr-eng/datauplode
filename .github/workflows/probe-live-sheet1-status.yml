@@ -69,4 +69,4 @@ jobs:
             echo '```'
           } > issue-body.md
           gh issue edit 5 --repo "$GITHUB_REPOSITORY" --body-file issue-body.md
-          # failure diagnostic refresh 2026-08-09
+          # read-only live status refresh 2026-09-03 after main promotion
