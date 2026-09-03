@@ -1,0 +1,17 @@
+Dabdoob production readiness validation
+
+Validated source behavior:
+- Readiness accepts either SHOPIFY_SHOP_DOMAIN + SHOPIFY_ACCESS_TOKEN env credentials OR one active encrypted ShopifyConnection persisted in Supabase.
+- DB lookup is read-only and requires isConnected=true plus non-null accessTokenEnc.
+- Readiness reports only boolean availability; it does not expose the encrypted token.
+- No Shopify request is performed by the readiness credential check.
+- No Shopify mutation, Google Sheet write, or database mutation is introduced by this readiness change.
+
+Verified production data before this commit:
+- Supabase project: qdvdblbxzlhiexhmzyte
+- ShopifyConnection rows: 1 total / 1 connected / 1 usable
+- Existing broad catalog write gates remain unchanged.
+
+Safety invariants:
+- 403/CAPTCHA/timeout must not be classified as out-of-stock.
+- Broad Shopify writes remain gated behind CI, fresh dry run, canary, and read-back.

@@ -1,0 +1,198 @@
+name: Hotfix First5 Supplier Matching
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths: [.github/workflows/hotfix-first5-size-mapping.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout production branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+      - name: Add vendor-aware exact-title and source-SKU matching
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+
+          marker = '''function extractUrlProductCode(url: string) {'''
+          if 'function sourceVendor(' not in s:
+              assert marker in s, 'source vendor insertion marker missing'
+              helper = '''function sourceVendor(url: string) {
+            try {
+              const host = new URL(url).hostname.toLowerCase();
+              if (host.includes("next.")) return "Next";
+              if (host.includes("hm.com")) return "H&M";
+              if (host.includes("maxfashion")) return "Max";
+              if (host.includes("shein")) return "SHEIN";
+              if (host.includes("centrepoint")) return "Centrepoint";
+            } catch {}
+            return "";
+          }
+
+          function shopifySearchValue(value: unknown) {
+            return `"${clean(value).replace(/["\\\\]/g, " ").slice(0, 140)}"`;
+          }
+
+          '''
+              s = s.replace(marker, helper + marker, 1)
+
+          old_query_fields = '''          id
+          title
+          handle
+          status
+          variants(first: 250) {'''
+          new_query_fields = '''          id
+          title
+          handle
+          vendor
+          status
+          variants(first: 250) {'''
+          assert old_query_fields in s, 'Shopify query field marker missing'
+          s = s.replace(old_query_fields, new_query_fields, 1)
+
+          old_search = '''  const code = compact(productCode);
+          const searchTerms = [code, compact(fresh?.source?.productId), clean(fresh.title)]
+            .filter(Boolean)
+            .slice(0, 3);
+          const query = `'''
+          new_search = '''  const code = compact(productCode);
+          const vendor = sourceVendor(row.normalizedUrl);
+          const freshTitle = clean(fresh.title);
+          const sourceIdentifiers = [
+            compact(fresh?.source?.productId),
+            ...(fresh.variants || []).flatMap((variant: any) => [
+              compact(variant?.sku),
+              compact(variant?.sourceVariantId),
+            ]),
+          ].filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index).slice(0, 8);
+          const searchTerms = [code, ...sourceIdentifiers, freshTitle]
+            .filter(Boolean)
+            .filter((value, index, values) => values.indexOf(value) === index)
+            .slice(0, 10);
+          const query = `'''
+          assert old_search in s, 'search-term block missing'
+          s = s.replace(old_search, new_search, 1)
+
+          old_found = '''  const found = new Map<string, any>();
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            const queryText = `status:active AND ${safe}`;
+            try {
+              const data: any = await client.request(query, { query: queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") {
+                  found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                }
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", { term: safe, error: clean((error as any)?.message || error) });
+            }
+            if (found.size === 1 && term !== fresh.title) break;
+          }
+'''
+          new_found = '''  const found = new Map<string, any>();
+          const vendorFilter = vendor ? ` AND vendor:${shopifySearchValue(vendor)}` : "";
+          const queryTexts: Array<{ label: string; queryText: string }> = [];
+          if (freshTitle) {
+            queryTexts.push({
+              label: `title:${freshTitle}`,
+              queryText: `status:active${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+            });
+          }
+          for (const identifier of sourceIdentifiers) {
+            queryTexts.push({
+              label: `sku:${identifier}`,
+              queryText: `status:active${vendorFilter} AND sku:${identifier}*`,
+            });
+          }
+          for (const term of searchTerms) {
+            const safe = clean(term).replace(/["\\\\]/g, " ").slice(0, 120);
+            if (!safe) continue;
+            queryTexts.push({
+              label: `text:${safe}`,
+              queryText: `status:active${vendorFilter} AND ${shopifySearchValue(safe)}`,
+            });
+          }
+
+          for (const request of queryTexts) {
+            try {
+              const data: any = await client.request(query, { query: request.queryText });
+              for (const product of data?.products?.nodes || []) {
+                if (product?.id && product.status === "ACTIVE") {
+                  found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                }
+              }
+            } catch (error) {
+              console.warn("[first5-reconcile] Shopify search term failed", {
+                term: request.label,
+                error: clean((error as any)?.message || error),
+              });
+            }
+          }
+'''
+          assert old_found in s, 'found-search loop missing'
+          s = s.replace(old_found, new_found, 1)
+
+          old_score = '''      const productText = compact(`${product.title} ${product.handle}`);
+              if (code && productText.includes(code)) score += 30;
+              if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
+              if (code && product.variants.some((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku).includes(code))) score += 50;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 20);
+              return { product, score };'''
+          new_score = '''      const productText = compact(`${product.title} ${product.handle}`);
+              const candidateVendor = clean(product.vendor).toLowerCase();
+              const expectedVendor = vendor.toLowerCase();
+              const candidateSkus = product.variants.map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku)).filter(Boolean);
+              if (expectedVendor && candidateVendor === expectedVendor) score += 15;
+              if (freshTitle && clean(product.title).toLowerCase() === freshTitle.toLowerCase()) score += 50;
+              if (code && productText.includes(code)) score += 30;
+              if (existingSku && product.variants.some((variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku)) score += 100;
+              if (code && candidateSkus.some((sku: string) => sku.includes(code))) score += 50;
+              if (sourceIdentifiers.some((identifier) => candidateSkus.some((sku: string) => sku.includes(identifier) || identifier.includes(sku)))) score += 90;
+              score += Math.round(titleSimilarity(fresh.title, product.title) * 30);
+              return { product, score };'''
+          assert old_score in s, 'candidate scoring block missing'
+          s = s.replace(old_score, new_score, 1)
+
+          old_single = '''  if (scored.length === 1) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }'''
+          new_single = '''  if (scored.length === 1 && scored[0].score >= 30) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          if (scored.length === 1) {
+            return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+          }'''
+          assert old_single in s, 'single candidate block missing'
+          s = s.replace(old_single, new_single, 1)
+
+          assert 'vendor:${shopifySearchValue(vendor)}' in s
+          assert 'sku:${identifier}*' in s
+          assert 'sourceIdentifiers.some' in s
+          assert 'scored[0].score >= 30' in s
+          p.write_text(s, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/server/firstFiveSheetsReconcile.ts
+      - name: Commit supplier matching hotfix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m 'Improve supplier-aware Shopify matching'
+          git push origin HEAD:stabilize-supabase-railway

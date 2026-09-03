@@ -57,6 +57,7 @@ type AuditResult = {
   variantsUpdated?: number;
   priceUpdated?: boolean;
   skuUpdated?: boolean;
+  readbackVerified?: boolean;
   reason?: string;
   skus?: string[];
 };
@@ -478,6 +479,98 @@ async function syncDbVariant(shopifyVariantId: string, price: number, sku: strin
   });
 }
 
+function readJsonObject(value: unknown): any {
+  if (!value || typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function storedSourceProductIsUsable(product: any, expectedUrl: string) {
+  const title = cleanText(product?.title);
+  return (
+    product &&
+    canonicalizeSourceUrl(product.url) === canonicalizeSourceUrl(expectedUrl) &&
+    title &&
+    !/^(?:Excel Import Issue|Blocked Source Product)\b/i.test(title) &&
+    !/client challenge|metadata/i.test(title) &&
+    toPositiveNumber(product.price) !== null &&
+    (product.images || []).length > 0 &&
+    (product.variants || []).length > 0
+  );
+}
+
+function storedSourceProductToAuditProduct(product: any, url: string) {
+  const raw = readJsonObject(product.raw);
+  const variants = (product.variants || []).map((variant: any) => {
+    const variantRaw = readJsonObject(variant.raw);
+    return {
+      sourceVariantId: variant.sourceVariantId,
+      sku: variant.sku,
+      color: variant.color,
+      size: variant.size,
+      price: variant.price ?? product.price,
+      currency: variant.currency || product.currency,
+      optionValues: variantRaw.optionValues,
+      available: variant.available ?? true,
+      stockStatus: variant.stockStatus || "unknown",
+      imageUrl: variant.imageUrl,
+      raw: variantRaw.raw || variantRaw,
+    };
+  });
+
+  return {
+    source: {
+      supplier: product.supplier?.name || "Unknown",
+      url,
+      productId: product.productId,
+    },
+    title: product.title,
+    description: product.description || undefined,
+    brand: product.brand || undefined,
+    currency: product.currency,
+    price: product.price,
+    images: (product.images || []).map((image: any, index: number) => ({
+      url: image.url,
+      alt: image.alt || undefined,
+      color: image.color || undefined,
+      position: Number.isInteger(image.position) ? image.position : index,
+    })),
+    options: Array.isArray(raw.options) ? raw.options : [],
+    variants,
+    raw: {
+      ...(raw.raw && typeof raw.raw === "object" ? raw.raw : {}),
+      auditCachedSourceProductFallback: true,
+      cachedFromSourceProductId: product.id,
+      cachedAt: new Date().toISOString(),
+    },
+  };
+}
+
+async function scrapeSourceProductForAudit(row: AuditRow) {
+  try {
+    return await scraperService.scrape(row.rawUrl);
+  } catch (error) {
+    const cached = await prisma.sourceProduct.findFirst({
+      where: {
+        url: { equals: row.normalizedUrl, mode: "insensitive" },
+      } as any,
+      include: {
+        supplier: true,
+        images: { orderBy: { position: "asc" } },
+        variants: { orderBy: { createdAt: "asc" } },
+      },
+    });
+    if (storedSourceProductIsUsable(cached, row.normalizedUrl)) {
+      return storedSourceProductToAuditProduct(cached, row.normalizedUrl);
+    }
+    throw error;
+  }
+}
+
 async function auditOneRow(client: any, row: AuditRow, dryRun: boolean): Promise<AuditResult> {
   const productCode = extractProductCode(row.normalizedUrl);
   const located = await findShopifyProduct(client, row, productCode);
@@ -522,7 +615,7 @@ async function auditOneRow(client: any, row: AuditRow, dryRun: boolean): Promise
     };
   }
 
-  const sourceProduct = await scraperService.scrape(row.rawUrl);
+  const sourceProduct = await scrapeSourceProductForAudit(row);
   const updates = product.variants.map((variant: any) => {
     const sourcePrice = sourceVariantPrice(sourceProduct, variant);
     if (!sourcePrice) {
@@ -607,6 +700,7 @@ async function auditOneRow(client: any, row: AuditRow, dryRun: boolean): Promise
     ).length,
     priceUpdated,
     skuUpdated,
+    readbackVerified: true,
     skus: updates.map((entry) => entry.sku),
   };
 }

@@ -1,0 +1,185 @@
+name: Materialize and Commit Strict Runtime
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - .github/workflows/materialize-and-commit-strict-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-strict-runtime-stabilize
+  cancel-in-progress: false
+
+jobs:
+  patch-contract-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply fail-closed matcher and Max guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+          start = s.index('async function findShopifyProduct(')
+          end = s.index('\nfunction resultRows(', start)
+          fn = r'''async function findShopifyProduct(
+  client: ShopifyGraphqlClient,
+  row: SheetRow,
+  fresh: NormalizedProduct,
+  productCode: string,
+) {
+  const dbId = await findDbProduct(row.normalizedUrl, productCode);
+  if (dbId) {
+    const state = await getProductState(client, dbId);
+    if (state?.status === "ACTIVE") {
+      return { product: state, ambiguous: false, matchSource: "database" as const };
+    }
+  }
+
+  const vendor = sourceVendor(row.normalizedUrl);
+  const freshTitle = clean(fresh.title);
+  const sourceIdentifiers = [
+    compact(fresh?.source?.productId),
+    ...(fresh.variants || []).flatMap((variant: any) => [
+      compact(variant?.sku),
+      compact(variant?.sourceVariantId),
+    ]),
+  ]
+    .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
+    .slice(0, 12);
+
+  if (!vendor || !freshTitle || sourceIdentifiers.length === 0) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+
+  const query = `query FirstFiveFindStrict($query: String!) {
+    products(first: 30, query: $query) {
+      nodes {
+        id title handle vendor status
+        variants(first: 250) {
+          nodes {
+            id title price sku inventoryQuantity
+            selectedOptions { name value }
+            inventoryItem { id sku tracked }
+          }
+        }
+      }
+    }
+  }`;
+  const vendorFilter = `vendor:${shopifySearchValue(vendor)}`;
+  const requests = [
+    `status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+    ...sourceIdentifiers.map(
+      (identifier) => `status:active AND ${vendorFilter} AND sku:${identifier}*`,
+    ),
+  ];
+  const found = new Map<string, any>();
+
+  for (const queryText of requests) {
+    try {
+      const data: any = await client.request(query, { query: queryText });
+      for (const product of data?.products?.nodes || []) {
+        if (product?.id && product.status === "ACTIVE") {
+          found.set(product.id, {
+            ...product,
+            variants: product.variants?.nodes || [],
+          });
+        }
+      }
+    } catch (error) {
+      console.warn("[first5-reconcile] strict Shopify search failed", {
+        queryText,
+        error: clean((error as any)?.message || error),
+      });
+    }
+  }
+
+  const eligible = [...found.values()]
+    .map((product) => {
+      const vendorExact = clean(product.vendor).toLowerCase() === vendor.toLowerCase();
+      const titleExact = clean(product.title).toLowerCase() === freshTitle.toLowerCase();
+      const candidateSkus = product.variants
+        .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
+        .filter(Boolean);
+      const identityExact = sourceIdentifiers.some((identifier) =>
+        candidateSkus.some((sku: string) => sku === identifier),
+      );
+      const confidence =
+        (vendorExact ? 30 : 0) +
+        (titleExact ? 30 : 0) +
+        (identityExact ? 60 : 0);
+      return { product, vendorExact, titleExact, identityExact, confidence };
+    })
+    .filter(
+      (entry) =>
+        entry.vendorExact &&
+        entry.titleExact &&
+        entry.identityExact &&
+        entry.confidence >= 120,
+    );
+
+  if (eligible.length === 1) {
+    return {
+      product: eligible[0].product,
+      ambiguous: false,
+      matchSource: "shopify_fallback" as const,
+    };
+  }
+  if (eligible.length > 1) {
+    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+  }
+  return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
+}
+'''
+          s = s[:start] + fn + s[end:]
+
+          if 'Max product has multiple Shopify colors' not in s:
+            anchor = '''  if (\n    fresh.raw?.repairedFlattenedNextVariants === true &&\n    product.variants.length < sourceVariants.length\n  ) {'''
+            guard = '''  if (brandCode(group.url) === "MAX") {\n    const shopifyColors = new Set(\n      product.variants\n        .map((variant: any) => clean(shopifyOptions(variant).color).toLowerCase())\n        .filter(Boolean),\n    );\n    const sourceColors = new Set(\n      sourceVariants\n        .map((variant: any) => clean(sourceOptions(variant).color).toLowerCase())\n        .filter(Boolean),\n    );\n    if (shopifyColors.size > 1 && sourceColors.size <= 1) {\n      return {\n        status: "ambiguous",\n        url: group.url,\n        rows: resultRows(group),\n        multiplier: group.multiplier,\n        productCode,\n        shopifyProductId: product.id,\n        shopifyHandle: clean(product.handle),\n        shopifyTitle: clean(product.title),\n        matchSource: located.matchSource,\n        reason: "Max product has multiple Shopify colors but the source URL resolves to at most one explicit color. Color-scoped mapping is not explicit, so no variant write was made.",\n      };\n    }\n  }\n\n'''
+            if anchor not in s:
+              raise SystemExit('Max guard anchor missing')
+            s = s.replace(anchor, guard + anchor, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          git diff --check
+          node scripts/strict-first5-runtime-safety-contract.mjs
+
+      - name: Commit runtime through GitHub Contents API after strict contract passes
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET_BRANCH: stabilize-supabase-railway
+          TARGET_PATH: src/server/firstFiveSheetsReconcile.ts
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$TARGET_PATH"; then
+            echo 'Runtime already strict; nothing to commit.'
+            exit 0
+          fi
+
+          current_blob_sha="$(gh api "repos/$REPOSITORY/contents/$TARGET_PATH?ref=$TARGET_BRANCH" --jq '.sha')"
+          encoded="$(base64 -w0 "$TARGET_PATH")"
+          gh api --method PUT "repos/$REPOSITORY/contents/$TARGET_PATH" \
+            -f message='Enforce strict first-five Shopify matching' \
+            -f content="$encoded" \
+            -f sha="$current_blob_sha" \
+            -f branch="$TARGET_BRANCH" \
+            --jq '.commit.sha'

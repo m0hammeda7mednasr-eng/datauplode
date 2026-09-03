@@ -1,0 +1,248 @@
+name: Apply Strict First5 Supplier Match
+
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths: [.github/workflows/apply-strict-first5-supplier-match.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NODE_ENV: development
+    steps:
+      - name: Checkout production branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+
+      - name: Apply strict supplier-aware matching and Max color guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+
+          marker = 'function extractUrlProductCode(url: string) {'
+          if 'function sourceVendor(url: string)' not in s:
+              helper = '''function sourceVendor(url: string) {
+            try {
+              const host = new URL(url).hostname.toLowerCase();
+              if (host.includes("next.")) return "Next";
+              if (host.includes("hm.com")) return "H&M";
+              if (host.includes("maxfashion")) return "Max";
+              if (host.includes("shein")) return "SHEIN";
+              if (host.includes("centrepoint")) return "Centrepoint";
+              if (host.includes("lefties")) return "Lefties";
+              if (host.includes("marksandspencer")) return "Marks & Spencer";
+            } catch {}
+            return "";
+          }
+
+          function shopifySearchValue(value: unknown) {
+            return `"${clean(value).replace(/["\\\\]/g, " ").slice(0, 140)}"`;
+          }
+
+          '''
+              assert marker in s, 'sourceVendor insertion marker missing'
+              s = s.replace(marker, helper + marker, 1)
+
+          start = s.index('async function findShopifyProduct(')
+          end = s.index('\nfunction resultRows(', start)
+          strict_fn = r'''async function findShopifyProduct(
+            client: ShopifyGraphqlClient,
+            row: SheetRow,
+            fresh: NormalizedProduct,
+            productCode: string,
+          ) {
+            const dbId = await findDbProduct(row.normalizedUrl, productCode);
+            if (dbId) {
+              const state = await getProductState(client, dbId);
+              if (state?.status === "ACTIVE") {
+                return { product: state, ambiguous: false, matchSource: "database" as const };
+              }
+            }
+
+            const vendor = sourceVendor(row.normalizedUrl);
+            const freshTitle = clean(fresh.title);
+            const sourceIdentifiers = [
+              compact(fresh?.source?.productId),
+              ...(fresh.variants || []).flatMap((variant: any) => [
+                compact(variant?.sku),
+                compact(variant?.sourceVariantId),
+              ]),
+            ]
+              .filter((value, index, values) => value.length >= 5 && values.indexOf(value) === index)
+              .slice(0, 12);
+
+            // Fail closed: fallback matching is allowed only with all three independent signals.
+            if (!vendor || !freshTitle || sourceIdentifiers.length === 0) {
+              return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+            }
+
+            const query = `
+              query FirstFiveFindStrict($query: String!) {
+                products(first: 30, query: $query) {
+                  nodes {
+                    id
+                    title
+                    handle
+                    vendor
+                    status
+                    variants(first: 250) {
+                      nodes {
+                        id
+                        title
+                        price
+                        sku
+                        inventoryQuantity
+                        selectedOptions { name value }
+                        inventoryItem { id sku tracked }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const vendorFilter = `vendor:${shopifySearchValue(vendor)}`;
+            const requests = [
+              `status:active AND ${vendorFilter} AND title:${shopifySearchValue(freshTitle)}`,
+              ...sourceIdentifiers.map((identifier) => `status:active AND ${vendorFilter} AND sku:${identifier}*`),
+            ];
+            const found = new Map<string, any>();
+            for (const queryText of requests) {
+              try {
+                const data: any = await client.request(query, { query: queryText });
+                for (const product of data?.products?.nodes || []) {
+                  if (product?.id && product.status === "ACTIVE") {
+                    found.set(product.id, { ...product, variants: product.variants?.nodes || [] });
+                  }
+                }
+              } catch (error) {
+                console.warn("[first5-reconcile] strict Shopify search failed", {
+                  queryText,
+                  error: clean((error as any)?.message || error),
+                });
+              }
+            }
+
+            const eligible = [...found.values()]
+              .map((product) => {
+                const vendorExact = clean(product.vendor).toLowerCase() === vendor.toLowerCase();
+                const titleExact = clean(product.title).toLowerCase() === freshTitle.toLowerCase();
+                const candidateSkus = product.variants
+                  .map((variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku))
+                  .filter(Boolean);
+                const identityExact = sourceIdentifiers.some((identifier) =>
+                  candidateSkus.some((sku: string) => sku === identifier || sku.includes(identifier)),
+                );
+                const confidence = (vendorExact ? 30 : 0) + (titleExact ? 30 : 0) + (identityExact ? 60 : 0);
+                return { product, vendorExact, titleExact, identityExact, confidence };
+              })
+              .filter((entry) => entry.vendorExact && entry.titleExact && entry.identityExact && entry.confidence >= 120);
+
+            if (eligible.length === 1) {
+              return { product: eligible[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+            }
+            if (eligible.length > 1) {
+              return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+            }
+            return { product: null, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+'''
+          s = s[:start] + strict_fn + s[end:]
+
+          needle = '''  const sourceVariants = Array.isArray(fresh.variants) && fresh.variants.length
+            ? fresh.variants
+            : [
+                {
+                  sourceVariantId: fresh.source.productId || codeRaw,
+                  price: fresh.price,
+                  available: true,
+                  stockStatus: "unknown",
+                  optionValues: {},
+                },
+              ];
+'''
+          guard = needle + '''
+          if (brandCode(group.url) === "MAX") {
+            const shopifyColors = new Set(
+              product.variants
+                .map((variant: any) => clean(shopifyOptions(variant).color).toLowerCase())
+                .filter(Boolean),
+            );
+            const sourceColors = new Set(
+              sourceVariants
+                .map((variant: any) => clean(sourceOptions(variant).color).toLowerCase())
+                .filter(Boolean),
+            );
+            if (shopifyColors.size > 1 && sourceColors.size <= 1) {
+              return {
+                status: "ambiguous",
+                url: group.url,
+                rows: resultRows(group),
+                multiplier: group.multiplier,
+                productCode,
+                shopifyProductId: product.id,
+                shopifyTitle: product.title,
+                matchSource: located.matchSource,
+                reason: "Max product has multiple Shopify colors but the source URL resolves to at most one explicit color. Color-scoped mapping is not explicit, so no variant write was made.",
+              };
+            }
+          }
+'''
+          if 'Max product has multiple Shopify colors' not in s:
+              assert needle in s, 'Max guard insertion marker missing'
+              s = s.replace(needle, guard, 1)
+
+          assert 'vendorExact && entry.titleExact && entry.identityExact && entry.confidence >= 120' in s
+          assert 'vendor\n                    status' in s
+          assert 'Max product has multiple Shopify colors' in s
+          p.write_text(s, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/server/firstFiveSheetsReconcile.ts
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Production safety contracts
+        run: |
+          npm run safety:production
+          npx tsx scripts/existing-product-audit-safety-contract.ts
+
+      - name: Docker build
+        run: docker build --tag dabdoob-strict-first5:${{ github.sha }} .
+
+      - name: Commit only after all gates pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189826+github-actions[bot]@users.noreply.github.com'
+          git add src/server/firstFiveSheetsReconcile.ts
+          if git diff --cached --quiet; then
+            echo 'No runtime changes required.'
+            exit 0
+          fi
+          git commit -m 'Enforce strict supplier-aware first-five matching'
+          git push origin HEAD:stabilize-supabase-railway
+
+# repair-trigger: 2026-08-10T07:42+03:00

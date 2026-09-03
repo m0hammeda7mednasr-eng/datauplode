@@ -136,7 +136,7 @@ npm run env:check
   This races only the first `SCRAPER_BYPASS_RACE_MAX_PROVIDERS` available providers, so cold requests can return from the fastest provider while quotas still cap usage.
 - Keep import responses warm across local/server restarts with `SCRAPE_ANALYZE_PERSISTENT_CACHE=true`.
 - Use `ANALYZE_PREWARM_WAIT_MS` so an Analyze click waits briefly for an in-flight prewarm instead of starting a duplicate scrape.
-- Add provider keys for hard domains (`SCRAPERAPI_KEY`, `ZENROWS_API_KEY`, `SCRAPINGBEE_API_KEY`, `SCRAPINGANT_API_KEY`, `SCRAPEDO_TOKEN`).
+- Add provider keys for hard domains (`SCRAPERAPI_KEYS` supports a comma/newline/semicolon-separated rotating pool; legacy `SCRAPERAPI_KEY`, `ZENROWS_API_KEY`, `SCRAPINGBEE_API_KEY`, `SCRAPINGANT_API_KEY`, and `SCRAPEDO_TOKEN` remain supported).
 
 Example:
 ```env

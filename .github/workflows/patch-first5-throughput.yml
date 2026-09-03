@@ -1,0 +1,71 @@
+name: Patch First Five Reconcile Throughput
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/patch-first5-throughput.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+      - name: Apply safe throughput patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+          replacements = {
+              'const CHUNK_DELAY_MS = 1_500;': 'const CHUNK_DELAY_MS = 750;',
+              'const CONCURRENCY = 2;': 'const CONCURRENCY = 5;',
+              'const RETRY_DELAYS_MS = [0, 8_000, 30_000] as const;': 'const RETRY_DELAYS_MS = [0] as const;',
+          }
+          for old, new in replacements.items():
+              if old not in s:
+                  raise SystemExit(f'Expected source text not found: {old}')
+              s = s.replace(old, new, 1)
+
+          old_return = '  return groups;\n}\n\nfunction readJson'
+          new_return = '''  const buckets = new Map<string, PlanGroup[]>();
+          for (const group of groups) {
+            let host = "other";
+            try { host = new URL(group.url).hostname.toLowerCase(); } catch {}
+            const bucket = buckets.get(host) || [];
+            bucket.push(group);
+            buckets.set(host, bucket);
+          }
+          const interleaved: PlanGroup[] = [];
+          while ([...buckets.values()].some((bucket) => bucket.length > 0)) {
+            for (const bucket of buckets.values()) {
+              const next = bucket.shift();
+              if (next) interleaved.push(next);
+            }
+          }
+          return interleaved;
+        }
+
+        function readJson'''
+          if old_return not in s:
+              raise SystemExit('Expected buildGroups return block not found')
+          s = s.replace(old_return, new_return, 1)
+          p.write_text(s, encoding='utf-8')
+      - name: Commit throughput patch
+        run: |
+          if git diff --quiet -- src/server/firstFiveSheetsReconcile.ts; then
+            echo "No patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m "Increase first-five reconcile throughput safely"
+          git push origin HEAD:stabilize-supabase-railway

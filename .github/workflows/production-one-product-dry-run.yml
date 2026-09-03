@@ -1,0 +1,77 @@
+name: Production One Product Dry Run
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/production-one-product-dry-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-one-product-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Run exact one-product dry run with writes disabled
+        shell: bash
+        env:
+          BASE_URL: https://datauplode-production.up.railway.app
+        run: |
+          set -euo pipefail
+          http_code=$(curl --silent --show-error --max-time 180 \
+            --output dry-run-response.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data '{"dryRun":true,"writeSheet":false,"offset":0,"maxRows":1}' \
+            "$BASE_URL/api/catalog-audit/run")
+          echo "HTTP ${http_code}"
+          cat dry-run-response.json
+          test "$http_code" = "200"
+
+      - name: Verify fail-closed dry-run contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const body = JSON.parse(fs.readFileSync('dry-run-response.json', 'utf8'));
+          const summary = body.summary || {};
+          const results = Array.isArray(body.results) ? body.results : [];
+
+          const ok =
+            body.success === true &&
+            summary.dryRun === true &&
+            summary.writeSheet === false &&
+            Number(summary.uniqueProductsProcessed) === 1 &&
+            Number(summary.verified) === 1 &&
+            Number(summary.missing) === 0 &&
+            Number(summary.ambiguous) === 0 &&
+            Number(summary.errors) === 0 &&
+            results.length >= 1 &&
+            results.some((row) => row.status === 'verified' && /^gid:\/\/shopify\/Product\/\d+$/.test(String(row.shopifyProductId || '')));
+
+          if (!ok) {
+            console.error('Fresh production dry run is not canary-ready. Refusing to treat it as a rollout gate.');
+            process.exit(1);
+          }
+
+          console.log(JSON.stringify({
+            batchId: body.batchId || null,
+            uniqueProductsProcessed: Number(summary.uniqueProductsProcessed),
+            verified: Number(summary.verified),
+            missing: Number(summary.missing),
+            ambiguous: Number(summary.ambiguous),
+            errors: Number(summary.errors),
+            dryRun: summary.dryRun,
+            writeSheet: summary.writeSheet,
+          }, null, 2));
+          NODE

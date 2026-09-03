@@ -1,136 +1,65 @@
-# 🚀 Railway Environment Variables - النسخة النهائية
+# Railway Environment Variables
 
-## ✅ المتغيرات المطلوبة للنسخة Live
+This file intentionally contains placeholders only. Never commit live database passwords, Supabase service-role keys, Shopify secrets, scraper provider keys, or encryption keys.
 
-انسخ كل المتغيرات دي وضيفها في Railway Dashboard → Variables:
+## Core runtime
 
-### 🔐 Database & Authentication
-
-```
-DATABASE_URL=postgresql://postgres.gqjwyldmajaeraydlcip:01066184859Mm@aws-0-eu-west-1.pooler.supabase.com:5432/postgres
-
-SUPABASE_URL=https://gqjwyldmajaeraydlcip.supabase.co
-
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdxand5bGRtYWphZXJheWRsY2lwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1NzYzMTksImV4cCI6MjA5NDE1MjMxOX0.XfJGoGKWzgfeZXfmhXKQRP6rt7QjQiWH-4ZivZeyiHs
-
-SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdxand5bGRtYWphZXJheWRsY2lwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODU3NjMxOSwiZXhwIjoyMDk0MTUyMzE5fQ.1e99yqK9NBFg6PAxkJZT16-ZlnXd25_2RpcU7Tb2pA8
-
-ENCRYPTION_KEY=7Gs6GqvblRlZ5Bts8Xmb5M0DHaF2grJz+Wxf2C2I+s3NmO/rYr//zkilauGiRvJI+5mxhm93dY4TwFF4MraWeA==
-```
-
-### 🌐 URLs & CORS
-
-```
-APP_URL=https://datauplode-production.up.railway.app
-
-FRONTEND_URL=https://datauplode.vercel.app
-
-CORS_ORIGINS=https://datauplode-production.up.railway.app,https://datauplode.vercel.app
-```
-
-### 🛒 Shopify
-
-```
-SHOPIFY_API_VERSION=2026-04
-```
-
-### 🤖 Scraper Configuration (الأهم!)
-
-```
-SCRAPER_BYPASS_MODE=auto
-
-SCRAPER_BYPASS_PROVIDERS=scraperapi
-
-SCRAPER_BYPASS_DAILY_LIMIT=400
-
-SCRAPER_BYPASS_COOLDOWN_MINUTES=0
-
-SCRAPERAPI_KEY=457497d563b553d7c70eccad295ccbfc
-
-SCRAPERAPI_RENDER=true
-
-SCRAPERAPI_COUNTRY_CODE=ae
-
-SCRAPERAPI_DEVICE_TYPE=mobile
-
-SCRAPERAPI_PREMIUM=true
-```
-
-### ⚙️ Environment
-
-```
+```env
 NODE_ENV=production
+HOST=0.0.0.0
+PORT=3000
+
+APP_URL=https://datauplode-production.up.railway.app
+FRONTEND_URL=https://datauplode.vercel.app
+CORS_ORIGINS=https://datauplode.vercel.app,https://datauplode-production.up.railway.app
+
+SUPABASE_PROJECT_REF=YOUR_PROJECT_REF
+DATABASE_URL=postgresql://postgres.YOUR_PROJECT_REF:URL_ENCODED_PASSWORD@YOUR_SESSION_POOLER_HOST:5432/postgres?sslmode=require&connection_limit=10&pool_timeout=20
+ENCRYPTION_KEY=GENERATE_A_PRIVATE_RANDOM_VALUE_32_CHARS_OR_MORE
 ```
 
----
+## Safe rollout gates
 
-## 📋 الخطوات:
+```env
+SYNC_RUNTIME_WRITE_ENABLED=false
+SYNC_PRICING_RULE_SEED_ENABLED=false
+SYNC_INVENTORY_AUTOSTART=false
+SYNC_JOB_RECOVERY_ENABLED=false
+SYNC_JOB_RECOVERY_SHOPIFY_WRITES_ENABLED=false
+SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=false
+SYNC_SHEET7_CATALOG_ENABLED=false
+SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED=false
+SYNC_SHEET1_CATALOG_AUTOSTART_DISABLED=false
+SYNC_SHEET1_CATALOG_REVISION=
+SYNC_SHEET1_CATALOG_BATCH_SIZE=20
+SYNC_SHEET1_CATALOG_POLL_MS=1800000
 
-1. **افتح Railway Dashboard**: https://railway.app
-2. **اختار الـ project**: datauplode
-3. **روح على Variables**
-4. **امسح أي variables فاضية أو غلط**
-5. **ضيف كل الـ variables اللي فوق واحدة واحدة**
-6. **اضغط Deploy**
-
----
-
-## ✅ بعد الـ Deploy:
-
-### المواقع اللي هتشتغل:
-
-- ✅ **Next** (ScraperAPI)
-- ✅ **Max Fashion** (ScraperAPI)
-- ✅ **Centrepoint** (ScraperAPI)
-- ✅ **Marks & Spencer** (ScraperAPI)
-- ✅ **Shein** (curl + ScraperAPI backup)
-- ✅ **H&M** (curl مجاني)
-- ✅ **Zara** (curl مجاني)
-- ✅ **Gap** (curl مجاني)
-- ✅ **Lefties** (curl مجاني)
-- ✅ **Mothercare** (curl مجاني)
-
----
-
-## 🎯 الاستخدام:
-
-- **400 request يومياً** من ScraperAPI للمواقع المحجوبة
-- **باقي المواقع مجاني 100%**
-- لو خلصت الـ 400، الموقع هيطلب **Snapshot** (المستخدم يلصق النص)
-
----
-
-## 🔍 التأكد من النجاح:
-
-بعد الـ deploy، جرب:
-
-```
-https://datauplode-production.up.railway.app/api/health
+CATALOG_AUDIT_DRY_RUN=true
+CATALOG_AUDIT_WRITE_ENABLED=false
+CATALOG_AUDIT_SHEET_WRITE_ENABLED=false
+CATALOG_AUDIT_CANARY_MAX_ROWS=1
 ```
 
-لازم يرجع:
+## Optional integrations
 
-```json
-{
-  "ok": true,
-  "database": "ok",
-  "environment": "production"
-}
+Set Shopify, Google, and scraper-provider credentials only in Railway Variables or another secret manager. Do not put live values in this repository.
+
+## Railway public networking
+
+Use the Railway-provided public domain with target port `3000` when `PORT=3000` is set explicitly. The application binds to `0.0.0.0:$PORT`.
+
+Healthcheck path:
+
+```text
+/api/health
 ```
 
----
+Readiness diagnostics remain available separately at:
 
-## ⚠️ ملاحظات مهمة:
+```text
+/api/ready
+```
 
-1. **لا تضيف variables فاضية** - Railway مش بيقبلها
-2. **تأكد من عدم وجود مسافات** قبل أو بعد أسماء الـ variables
-3. **SCRAPERAPI_KEY** هو الأهم - بدونه المواقع المحجوبة مش هتشتغل
-4. **SUPABASE_ANON_KEY** ضروري - بدونه الـ database مش هيشتغل
+## Secret rotation
 
----
-
-## 📞 لو حصلت مشكلة:
-
-1. شوف الـ **Deploy Logs** في Railway
-2. شوف الـ **HTTP Logs** لو في errors
-3. تأكد إن كل الـ variables موجودة بالظبط زي ما هي فوق
+If a secret was ever committed to Git history, deleting it from the latest file is not enough. Rotate/revoke the exposed credential at its provider and replace the Railway variable with the new value.

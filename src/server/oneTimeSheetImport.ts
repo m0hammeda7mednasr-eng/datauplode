@@ -10,6 +10,7 @@ const BETWEEN_BATCHES_MS = 1_500;
 const RECENT_RUNNING_MS = 45 * 60 * 1000;
 
 const SHEETS = [
+  { name: "الورقة1", gid: "0" },
   { name: "الورقة22", gid: "282692873" },
   { name: "الورقة23", gid: "770232216" },
   { name: "الورقة24", gid: "1210585516" },
@@ -29,6 +30,18 @@ type ImportResult = Record<string, unknown> & {
   skipped?: unknown[];
   published?: number;
 };
+
+function envFlag(name: string, defaultValue = false) {
+  const fallback = defaultValue ? "true" : "false";
+  return envString(name, fallback).trim().toLowerCase() === "true";
+}
+
+function sheetImportAutostartEnabled() {
+  return (
+    envFlag("SYNC_RUNTIME_WRITE_ENABLED") &&
+    envFlag("SYNC_SHEET_IMPORT_AUTOSTART_ENABLED")
+  );
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -224,6 +237,17 @@ export function startOneTimeSheetImport(port: number) {
     );
     return;
   }
+
+  if (!sheetImportAutostartEnabled()) {
+    console.log(
+      "[one-time-import] blocked unless SYNC_RUNTIME_WRITE_ENABLED=true and SYNC_SHEET_IMPORT_AUTOSTART_ENABLED=true",
+    );
+    return;
+  }
+
+  console.warn(
+    "[one-time-import] explicit runtime-write and sheet-import autostart gates are ENABLED",
+  );
 
   setTimeout(() => {
     void runOneTimeSheetImport(port).catch((error) => {

@@ -1,0 +1,215 @@
+name: Live Sheet 1 Reconcile V2
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/sheet1-live-reconcile-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dabdoob-live-sheet1-reconcile-v2
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+      EXPECTED_REVISION: ${{ github.sha }}
+      RUN_CONFIRMATION: 2026-08-09-sheet1-reconcile-v1
+      SHEET_CSV: https://docs.google.com/spreadsheets/d/1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w/export?format=csv&gid=0
+      STATUS_TITLE: Sheet1 live reconcile status
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Create or reset status issue
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue="$(gh issue list --state open --search 'Sheet1 live reconcile status in:title' --json number --jq '.[0].number // empty')"
+          if [[ -z "$issue" ]]; then
+            issue_url="$(gh issue create --title "$STATUS_TITLE" --body "STARTING\n\nRevision: \`$EXPECTED_REVISION\`\nNo writes attempted yet.")"
+            issue="${issue_url##*/}"
+          else
+            gh issue edit "$issue" --body "STARTING\n\nRevision: \`$EXPECTED_REVISION\`\nNo writes attempted yet."
+          fi
+          echo "STATUS_ISSUE=$issue" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify code before live access
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --include=dev
+          npm run lint
+          npm run build
+          gh issue edit "$STATUS_ISSUE" --body "CODE CHECK ✅\n\nRevision: \`$EXPECTED_REVISION\`\nTypeScript: passed\nBuild: passed\nWaiting for exact Railway deployment."
+
+      - name: Wait for exact Railway revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_URL" || ! "$BASE_URL" =~ ^https:// ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED BEFORE WRITES ❌\n\nRAILWAY_SMOKE_BASE_URL missing/invalid."
+            exit 2
+          fi
+          if [[ -z "$WRITE_TOKEN" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED BEFORE WRITES ❌\n\nCATALOG_AUDIT_WRITE_TOKEN missing."
+            exit 2
+          fi
+          ready=0
+          for attempt in $(seq 1 90); do
+            code="$(curl --silent --show-error --max-time 20 --output ready.json --write-out '%{http_code}' "${BASE_URL%/}/api/ready" || true)"
+            if [[ "$code" == "200" || "$code" == "503" ]]; then
+              if EXPECTED_REVISION="$EXPECTED_REVISION" node <<'NODE'
+const fs=require('node:fs');
+let b={};try{b=JSON.parse(fs.readFileSync('ready.json','utf8'))}catch{process.exit(1)}
+const e=String(process.env.EXPECTED_REVISION||'').toLowerCase();
+const a=String(b?.deployment?.revision||'').toLowerCase();
+if(b?.database?.ok===true && b?.database?.target==='supabase' && b?.deployment?.revisionVerified===true && a===e && b?.platform?.productionEnvironment===true) process.exit(0);
+process.exit(1);
+NODE
+              then ready=1; break; fi
+            fi
+            sleep 10
+          done
+          if [[ "$ready" != "1" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED BEFORE WRITES ❌\n\nRailway did not become ready on exact revision \`$EXPECTED_REVISION\`."
+            exit 2
+          fi
+          code="$(curl --silent --show-error --max-time 30 --output config.json --write-out '%{http_code}' "${BASE_URL%/}/api/sheet1-reconcile/config" || true)"
+          if [[ "$code" != "200" ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "FAILED BEFORE WRITES ❌\n\nNew reconcile route not live. HTTP $code."
+            exit 2
+          fi
+          gh issue edit "$STATUS_ISSUE" --body "DEPLOYED + READY ✅\n\nRevision: \`$EXPECTED_REVISION\`\nSupabase: healthy\nReconcile route: live\nNext: frozen missing-SKU snapshot and dry-run."
+
+      - name: Build frozen missing-SKU plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 60 "$SHEET_CSV" -o sheet1.csv
+          python3 <<'PY'
+import csv,json,re
+from collections import OrderedDict
+from urllib.parse import urlsplit,urlunsplit
+rows=[]
+with open('sheet1.csv',newline='',encoding='utf-8-sig') as f:
+  for i,c in enumerate(csv.reader(f),1):
+    c += ['']*(4-len(c)); u=c[0].strip(); m=c[1].strip().replace(',','.'); sku=c[3].strip()
+    if not re.match(r'^https?://',u,re.I): continue
+    try: n=float(m)
+    except: continue
+    if not 1<=n<=100: continue
+    p=urlsplit(u.replace('\t','').replace('\r','').replace('\n','').strip())
+    u=urlunsplit((p.scheme,p.netloc.lower(),p.path.rstrip('/'),'',''))
+    rows.append({'row':i,'url':u,'multiplier':n,'sku':sku})
+g=OrderedDict()
+for r in rows:g.setdefault(r['url'],[]).append(r)
+missing=[]
+for u,rs in g.items():
+  if any(not r['sku'] for r in rs): missing.append({'url':u,'rows':[r['row'] for r in rs],'multipliers':sorted(set(r['multiplier'] for r in rs))})
+batches=[missing[i:i+10] for i in range(0,len(missing),10)]
+json.dump({'validRows':len(rows),'missingGroups':len(missing),'batches':batches},open('plan.json','w',encoding='utf-8'),ensure_ascii=False,indent=2)
+print(json.dumps({'validRows':len(rows),'missingGroups':len(missing),'batches':len(batches)}))
+PY
+
+      - name: Dry-run and select canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+import json,os,subprocess,sys
+base=os.environ['BASE_URL'].rstrip('/')
+plan=json.load(open('plan.json',encoding='utf-8'))
+probes=[x for b in plan['batches'][:20] for x in b][:100]
+for g in probes:
+  payload=json.dumps({'dryRun':True,'writeSheet':False,'rowNumbers':g['rows']})
+  p=subprocess.run(['curl','--silent','--show-error','--max-time','300','--header','content-type: application/json','--data',payload,f'{base}/api/sheet1-reconcile/run'],capture_output=True,text=True)
+  if p.returncode: continue
+  try:b=json.loads(p.stdout)
+  except:continue
+  s=b.get('summary') or {}; rs=b.get('results') or []
+  good=[r for r in rs if r.get('status')=='verified' and r.get('readbackVerified') is True and r.get('expectedSku')]
+  if s.get('errors')==0 and s.get('ambiguous')==0 and s.get('conflicts')==0 and good:
+    r=good[0]
+    open('canary.env','w').write(f"CANARY_ROW={r['rows'][0]}\nCANARY_SKU={r['expectedSku']}\nCANARY_PRODUCT_ID={r.get('shopifyProductId','')}\nDRY_RUN_BATCH_ID={b.get('batchId','')}\n")
+    print(json.dumps({'row':r['rows'][0],'sku':r['expectedSku'],'productId':r.get('shopifyProductId'),'batchId':b.get('batchId')}))
+    sys.exit(0)
+print('No safe canary found',file=sys.stderr);sys.exit(2)
+PY
+          source canary.env
+          gh issue edit "$STATUS_ISSUE" --body "DRY RUN ✅\n\nRevision: \`$EXPECTED_REVISION\`\nCanary row: \`$CANARY_ROW\`\nExpected SKU: \`$CANARY_SKU\`\nProduct: \`$CANARY_PRODUCT_ID\`\nNo write yet. Next: one-product canary."
+
+      - name: One-product canary write and read-back
+        shell: bash
+        run: |
+          set -euo pipefail
+          source canary.env
+          payload="{\"dryRun\":false,\"writeSheet\":false,\"rowNumbers\":[${CANARY_ROW}]}"
+          code="$(curl --silent --show-error --max-time 360 --output canary.json --write-out '%{http_code}' \
+            --header 'content-type: application/json' \
+            --header "x-catalog-audit-write-token: $WRITE_TOKEN" \
+            --header "x-sheet1-reconcile-run: $RUN_CONFIRMATION" \
+            --data "$payload" "${BASE_URL%/}/api/sheet1-reconcile/run" || true)"
+          if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+            gh issue edit "$STATUS_ISSUE" --body "CANARY FAILED ❌\n\nHTTP $code. Full run NOT started."
+            cat canary.json >&2 || true; exit 2
+          fi
+          CANARY_SKU="$CANARY_SKU" node <<'NODE'
+const fs=require('node:fs');const b=JSON.parse(fs.readFileSync('canary.json','utf8'));const e=process.env.CANARY_SKU;const rs=b.results||[];
+if(!(b.success===true&&rs.length&&rs.every(r=>r.status==='verified'&&r.readbackVerified===true)&&rs.some(r=>r.expectedSku===e))){console.error(JSON.stringify(b,null,2));process.exit(2)}
+NODE
+          gh issue edit "$STATUS_ISSUE" --body "CANARY + READ-BACK ✅\n\nRevision: \`$EXPECTED_REVISION\`\nRow: \`$CANARY_ROW\`\nSKU: \`$CANARY_SKU\`\nProduct: \`$CANARY_PRODUCT_ID\`\nFull snapshot run starting."
+
+      - name: Full missing-SKU run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+import json,os,subprocess,time
+base=os.environ['BASE_URL'].rstrip('/');token=os.environ['WRITE_TOKEN'];confirm=os.environ['RUN_CONFIRMATION'];issue=os.environ['STATUS_ISSUE'];rev=os.environ['EXPECTED_REVISION']
+plan=json.load(open('plan.json',encoding='utf-8'));t={'batches':0,'units':0,'rows':0,'verified':0,'missing':0,'ambiguous':0,'conflicts':0,'errors':0,'sheetCells':0}
+def upd(txt):subprocess.run(['gh','issue','edit',issue,'--body',txt],check=False)
+for i,batch in enumerate(plan['batches'],1):
+  rows=[r for g in batch for r in g['rows']];payload=json.dumps({'dryRun':False,'writeSheet':True,'rowNumbers':rows});resp=None;err=''
+  for a in range(2):
+    p=subprocess.run(['curl','--silent','--show-error','--max-time','900','--header','content-type: application/json','--header',f'x-catalog-audit-write-token: {token}','--header',f'x-sheet1-reconcile-run: {confirm}','--data',payload,f'{base}/api/sheet1-reconcile/run'],capture_output=True,text=True)
+    if p.returncode==0:
+      try:
+        x=json.loads(p.stdout)
+        if x.get('success') is True:resp=x;break
+        err=x.get('error') or p.stdout[:600]
+      except:err=p.stdout[:600]
+    else:err=p.stderr[:600]
+    time.sleep(5)
+  if resp is None:
+    t['errors']+=len(batch)
+  else:
+    s=resp.get('summary') or {};t['batches']+=1;t['units']+=int(s.get('unitsProcessed') or 0);t['rows']+=int(s.get('rowsProcessed') or 0)
+    for k in ['verified','missing','ambiguous','conflicts','errors']:t[k]+=int(s.get(k) or 0)
+    t['sheetCells']+=int((s.get('sheetWrite') or {}).get('cellsWritten') or 0)
+  if i==1 or i%5==0 or i==len(plan['batches']):
+    upd(f"FULL RUN {'✅' if t['errors']==0 else '⚠️'}\n\nRevision: `{rev}`\nBatch: {i}/{len(plan['batches'])}\nVerified: {t['verified']}\nSheet cells written: {t['sheetCells']}\nMissing: {t['missing']}\nAmbiguous: {t['ambiguous']}\nConflicts: {t['conflicts']}\nErrors: {t['errors']}\nCreate/rebuild products: 0")
+state='COMPLETED' if sum(t[k] for k in ['missing','ambiguous','conflicts','errors'])==0 else 'COMPLETED_WITH_ISSUES'
+upd(f"{state} {'✅' if state=='COMPLETED' else '⚠️'}\n\nRevision: `{rev}`\nSnapshot groups: {plan['missingGroups']}\nBatches: {t['batches']}/{len(plan['batches'])}\nVerified: {t['verified']}\nRows: {t['rows']}\nSheet cells written: {t['sheetCells']}\nMissing: {t['missing']}\nAmbiguous: {t['ambiguous']}\nConflicts: {t['conflicts']}\nErrors: {t['errors']}\nProduct creation/rebuild: 0")
+print(json.dumps({'state':state,'totals':t}))
+PY

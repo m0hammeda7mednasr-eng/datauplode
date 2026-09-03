@@ -1,0 +1,110 @@
+name: Production Readiness Probe
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Production Build Check
+    types:
+      - completed
+    branches:
+      - stabilize-supabase-railway
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-production-readiness
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    env:
+      READINESS_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      READINESS_EXPECTED_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      READINESS_RESPONSE_PATH: production-readiness.json
+      READINESS_MAX_ATTEMPTS: '12'
+      READINESS_RETRY_SECONDS: '20'
+
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.READINESS_EXPECTED_REVISION }}
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          if [[ "${checked_out,,}" != "${READINESS_EXPECTED_REVISION,,}" ]]; then
+            echo "Checked-out revision ${checked_out} does not match expected ${READINESS_EXPECTED_REVISION}." >&2
+            exit 2
+          fi
+
+      - name: Validate Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${READINESS_BASE_URL}" ]]; then
+            echo "Missing RAILWAY_SMOKE_BASE_URL repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${READINESS_BASE_URL}" =~ ^https:// ]]; then
+            echo "Railway readiness target must use HTTPS." >&2
+            exit 2
+          fi
+          echo "Target host: $(node -e 'console.log(new URL(process.env.READINESS_BASE_URL).host)')"
+          echo "Expected deployed revision: ${READINESS_EXPECTED_REVISION}"
+
+      - name: Wait for exact Railway revision and verify readiness without writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${READINESS_BASE_URL%/}/api/ready"
+
+          for attempt in $(seq 1 "${READINESS_MAX_ATTEMPTS}"); do
+            echo "Readiness attempt ${attempt}/${READINESS_MAX_ATTEMPTS}"
+            rm -f "${READINESS_RESPONSE_PATH}"
+
+            status="$(curl --silent --show-error --location --max-redirs 0 --max-time 30 \
+              --output "${READINESS_RESPONSE_PATH}" \
+              --write-out '%{http_code}' \
+              "${ready_url}" || true)"
+            echo "Readiness HTTP status: ${status:-<curl-error>}"
+
+            if [[ "${status}" =~ ^[0-9]{3}$ ]] && node scripts/production-readiness-probe.mjs; then
+              echo "Exact Railway revision is live and production readiness passed."
+              exit 0
+            fi
+
+            if [[ "${attempt}" -eq "${READINESS_MAX_ATTEMPTS}" ]]; then
+              echo "Production readiness did not converge after ${READINESS_MAX_ATTEMPTS} read-only attempts." >&2
+              exit 2
+            fi
+
+            echo "Railway may still be deploying the expected revision; retrying in ${READINESS_RETRY_SECONDS}s."
+            sleep "${READINESS_RETRY_SECONDS}"
+          done
+
+      - name: Publish readiness summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Dabdoob production readiness probe"
+            echo
+            echo "- Read-only live probe: \`true\`"
+            echo "- Endpoint: \`/api/ready\`"
+            echo "- Expected deployed revision: \`${READINESS_EXPECTED_REVISION}\`"
+            echo "- Exact Railway revision required: \`true\`"
+            echo "- Bounded deploy-lag retries: \`${READINESS_MAX_ATTEMPTS} x ${READINESS_RETRY_SECONDS}s\`"
+            echo "- Supabase target + pinned project match required: \`true\`"
+            echo "- Runtime/catalog/job-recovery write gates must remain closed: \`true\`"
+            echo "- Queue must be clean before Dry Run: \`true\`"
+            echo "- Shopify mutations from this workflow: \`0\`"
+            echo "- Google Sheet writes from this workflow: \`0\`"
+          } >> "$GITHUB_STEP_SUMMARY"

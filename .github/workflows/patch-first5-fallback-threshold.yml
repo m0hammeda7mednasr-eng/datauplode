@@ -1,0 +1,76 @@
+name: Patch First5 Fallback Threshold
+
+# Re-run marker: validate and apply fail-closed Shopify fallback matching.
+on:
+  push:
+    branches: [stabilize-supabase-railway]
+    paths: [.github/workflows/patch-first5-fallback-threshold.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 1
+
+      - name: Make Shopify fallback matching fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/server/firstFiveSheetsReconcile.ts')
+          s = p.read_text(encoding='utf-8')
+          old = '''  if (scored.length === 1) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          if (scored[0].score > scored[1].score && scored[0].score >= 20) {
+            return { product: scored[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };'''
+          new = '''  const strongFallback = (candidate: any) => {
+            const variants = Array.isArray(candidate?.product?.variants) ? candidate.product.variants : [];
+            const existingSkuExact = Boolean(existingSku) && variants.some(
+              (variant: any) => clean(variant?.inventoryItem?.sku || variant?.sku).toUpperCase() === existingSku,
+            );
+            const codeInVariantSku = Boolean(code) && variants.some(
+              (variant: any) => compact(variant?.inventoryItem?.sku || variant?.sku).includes(code),
+            );
+            const titleScore = titleSimilarity(fresh.title, candidate?.product?.title || "");
+            return existingSkuExact || (codeInVariantSku && titleScore >= 0.6 && candidate.score >= 60);
+          };
+          const qualified = scored.filter(strongFallback);
+          if (qualified.length === 1) {
+            return { product: qualified[0].product, ambiguous: false, matchSource: "shopify_fallback" as const };
+          }
+          return { product: null, ambiguous: candidates.length > 0, matchSource: "shopify_fallback" as const };'''
+          if old not in s:
+              raise SystemExit('Expected fallback acceptance block not found; refusing to patch')
+          s = s.replace(old, new, 1)
+          if 'const qualified = scored.filter(strongFallback);' not in s:
+              raise SystemExit('Fallback safety patch missing after replacement')
+          p.write_text(s, encoding='utf-8')
+          PY
+          git diff --check
+          npm ci
+          npm run lint
+          npm run build
+          docker build -t datauplode-first5-fallback-safe:${GITHUB_SHA} .
+
+      - name: Commit validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/firstFiveSheetsReconcile.ts
+          git commit -m 'Fail closed on weak Shopify fallback matches'
+          git push origin HEAD:stabilize-supabase-railway
+
+# automation trigger: 2026-08-09T12:35+03:00

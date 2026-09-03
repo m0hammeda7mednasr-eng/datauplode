@@ -1,0 +1,121 @@
+name: Materialize phase-aware production readiness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-phase-aware-readiness.yml
+  push:
+    branches: [stabilize-supabase-railway]
+    paths:
+      - .github/workflows/materialize-phase-aware-readiness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+      - name: Patch readiness fail-closed for persisted post-canary phase
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/server/routes/readiness.routes.ts')
+          s = p.read_text()
+
+          old = '''    const latestCatalogAudit = observedAudits[0] || null;\n    const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;\n    const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
+          new = '''    const latestCatalogAudit = observedAudits[0] || null;\n    const latestDryRun = observedAudits.find((run) => run?.dryRun === true) || null;\n    const latestCanary = observedAudits.find((run) => run?.dryRun === false) || null;\n    const canaryDryRun = latestCanary?.dryRunBatchId\n      ? observedAudits.find(\n          (run) => run?.id === latestCanary.dryRunBatchId && run?.dryRun === true,\n        ) || null\n      : null;\n    const latestDryRunAgeMinutes = dryRunAgeMinutes(latestDryRun);\n'''
+          if (
+            'const canaryDryRun = latestCanary?.dryRunBatchId' not in s
+            and 'let canaryDryRun = latestCanary?.dryRunBatchId' not in s
+          ):
+            assert old in s
+            s = s.replace(old, new, 1)
+
+          marker = '''    const latestCanaryReadbackVerified = Boolean(\n'''
+          if 'const persistedCanaryDryRunVerified = Boolean(' not in s:
+            insert = '''    const persistedCanaryDryRunVerified = Boolean(\n      canaryDryRun &&\n        canaryDryRun.status === "COMPLETED" &&\n        canaryDryRun.dryRun === true &&\n        canaryDryRun.writeSheet === false &&\n        canaryDryRun.uniqueProductsProcessed === 1 &&\n        canaryDryRun.verified === 1 &&\n        canaryDryRun.missing === 0 &&\n        canaryDryRun.ambiguous === 0 &&\n        canaryDryRun.errors === 0 &&\n        canaryDryRun.shopifyProductIds.length === 1,\n    );\n\n'''
+            assert marker in s
+            s = s.replace(marker, insert + marker, 1)
+
+          old = '''        latestCanary.readbackVerified === true &&\n        latestDryRun &&\n        latestCanary.dryRunBatchId === latestDryRun.id &&\n        latestCanary.shopifyProductId === latestDryRun.shopifyProductId,\n'''
+          new = '''        latestCanary.readbackVerified === true &&\n        persistedCanaryDryRunVerified &&\n        canaryDryRun &&\n        latestCanary.dryRunBatchId === canaryDryRun.id &&\n        latestCanary.shopifyProductId === canaryDryRun.shopifyProductId,\n'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          old = '''        catalogAuditDryRunConfigured &&\n        latestDryRunCanaryReady &&\n        latestCanaryReadbackVerified &&\n'''
+          new = '''        catalogAuditDryRunConfigured &&\n        persistedCanaryDryRunVerified &&\n        latestCanaryReadbackVerified &&\n'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          old = '''        latestDryRunCanaryReady,\n        latestCanary,\n        latestCanaryReadbackVerified,\n'''
+          new = '''        latestDryRunCanaryReady,\n        latestCanary,\n        canaryDryRun,\n        persistedCanaryDryRunVerified,\n        latestCanaryReadbackVerified,\n'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          # Production Shopify credentials may live in the encrypted ShopifyConnection
+          # table instead of duplicated Railway env secrets. Readiness must accept either
+          # source, but it must never expose the encrypted token or make a Shopify call.
+          shopify_marker = '''    const observedAudits = recentAudits.map((run) => catalogAuditObservation(run));\n'''
+          if 'const shopifyDbConnection = await withTimeout(' not in s:
+            shopify_insert = '''    const shopifyDbConnection = await withTimeout(\n      prisma.shopifyConnection.findFirst({\n        where: { isConnected: true, accessTokenEnc: { not: null } },\n        select: { shopDomain: true, accessTokenEnc: true },\n      }),\n      databaseTimeoutMs,\n    );\n    const shopifyDbConnectionConfigured = Boolean(\n      shopifyDbConnection?.shopDomain?.trim() &&\n        shopifyDbConnection?.accessTokenEnc?.trim(),\n    );\n    const shopifyConfigured =\n      (configuration.shopifyDomain && configuration.shopifyToken) ||\n      shopifyDbConnectionConfigured;\n\n'''
+            assert shopify_marker in s
+            s = s.replace(shopify_marker, shopify_insert + shopify_marker, 1)
+
+          old = '''      configuration.shopifyDomain &&\n      configuration.shopifyToken &&\n      configuration.googleSheet &&\n'''
+          new = '''      shopifyConfigured &&\n      configuration.googleSheet &&\n'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          old = '''      configuration: {\n        ...configuration,\n        safeMode,\n      },\n'''
+          new = '''      configuration: {\n        ...configuration,\n        shopifyDbConnectionConfigured,\n        shopifyConfigured,\n        safeMode,\n      },\n'''
+          if 'shopifyDbConnectionConfigured,' not in s:
+            assert old in s
+            s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          p = Path('scripts/readiness-platform-safety-contract.ts')
+          s = p.read_text()
+          old = '''    source.includes("latestCanary.dryRunBatchId === latestDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === latestDryRun.shopifyProductId"),'''
+          new = '''    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          if 'post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness' not in s:
+            needle = '''];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+            addition = '''  [\n    "post-canary readiness uses persisted canary dry-run instead of latest dry-run freshness",\n    (source.includes("const canaryDryRun = latestCanary?.dryRunBatchId") ||\n      source.includes("let canaryDryRun = latestCanary?.dryRunBatchId")) &&\n      source.includes("persistedCanaryDryRunVerified") &&\n      !source.includes("catalogAuditDryRunConfigured &&\\n        latestDryRunCanaryReady &&\\n        latestCanaryReadbackVerified"),\n  ],\n  [\n    "post-canary read-back stays bound to the dry-run referenced by canary provenance",\n    source.includes("latestCanary.dryRunBatchId === canaryDryRun.id") &&\n      source.includes("latestCanary.shopifyProductId === canaryDryRun.shopifyProductId"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+            assert needle in s
+            s = s.replace(needle, addition, 1)
+
+          if 'readiness accepts active encrypted DB Shopify connection' not in s:
+            needle = '''];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+            addition = '''  [\n    "readiness accepts active encrypted DB Shopify connection",\n    source.includes("const shopifyDbConnection = await withTimeout(") &&\n      source.includes("prisma.shopifyConnection.findFirst({") &&\n      source.includes("isConnected: true") &&\n      source.includes("accessTokenEnc: { not: null }") &&\n      source.includes("const shopifyConfigured ="),\n  ],\n  [\n    "production readiness accepts Shopify DB connection without duplicate env secrets",\n    source.includes("shopifyConfigured &&") &&\n      !source.includes("configuration.shopifyDomain &&\\n      configuration.shopifyToken &&\\n      configuration.googleSheet"),\n  ],\n  [\n    "readiness reports DB Shopify availability without exposing encrypted token",\n    source.includes("shopifyDbConnectionConfigured,") &&\n      source.includes("shopifyConfigured,") &&\n      !source.includes("accessTokenEnc: shopifyDbConnection"),\n  ],\n];\n\nconst failed = checks.filter(([, ok]) => !ok);'''
+            assert needle in s
+            s = s.replace(needle, addition, 1)
+
+          p.write_text(s)
+          PY
+      - name: Validate phase-aware readiness safety contract
+        run: npx tsx scripts/readiness-platform-safety-contract.ts
+      - name: Commit materialized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No source changes required."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/server/routes/readiness.routes.ts scripts/readiness-platform-safety-contract.ts
+          git commit -m "Accept encrypted DB Shopify connection in readiness"
+          git push origin HEAD:stabilize-supabase-railway

@@ -1,0 +1,230 @@
+name: Shopify Canary Read-back
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_revision:
+        description: "Exact 40-character Git SHA deployed when the one-product canary was executed"
+        required: true
+        type: string
+      dry_run_batch_id:
+        description: "Exact persisted production dry-run batch ID that authorized the canary"
+        required: true
+        type: string
+      canary_batch_id:
+        description: "Exact persisted catalog-audit batch ID returned by the one-product canary"
+        required: true
+        type: string
+      product_id:
+        description: "Exact Shopify product GID written by the one-product canary"
+        required: true
+        type: string
+      expected_variants_json:
+        description: "Expected variants JSON: [{\"id\":\"gid://shopify/ProductVariant/...\",\"sku\":\"...\",\"price\":\"0.00\"}]"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-shopify-canary-readback
+  cancel-in-progress: false
+
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+      SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+      SHOPIFY_API_VERSION: "2026-04"
+      RAILWAY_SMOKE_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+      CANARY_EXPECTED_REVISION: ${{ inputs.canary_revision }}
+      CANARY_EXPECTED_DRY_RUN_BATCH_ID: ${{ inputs.dry_run_batch_id }}
+      CANARY_EXPECTED_BATCH_ID: ${{ inputs.canary_batch_id }}
+      CANARY_SHOPIFY_PRODUCT_ID: ${{ inputs.product_id }}
+      CANARY_EXPECTED_VARIANTS_JSON: ${{ inputs.expected_variants_json }}
+      CANARY_READBACK_TIMEOUT_MS: "30000"
+      CANARY_READBACK_RETRIES: "2"
+
+    steps:
+      - name: Validate requested canary provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "canary_revision must be an exact 40-character Git SHA." >&2
+            exit 2
+          fi
+          if [[ -z "$(printf '%s' "${CANARY_EXPECTED_DRY_RUN_BATCH_ID}" | tr -d '[:space:]')" ]]; then
+            echo "dry_run_batch_id must be the exact persisted production dry-run batch ID that authorized the canary." >&2
+            exit 2
+          fi
+          if [[ -z "$(printf '%s' "${CANARY_EXPECTED_BATCH_ID}" | tr -d '[:space:]')" ]]; then
+            echo "canary_batch_id must be the exact persisted catalog-audit batch ID returned by the canary." >&2
+            exit 2
+          fi
+          if [[ ! "${CANARY_SHOPIFY_PRODUCT_ID}" =~ ^gid://shopify/Product/[0-9]+$ ]]; then
+            echo "product_id must be an exact Shopify Product GID." >&2
+            exit 2
+          fi
+          echo "Requested canary revision: ${expected}"
+          echo "Requested dry-run batch: ${CANARY_EXPECTED_DRY_RUN_BATCH_ID}"
+          echo "Requested canary batch: ${CANARY_EXPECTED_BATCH_ID}"
+          echo "Requested canary product: ${CANARY_SHOPIFY_PRODUCT_ID}"
+
+      - name: Checkout exact canary revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.canary_revision }}
+
+      - name: Verify canary revision provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s' "${CANARY_EXPECTED_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Read-back revision mismatch: checked out ${actual}, but canary_revision is ${expected}." >&2
+            exit 2
+          fi
+          echo "Verified canary/read-back revision: ${actual}"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SHOPIFY_SHOP_DOMAIN}" ]]; then
+            echo "Missing SHOPIFY_SHOP_DOMAIN repository secret." >&2
+            exit 2
+          fi
+          if [[ -z "${SHOPIFY_ACCESS_TOKEN}" ]]; then
+            echo "Missing SHOPIFY_ACCESS_TOKEN repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${SHOPIFY_SHOP_DOMAIN}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$ ]]; then
+            echo "SHOPIFY_SHOP_DOMAIN must be a direct *.myshopify.com hostname." >&2
+            exit 2
+          fi
+          if [[ -z "${RAILWAY_SMOKE_BASE_URL}" ]]; then
+            echo "Missing RAILWAY_SMOKE_BASE_URL repository secret." >&2
+            exit 2
+          fi
+          if [[ ! "${RAILWAY_SMOKE_BASE_URL}" =~ ^https:// ]]; then
+            echo "RAILWAY_SMOKE_BASE_URL must use HTTPS." >&2
+            exit 2
+          fi
+
+      - name: Verify live Railway and exact Supabase canary provenance before Shopify read-back
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${RAILWAY_SMOKE_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output railway-readiness.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('railway-readiness.json', 'utf8'));
+          const expected = String(process.env.CANARY_EXPECTED_REVISION || '').trim().toLowerCase();
+          const expectedDryRunBatchId = String(process.env.CANARY_EXPECTED_DRY_RUN_BATCH_ID || '').trim();
+          const expectedBatchId = String(process.env.CANARY_EXPECTED_BATCH_ID || '').trim();
+          const expectedProductId = String(process.env.CANARY_SHOPIFY_PRODUCT_ID || '').trim();
+          const actual = String(body?.deployment?.revision || '').trim().toLowerCase();
+          const fail = (message) => { console.error(message); process.exit(2); };
+          if (body?.ok !== true) fail('Railway /api/ready is not ready; Shopify read-back is blocked.');
+          if (body?.database?.ok !== true) fail('Railway database readiness is not healthy; Shopify read-back is blocked.');
+          if (body?.database?.target !== 'supabase') fail(`Expected Supabase database target, received ${body?.database?.target ?? 'unknown'}.`);
+          if (body?.deployment?.revisionVerified !== true) fail('Railway deployment revision is not a verified full Git SHA.');
+          if (actual !== expected) fail(`Railway revision ${actual || '<unknown>'} does not match canary revision ${expected}.`);
+          if (body?.platform?.ready !== true) fail('Railway production platform is not ready.');
+          if (body?.platform?.writeSafetyReady !== true) fail('Railway write-safety readiness is not satisfied.');
+          if (body?.configuration?.safeMode !== true) fail('Railway is not reporting safe mode before read-back.');
+          const latestCanary = body?.rollout?.latestCanary;
+          if (!latestCanary) fail('No persisted catalog canary is visible in Supabase readiness.');
+          if (String(latestCanary.id || '').trim() !== expectedBatchId) {
+            fail(`Persisted latest canary batch ${latestCanary.id || '<unknown>'} does not match requested canary batch ${expectedBatchId}.`);
+          }
+          if (latestCanary.status !== 'COMPLETED') fail(`Latest canary status is ${latestCanary.status ?? 'unknown'}, not COMPLETED.`);
+          if (latestCanary.dryRun !== false) fail('Latest persisted canary is marked as dry-run.');
+          if (latestCanary.writeSheet !== false) fail('Latest persisted canary reports a Google Sheet write.');
+          if (Number(latestCanary.uniqueProductsProcessed) !== 1) fail('Latest persisted canary did not process exactly one product.');
+          if (Number(latestCanary.verified) !== 1 || Number(latestCanary.missing) !== 0 || Number(latestCanary.ambiguous) !== 0 || Number(latestCanary.errors) !== 0) {
+            fail('Latest persisted canary is not a clean one-product verification.');
+          }
+          const persistedProductIds = Array.isArray(latestCanary.shopifyProductIds)
+            ? latestCanary.shopifyProductIds.map((value) => String(value || '').trim()).filter(Boolean)
+            : [];
+          if (persistedProductIds.length !== 1 || String(latestCanary.shopifyProductId || '').trim() !== persistedProductIds[0]) {
+            fail('Latest persisted canary does not expose one unambiguous Shopify product identity.');
+          }
+          if (persistedProductIds[0] !== expectedProductId) {
+            fail(`Persisted canary product ${persistedProductIds[0]} does not match requested Shopify product ${expectedProductId}.`);
+          }
+          if (latestCanary.canaryProvenanceValid !== true) {
+            fail('Latest persisted canary does not have internally valid dry-run/product provenance.');
+          }
+          if (String(latestCanary.dryRunBatchId || '').trim() !== expectedDryRunBatchId) {
+            fail(`Persisted canary dry-run batch ${latestCanary.dryRunBatchId || '<unknown>'} does not match requested dry-run batch ${expectedDryRunBatchId}.`);
+          }
+          if (String(latestCanary.provenanceShopifyProductId || '').trim() !== expectedProductId) {
+            fail(`Persisted canary provenance product ${latestCanary.provenanceShopifyProductId || '<unknown>'} does not match requested Shopify product ${expectedProductId}.`);
+          }
+          console.log(JSON.stringify({
+            ok: true,
+            railwayRevision: actual,
+            databaseTarget: body.database.target,
+            writeSafetyReady: body.platform.writeSafetyReady,
+            requestedDryRunBatchId: expectedDryRunBatchId,
+            persistedDryRunBatchId: latestCanary.dryRunBatchId,
+            requestedCanaryBatchId: expectedBatchId,
+            persistedCanaryBatchId: latestCanary.id,
+            requestedShopifyProductId: expectedProductId,
+            persistedShopifyProductId: persistedProductIds[0],
+            persistedProvenanceShopifyProductId: latestCanary.provenanceShopifyProductId,
+            persistedCanaryStatus: latestCanary.status,
+            persistedCanaryProducts: latestCanary.uniqueProductsProcessed,
+            persistedCanaryVerified: latestCanary.verified,
+            shopifyMutations: 0,
+          }, null, 2));
+          NODE
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Run read-only canary verification
+        run: npm run canary:readback
+
+      - name: Publish verification summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Shopify canary read-back"
+            echo
+            echo "- Checked-out revision: \`$(git rev-parse HEAD 2>/dev/null || echo unavailable)\`"
+            echo "- Canary revision: \`${CANARY_EXPECTED_REVISION}\`"
+            echo "- Dry-run batch: \`${CANARY_EXPECTED_DRY_RUN_BATCH_ID}\`"
+            echo "- Canary batch: \`${CANARY_EXPECTED_BATCH_ID}\`"
+            echo "- Checkout pinned to canary revision: \`true\`"
+            echo "- Revision equality required before Shopify read-back: \`true\`"
+            echo "- Exact persisted dry-run→canary provenance required before Shopify read-back: \`true\`"
+            echo "- Exact persisted canary batch equality required before Shopify read-back: \`true\`"
+            echo "- Exact persisted canary product equality required before Shopify read-back: \`true\`"
+            echo "- Live Railway /api/ready verification required before Shopify read-back: \`true\`"
+            echo "- Live database target must be Supabase: \`true\`"
+            echo "- Persisted clean one-product canary must exist in readiness: \`true\`"
+            echo "- Product: \`${CANARY_SHOPIFY_PRODUCT_ID}\`"
+            echo "- Mode: read-only GraphQL query"
+            echo "- Shopify mutations: \`0\`"
+            echo "- Redirect following: disabled by verifier"
+            echo "- HTTP 403 classification: blocked, never out-of-stock"
+          } >> "$GITHUB_STEP_SUMMARY"

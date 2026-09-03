@@ -1,0 +1,68 @@
+name: Materialize Post-Canary Broad Write Gate
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/materialize-post-canary-broad-write-gate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Add independent post-canary gate to broad catalog worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/server/sheet1CatalogAutoSync.ts')
+          text = path.read_text()
+
+          old_enabled = '''    branch === "stabilize-supabase-railway" &&\n    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&\n    enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED") &&'''
+          new_enabled = '''    branch === "stabilize-supabase-railway" &&\n    enabled("SYNC_RUNTIME_WRITE_ENABLED") &&\n    enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED") &&\n    enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED") &&'''
+          if old_enabled not in text:
+              raise SystemExit('Expected catalog worker enablement block not found; refusing ambiguous patch')
+          text = text.replace(old_enabled, new_enabled, 1)
+
+          old_snapshot = '''    runtimeWriteEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),\n    autostartEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED"),'''
+          new_snapshot = '''    runtimeWriteEnabled: enabled("SYNC_RUNTIME_WRITE_ENABLED"),\n    postCanaryBroadWritesEnabled: enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED"),\n    autostartEnabled: enabled("SYNC_SHEET1_CATALOG_AUTOSTART_ENABLED"),'''
+          if old_snapshot not in text:
+              raise SystemExit('Expected catalog worker gate snapshot block not found; refusing ambiguous patch')
+          text = text.replace(old_snapshot, new_snapshot, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Verify fail-closed gate was materialized
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED")' src/server/sheet1CatalogAutoSync.ts
+          grep -F 'postCanaryBroadWritesEnabled: enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED")' src/server/sheet1CatalogAutoSync.ts
+          git diff --check
+
+      - name: Commit source-only safety change
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/server/sheet1CatalogAutoSync.ts; then
+            echo 'No source change required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/sheet1CatalogAutoSync.ts
+          git commit -m 'Require post-canary gate for broad catalog writes'
+          git push origin HEAD:stabilize-supabase-railway

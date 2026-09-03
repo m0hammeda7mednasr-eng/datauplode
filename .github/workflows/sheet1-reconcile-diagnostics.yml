@@ -1,0 +1,119 @@
+name: Diagnose Sheet 1 Reconcile
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+    paths:
+      - .github/workflows/sheet1-reconcile-diagnostics.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Gate diagnostics on exact Railway readiness
+        shell: bash
+        env:
+          READINESS_BASE_URL: https://datauplode-production.up.railway.app
+          READINESS_EXPECTED_REVISION: ${{ github.event.pull_request.head.sha }}
+          READINESS_RESPONSE_PATH: production-readiness.json
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 12); do
+            code=$(curl --silent --show-error --max-time 30 \
+              --output "$READINESS_RESPONSE_PATH" --write-out '%{http_code}' \
+              "$READINESS_BASE_URL/api/ready" || true)
+            echo "Readiness attempt ${attempt}/12: HTTP $code"
+            if [ "$code" = "200" ] && node scripts/production-readiness-probe.mjs; then
+              ready=1
+              break
+            fi
+            cat "$READINESS_RESPONSE_PATH" || true
+            if [ "$attempt" -lt 12 ]; then
+              sleep 20
+            fi
+          done
+          if [ "$ready" != "1" ]; then
+            echo "Refusing live dry-run diagnostics until exact Railway readiness is healthy."
+            exit 1
+          fi
+
+      - name: Probe live reconcile dry-run
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://datauplode-production.up.railway.app'
+          rm -f dry-run-summary.ndjson
+
+          for row in 5 6 7 8 465 466 467 468; do
+            echo "===== ROW $row ====="
+            code=$(curl --silent --show-error --max-time 300 \
+              --output "row-${row}.json" --write-out '%{http_code}' \
+              --header 'content-type: application/json' \
+              --data "{\"dryRun\":true,\"writeSheet\":false,\"rowNumbers\":[${row}]}" \
+              "$BASE/api/sheet1-reconcile/run" || true)
+            echo "HTTP $code"
+            cat "row-${row}.json" || true
+            echo
+
+            ROW="$row" HTTP_CODE="$code" node <<'NODE'
+          const fs = require('fs');
+          const row = Number(process.env.ROW);
+          const httpCode = Number(process.env.HTTP_CODE || 0);
+          const raw = fs.existsSync(`row-${row}.json`) ? fs.readFileSync(`row-${row}.json`, 'utf8') : '';
+          let body = null;
+          try { body = JSON.parse(raw); } catch {}
+          const hits = [];
+          const visit = (value) => {
+            if (!value || typeof value !== 'object') return;
+            if (!Array.isArray(value) && ('status' in value || 'reason' in value || 'variantsChecked' in value || 'readbackVerified' in value)) {
+              hits.push({
+                status: value.status ?? null,
+                reason: value.reason ?? null,
+                variantsChecked: value.variantsChecked ?? null,
+                readbackVerified: value.readbackVerified ?? null,
+                matchSource: value.matchSource ?? null,
+                shopifyTitle: value.shopifyTitle ?? null,
+                expectedSku: value.expectedSku ?? null,
+              });
+            }
+            for (const child of Object.values(value)) visit(child);
+          };
+          visit(body);
+          const record = { row, httpCode, hits };
+          fs.appendFileSync('dry-run-summary.ndjson', JSON.stringify(record) + '\n');
+          console.log('STRUCTURED', JSON.stringify(record));
+          if (httpCode < 200 || httpCode >= 500) process.exitCode = 1;
+          NODE
+          done
+
+      - name: Summarize dry-run coverage without writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const rows = fs.readFileSync('dry-run-summary.ndjson', 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+          const baseline = rows.filter(r => [5,6,7,8].includes(r.row));
+          const targets = rows.filter(r => [465,466,467,468].includes(r.row));
+          const verified = r => r.hits.some(h => h.status === 'verified' && h.readbackVerified === true);
+          console.log(JSON.stringify({
+            probed: rows.length,
+            baselineVerified: baseline.filter(verified).length,
+            targetVerified: targets.filter(verified).length,
+            targetBlocked: targets.filter(r => !verified(r)).length,
+          }, null, 2));
+          if (baseline.filter(verified).length !== 4) {
+            throw new Error('Baseline dry-run regression: rows 5-8 are not all verified with read-back');
+          }
+          NODE

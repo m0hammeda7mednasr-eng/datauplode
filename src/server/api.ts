@@ -17,6 +17,9 @@ import { QueueService } from "./services/queue.js";
 import { encrypt, decrypt, isDecryptionError } from "./services/encryption.js";
 import { ShopifyService } from "./services/shopify.js";
 import { PersistentJsonCache } from "./services/persistentCache.js";
+import { reconcileExistingShopifyProductForImport } from "./firstFiveSheetsReconcile.js";
+import { applyDeterministicDabSkus } from "./services/dabSku.js";
+import { persistVerifiedExistingShopifyLink } from "./services/existingShopifyLink.js";
 import scraperRoutes from "./routes/scraper.routes.js";
 import sourceCapabilityRoutes from "./routes/source-capability.routes.js";
 import { CategoryDiscoveryService } from "./scraper/services/CategoryDiscoveryService.js";
@@ -92,6 +95,8 @@ const DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS = Number.isFinite(
 
 type GoogleSheetAutoSyncState = {
   running: boolean;
+  inProgress: boolean;
+  currentRunStartedAt: string | null;
   sheetUrl: string | null;
   csvUrl: string | null;
   intervalSeconds: number;
@@ -104,17 +109,50 @@ type GoogleSheetAutoSyncState = {
   lastBatchId: string | null;
 };
 
-type GoogleSheetRow = {
+export type GoogleSheetRow = {
   rowNumber: number;
   url: string;
   price: number | null;
   priceMultiplier: number | null;
   collection: string;
+  sku?: string;
+};
+
+export const APPROVED_CATALOG_SHEETS: Record<string, string> = {
+  "0": "\u0627\u0644\u0648\u0631\u0642\u06291",
+  "531292068": "\u0627\u0644\u0648\u0631\u0642\u06292",
+  "242585683": "\u0627\u0644\u0648\u0631\u0642\u062915",
+  "1991302797": "\u0627\u0644\u0648\u0631\u0642\u062910",
+  "1951926772": "\u0627\u0644\u0648\u0631\u0642\u06296",
+  "93159589": "\u0627\u0644\u0648\u0631\u0642\u06297",
+  "916372394": "\u0627\u0644\u0648\u0631\u0642\u06298",
+  "202697256": "\u0627\u0644\u0648\u0631\u0642\u062920",
+};
+
+const MAIN_SHEET_EXISTING_LINK_SHEETS: Record<string, string> = {
+  ...APPROVED_CATALOG_SHEETS,
+  "1264806944": "\u0627\u0644\u0648\u0631\u0642\u06299",
+  "106757984": "\u0627\u0644\u0648\u0631\u0642\u062911",
+  "1841878091": "\u0627\u0644\u0648\u0631\u0642\u062912",
+  "1219566712": "\u0627\u0644\u0648\u0631\u0642\u062913",
+  "1526682180": "\u0627\u0644\u0648\u0631\u0642\u062916",
+  "1122116162": "\u0627\u0644\u0648\u0631\u0642\u062918",
+  "16172014": "\u0627\u0644\u0648\u0631\u0642\u062919",
+  "1993452910": "\u0627\u0644\u0648\u0631\u0642\u062921",
+  "282692873": "\u0627\u0644\u0648\u0631\u0642\u062922",
+  "770232216": "\u0627\u0644\u0648\u0631\u0642\u062923",
+  "1210585516": "\u0627\u0644\u0648\u0631\u0642\u062924",
+  "307824540": "\u0627\u0644\u0648\u0631\u0642\u062925",
+  "1459453928": "\u0627\u0644\u0648\u0631\u0642\u062926",
+  "4356284": "\u0627\u0644\u0648\u0631\u0642\u062927",
+  "422632561": "\u0627\u0644\u0648\u0631\u0642\u062928",
 };
 
 let googleSheetAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
 const googleSheetAutoSyncState: GoogleSheetAutoSyncState = {
   running: false,
+  inProgress: false,
+  currentRunStartedAt: null,
   sheetUrl: null,
   csvUrl: null,
   intervalSeconds: DEFAULT_GOOGLE_SHEET_AUTO_SYNC_INTERVAL_SECONDS,
@@ -159,6 +197,53 @@ function cloneProduct(product: NormalizedProduct): NormalizedProduct {
   return JSON.parse(JSON.stringify(product));
 }
 
+function isUsableAnalyzeProduct(product: NormalizedProduct | undefined) {
+  if (!product) return false;
+  const title = String(product.title || "").replace(/\s+/g, " ").trim();
+  if (!title) return false;
+  if (/^(?:Excel Import Issue|Blocked Source Product)\b/i.test(title)) {
+    return false;
+  }
+  if (!Number.isFinite(Number(product.price)) || Number(product.price) <= 0) {
+    return false;
+  }
+  const supplier = String(product.source?.supplier || "").toLowerCase();
+  const sourceUrl = String(product.source?.url || "").toLowerCase();
+  const raw = product.raw && typeof product.raw === "object" ? product.raw : {};
+  if (
+    (supplier.includes("centrepoint") ||
+      sourceUrl.includes("centrepointstores.com")) &&
+    (raw.readerFallback || raw.pastedSnapshotFallback) &&
+    (String(product.currency || "").toUpperCase() !== "AED" ||
+      Number(product.price) <= 1)
+  ) {
+    return false;
+  }
+  if (
+    (supplier.includes("h&m") || sourceUrl.includes("ae.hm.com")) &&
+    sourceUrl.includes("ae.hm.com") &&
+    (String(product.currency || "").toUpperCase() !== "AED" ||
+      Number(product.price) < 10)
+  ) {
+    return false;
+  }
+  if (supplier.includes("shein") || sourceUrl.includes("shein.com")) {
+    const currency = String(product.currency || "").toUpperCase();
+    if (!["AED", "USD"].includes(currency)) return false;
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        title,
+      )
+    ) {
+      return false;
+    }
+    if (!Array.isArray(product.images) || product.images.length === 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function readJsonObject(value: unknown): any {
   if (!value || typeof value !== "string") return {};
   try {
@@ -178,6 +263,8 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
   if (cached) {
     if (cached.expiresAt <= Date.now()) {
       analyzeProductCache.delete(key);
+    } else if (!isUsableAnalyzeProduct(cached.product)) {
+      analyzeProductCache.delete(key);
     } else {
       return cloneProduct(cached.product);
     }
@@ -187,6 +274,10 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
 
   const persisted = analyzeProductPersistentCache.get(key);
   if (!persisted) return undefined;
+  if (!isUsableAnalyzeProduct(persisted)) {
+    analyzeProductPersistentCache.delete(key);
+    return undefined;
+  }
 
   analyzeProductCache.set(key, {
     expiresAt: Date.now() + cacheMs,
@@ -199,6 +290,7 @@ function getCachedAnalyzeProduct(url: string): NormalizedProduct | undefined {
 function setCachedAnalyzeProduct(url: string, product: NormalizedProduct) {
   const cacheMs = getAnalyzeCacheMs();
   if (cacheMs <= 0) return;
+  if (!isUsableAnalyzeProduct(product)) return;
   const key = normalizeAnalyzeCacheUrl(url);
   analyzeProductCache.set(key, {
     expiresAt: Date.now() + cacheMs,
@@ -329,6 +421,10 @@ function verifyPublishJobResult(jobResult: Record<string, any>) {
 
   if (jobResult?.variantsVerified === false) {
     throw new Error("Shopify variant verification failed");
+  }
+
+  if (jobResult?.variantSkusVerified === false) {
+    throw new Error("Shopify variant SKU verification failed");
   }
 
   const variantImagesRequested = Number(jobResult?.variantImagesRequested);
@@ -1241,6 +1337,9 @@ function collectCatalogQualityIssues(
   const title = String(productData?.title || "").replace(/\s+/g, " ").trim();
   const currency = String(productData?.currency || "").trim().toUpperCase();
   const sourceSupplier = String(productData?.source?.supplier || "").trim();
+  const raw = productData?.raw && typeof productData.raw === "object"
+    ? productData.raw
+    : {};
   const variants = Array.isArray(normalizedVariants) ? normalizedVariants : [];
   const images = Array.isArray(normalizedImages) ? normalizedImages : [];
   const sourcePrice = Number(productData?.price);
@@ -1262,6 +1361,31 @@ function collectCatalogQualityIssues(
   }
   if (!PricingEngine.validatePrice(sourcePrice)) {
     issues.push("invalid product price");
+  }
+  if (
+    sourceUrl.toLowerCase().includes("centrepointstores.com") &&
+    (raw.readerFallback || raw.pastedSnapshotFallback) &&
+    (currency !== "AED" || sourcePrice <= 1)
+  ) {
+    issues.push("untrusted Centrepoint reader fallback price");
+  }
+  if (
+    sourceUrl.toLowerCase().includes("ae.hm.com") &&
+    (currency !== "AED" || sourcePrice < 10)
+  ) {
+    issues.push("untrusted H&M UAE product price");
+  }
+  if (sourceUrl.toLowerCase().includes("shein.com")) {
+    if (!["AED", "USD"].includes(currency)) {
+      issues.push("untrusted SHEIN product currency");
+    }
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        title,
+      )
+    ) {
+      issues.push("SHEIN challenge/rate-limit page was parsed as product");
+    }
   }
   if (!variants.length) {
     issues.push("product has no variants");
@@ -1415,6 +1539,7 @@ function buildStoredProductQualityInput(product: any) {
     brand: product?.brand || "",
     currency: product?.currency || "",
     price: product?.price,
+    raw: parseJsonObject(product?.raw) || {},
     variants,
     images,
   };
@@ -1930,7 +2055,7 @@ async function ensureShopifyConnection() {
   }
 }
 
-function normalizeGoogleSheetUrl(sheetUrl: any) {
+export function normalizeGoogleSheetUrl(sheetUrl: any) {
   const input = String(sheetUrl || "").trim();
   if (!input) {
     throw Object.assign(new Error("Google Sheet URL is required"), {
@@ -1959,7 +2084,8 @@ function normalizeGoogleSheetUrl(sheetUrl: any) {
   }
 
   const fileId = fileMatch[1];
-  const gid = parsed.searchParams.get("gid") || "0";
+  const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+  const gid = parsed.searchParams.get("gid") || hashParams.get("gid") || "0";
   return `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv&gid=${encodeURIComponent(gid)}`;
 }
 
@@ -2036,7 +2162,115 @@ function toPositiveSheetNumber(value: any) {
   return toPriceNumber(value);
 }
 
-async function loadGoogleSheetRows(sheetUrl: string) {
+export function parseHeaderlessGoogleSheetRows(
+  matrix: string[][],
+  startIndex = 0,
+): GoogleSheetRow[] {
+  return matrix
+    .slice(startIndex)
+    .map((cells, offset) => {
+      const normalized = cells.map((cell) => String(cell || "").trim());
+      const urlIndex = normalized.findIndex((cell) => isHttpUrl(cell));
+      if (urlIndex < 0) return null;
+
+      let multiplierIndex = -1;
+      let priceMultiplier: number | null = null;
+      for (let index = urlIndex + 1; index < normalized.length; index += 1) {
+        const parsed = toPositiveSheetNumber(normalized[index]);
+        if (parsed !== null) {
+          multiplierIndex = index;
+          priceMultiplier = parsed;
+          break;
+        }
+      }
+      if (priceMultiplier === null) {
+        for (let index = 0; index < urlIndex; index += 1) {
+          const parsed = toPositiveSheetNumber(normalized[index]);
+          if (parsed !== null) {
+            multiplierIndex = index;
+            priceMultiplier = parsed;
+            break;
+          }
+        }
+      }
+
+      const sku =
+        normalized.find((cell) => /^DAB-[A-Z0-9-]+$/i.test(cell)) || "";
+      const collection =
+        normalized.find((cell, index) => {
+          if (!cell || index === urlIndex || index === multiplierIndex) return false;
+          if (isHttpUrl(cell) || toPositiveSheetNumber(cell) !== null) return false;
+          if (/^DAB-[A-Z0-9-]+$/i.test(cell)) return false;
+          return !/^(price|multiplier|collection|sku)$/i.test(cell);
+        }) || "";
+
+      return {
+        rowNumber: startIndex + offset + 1,
+        url: normalized[urlIndex],
+        price: null,
+        priceMultiplier,
+        collection,
+        sku,
+      } satisfies GoogleSheetRow;
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
+export function googleSheetRowFingerprint(row: GoogleSheetRow) {
+  const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
+  const value = [
+    normalizedUrl,
+    row.price === null ? "" : row.price.toFixed(2),
+    row.priceMultiplier === null ? "" : row.priceMultiplier.toFixed(4),
+    normalizeLabel(row.collection),
+    String(row.sku || "").trim().toUpperCase(),
+  ].join("|");
+
+  return {
+    normalizedUrl,
+    hash: crypto.createHash("sha1").update(value).digest("hex"),
+  };
+}
+
+export function filterUnseenGoogleSheetRows(
+  rows: GoogleSheetRow[],
+  seenMap: Record<string, number>,
+  processOnlyNewRows: boolean,
+) {
+  if (!processOnlyNewRows) return [...rows];
+  return rows.filter((row) => !seenMap[googleSheetRowFingerprint(row).hash]);
+}
+
+export function orderGoogleSheetRowsExistingFirst(
+  rows: GoogleSheetRow[],
+  linkedUrls: Set<string>,
+  maxRows: number,
+) {
+  return rows
+    .map((row, position) => ({ row, position }))
+    .sort((left, right) => {
+      const leftLinked = linkedUrls.has(normalizeAnalyzeCacheUrl(left.row.url));
+      const rightLinked = linkedUrls.has(normalizeAnalyzeCacheUrl(right.row.url));
+      if (leftLinked === rightLinked) return left.position - right.position;
+      return leftLinked ? -1 : 1;
+    })
+    .slice(0, Math.max(1, maxRows))
+    .map((entry) => entry.row);
+}
+
+export function shouldDeferMissingCatalogRow(
+  isApprovedCatalogSheet: boolean,
+  isLinkedToShopify: boolean,
+  createMissingProducts: boolean | undefined,
+) {
+  return (
+    isApprovedCatalogSheet &&
+    !isLinkedToShopify &&
+    createMissingProducts === false
+  );
+}
+
+export async function loadGoogleSheetRows(sheetUrl: string) {
   const csvUrl = normalizeGoogleSheetUrl(sheetUrl);
   const response = await axios.get(csvUrl, {
     timeout: Math.max(5000, envNumber("GOOGLE_SHEET_FETCH_TIMEOUT_MS", 20000)),
@@ -2053,22 +2287,16 @@ async function loadGoogleSheetRows(sheetUrl: string) {
 
   const firstRow = matrix[0].map((cell) => String(cell || "").trim());
   const firstRowLooksLikeData = firstRow.some((cell) => isHttpUrl(cell));
+  const normalizedFirstRow = firstRow.map((cell) => toSheetHeaderKey(cell));
+  const firstRowLooksLikeHeader = normalizedFirstRow.some((cell) =>
+    /(^|[^a-z])(url|link)($|[^a-z])/i.test(cell),
+  );
 
-  if (firstRowLooksLikeData) {
-    const rows = matrix
-      .map((row, index) => ({
-        rowNumber: index + 1,
-        url: String(row[0] || "").trim(),
-        price: null,
-        priceMultiplier: toPositiveSheetNumber(row[1]),
-        collection: String(row[2] || "").trim(),
-      }))
-      .filter((row) => row.url.length > 0);
-
+  if (firstRowLooksLikeData || !firstRowLooksLikeHeader) {
     return {
       csvUrl,
-      headers: ["link", "multiplier", "collection"],
-      rows,
+      headers: ["link", "multiplier", "collection", "sku"],
+      rows: parseHeaderlessGoogleSheetRows(matrix),
     };
   }
 
@@ -2098,11 +2326,13 @@ async function loadGoogleSheetRows(sheetUrl: string) {
     /^collection$/i,
     /shopify[\s_-]*collection/i,
   ]);
+  const skuColumn = detectSheetColumn(headers, [/^sku$/i, /product[\s_-]*sku/i]);
 
   const urlIndex = headers.indexOf(urlColumn);
   const priceIndex = priceColumn ? headers.indexOf(priceColumn) : -1;
   const multiplierIndex = multiplierColumn ? headers.indexOf(multiplierColumn) : -1;
   const collectionIndex = collectionColumn ? headers.indexOf(collectionColumn) : -1;
+  const skuIndex = skuColumn ? headers.indexOf(skuColumn) : -1;
 
   const rows = matrix
     .slice(1)
@@ -2113,6 +2343,7 @@ async function loadGoogleSheetRows(sheetUrl: string) {
       priceMultiplier:
         multiplierIndex >= 0 ? toPositiveSheetNumber(row[multiplierIndex]) : null,
       collection: collectionIndex >= 0 ? String(row[collectionIndex] || "").trim() : "",
+      sku: skuIndex >= 0 ? String(row[skuIndex] || "").trim() : "",
     }))
     .filter((row) => row.url.length > 0);
 
@@ -2136,6 +2367,42 @@ function setProcessedSheetRowsMap(sheetKey: string, map: Record<string, number>)
 
 async function sleepMs(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withImportScrapeTimeout<T>(
+  operation: Promise<T>,
+  url: string,
+): Promise<T> {
+  const timeoutMs = Math.max(
+    15000,
+    envNumber("EXCEL_IMPORT_SCRAPE_TIMEOUT_MS", 90 * 1000),
+  );
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              Object.assign(
+                new Error(
+                  `Timed out while scraping source product after ${timeoutMs}ms`,
+                ),
+                {
+                  statusCode: 408,
+                  code: "IMPORT_SCRAPE_TIMEOUT",
+                  url,
+                },
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function scrapeWithBridgeFallback(url: string) {
@@ -2202,6 +2469,20 @@ function guessProductIdFromUrl(url: string) {
   return cleaned ? cleaned.toUpperCase() : null;
 }
 
+function uniqueSheetFallbackValues(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const clean = String(value || "").replace(/\s+/g, " ").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
+}
+
 async function buildBlockedSheetFallbackProduct(params: {
   url: string;
   rowNumber: number;
@@ -2210,7 +2491,7 @@ async function buildBlockedSheetFallbackProduct(params: {
   csvUrl: string;
   mode: "sheet_link" | "auto_sync" | "file_upload";
   collection: string;
-}) {
+}): Promise<NormalizedProduct> {
   const normalizedUrl = normalizeAnalyzeCacheUrl(params.url);
   const existing = await prisma.sourceProduct.findUnique({
     where: { url: normalizedUrl },
@@ -2221,15 +2502,35 @@ async function buildBlockedSheetFallbackProduct(params: {
     },
   });
 
+  const cachedTitle = String(existing?.title || "").replace(/\s+/g, " ").trim();
+  const cachedImages = existing?.images || [];
+  const cachedVariants = existing?.variants || [];
+  const hasVerifiedCachedSnapshot =
+    Boolean(existing) &&
+    Boolean(cachedTitle) &&
+    !/^Excel Import Issue\b/i.test(cachedTitle) &&
+    !/^Blocked Source Product\b/i.test(cachedTitle) &&
+    cachedImages.length > 0 &&
+    cachedVariants.length > 0;
+
+  if (!hasVerifiedCachedSnapshot) {
+    throw Object.assign(
+      new Error(
+        "Blocked source did not have a verified cached product snapshot with title, images, and variants; product was not published.",
+      ),
+      {
+        statusCode: 422,
+        code: "BLOCKED_SOURCE_UNVERIFIED_FALLBACK",
+      },
+    );
+  }
+
   const supplierName =
     existing?.supplier?.name ||
     expectedSupplierForUrl(normalizedUrl) ||
     "Unknown Supplier";
   const guessedProductId = existing?.productId || guessProductIdFromUrl(normalizedUrl);
-  const title =
-    existing?.title && !existing.title.startsWith("Excel Import Issue")
-      ? existing.title
-      : `Blocked Source Product - Row ${params.rowNumber}`;
+  const title = cachedTitle;
   const description =
     existing?.description ||
     `Auto-published from sheet row ${params.rowNumber} because supplier source access was blocked during scrape.`;
@@ -2242,16 +2543,15 @@ async function buildBlockedSheetFallbackProduct(params: {
       : "USD";
 
   const images =
-    existing?.images?.map((img: any) => ({
+    cachedImages.map((img: any) => ({
       url: img.url,
       alt: img.alt || undefined,
       color: img.color || undefined,
       position: img.position,
-    })) || [];
+    }));
 
-  const variants =
-    existing?.variants && existing.variants.length > 0
-      ? existing.variants.map((variant: any, index: number) => ({
+  const variants: NormalizedProduct["variants"] =
+    cachedVariants.map((variant: any, index: number) => ({
           sourceVariantId:
             variant.sourceVariantId ||
             `${guessedProductId || "variant"}-${index + 1}`,
@@ -2263,16 +2563,17 @@ async function buildBlockedSheetFallbackProduct(params: {
           available: variant.available ?? true,
           stockStatus: variant.stockStatus || "unknown",
           imageUrl: variant.imageUrl || undefined,
-        }))
-      : [
-          {
-            sourceVariantId: guessedProductId || `row-${params.rowNumber}`,
-            price: params.price,
-            currency,
-            available: true,
-            stockStatus: "unknown",
-          },
-        ];
+        }));
+  const colorValues = uniqueSheetFallbackValues(
+    variants.map((variant) => variant.color),
+  );
+  const sizeValues = uniqueSheetFallbackValues(
+    variants.map((variant) => variant.size),
+  );
+  const options = [
+    ...(colorValues.length ? [{ name: "Color", values: colorValues }] : []),
+    ...(sizeValues.length ? [{ name: "Size", values: sizeValues }] : []),
+  ];
 
   return {
     source: {
@@ -2286,12 +2587,7 @@ async function buildBlockedSheetFallbackProduct(params: {
     currency,
     price: params.price,
     images,
-    options: [
-      {
-        name: "Default",
-        values: ["Default"],
-      },
-    ],
+    options: options.length ? options : [{ name: "Default", values: ["Default"] }],
     variants,
     raw: {
       fallbackFromBlockedSource: true,
@@ -2308,7 +2604,7 @@ async function buildBlockedSheetFallbackProduct(params: {
   };
 }
 
-async function processGoogleSheetBatch(params: {
+export async function processGoogleSheetBatch(params: {
   sheetUrl: string;
   pricingRuleId?: string | null;
   defaultCollections?: string[];
@@ -2317,6 +2613,10 @@ async function processGoogleSheetBatch(params: {
   rowNumbers?: number[];
   waitForPublishCompletion?: boolean;
   mode?: "sheet_link" | "auto_sync";
+  createMissingProducts?: boolean;
+  skipExistingProducts?: boolean;
+  allowBlockedSheetFallback?: boolean;
+  linkExistingProductsOnly?: boolean;
 }) {
   await ensureShopifyConnection();
   const selectedPricingRuleId = asOptionalString(params.pricingRuleId);
@@ -2324,6 +2624,23 @@ async function processGoogleSheetBatch(params: {
   const waitForPublishCompletion = params.waitForPublishCompletion !== false;
   const sheetData = await loadGoogleSheetRows(params.sheetUrl);
   const sheetKey = normalizeAnalyzeCacheUrl(sheetData.csvUrl);
+  const approvedCatalogGid = (() => {
+    try {
+      const gid = new URL(sheetData.csvUrl).searchParams.get("gid") || "0";
+      const allowedSheets = params.linkExistingProductsOnly
+        ? MAIN_SHEET_EXISTING_LINK_SHEETS
+        : APPROVED_CATALOG_SHEETS;
+      return allowedSheets[gid] ? gid : null;
+    } catch {
+      return null;
+    }
+  })();
+  const isApprovedCatalogSheet = approvedCatalogGid !== null;
+  const approvedCatalogSheetName = approvedCatalogGid
+    ? (params.linkExistingProductsOnly
+        ? MAIN_SHEET_EXISTING_LINK_SHEETS[approvedCatalogGid]
+        : APPROVED_CATALOG_SHEETS[approvedCatalogGid])
+    : null;
   const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
   const requestedRowNumbers = Array.isArray(params.rowNumbers)
     ? params.rowNumbers
@@ -2335,7 +2652,38 @@ async function processGoogleSheetBatch(params: {
   const filteredRows = rowFilterSet.size
     ? sheetData.rows.filter((row) => rowFilterSet.has(row.rowNumber))
     : sheetData.rows;
-  const processRows = filteredRows.slice(0, maxRows);
+  const seenMap = getProcessedSheetRowsMap(sheetKey);
+  const eligibleRows = filterUnseenGoogleSheetRows(
+    filteredRows,
+    seenMap,
+    params.processOnlyNewRows === true,
+  );
+
+  // Run linked Shopify products first. Besides matching the requested business
+  // order, this avoids spending scraper capacity on rows that can be refreshed
+  // through their existing database link.
+  const candidateUrls = [
+    ...new Set(
+      eligibleRows
+        .map((row) => normalizeAnalyzeCacheUrl(row.url))
+        .filter((url) => isHttpUrl(url)),
+    ),
+  ];
+  const linkedProducts = candidateUrls.length
+    ? await prisma.sourceProduct.findMany({
+        where: {
+          url: { in: candidateUrls },
+          shopifyProduct: { isNot: null },
+        },
+        select: { url: true },
+      })
+    : [];
+  const linkedUrls = new Set(linkedProducts.map((product) => product.url));
+  const processRows = orderGoogleSheetRowsExistingFirst(
+    eligibleRows,
+    linkedUrls,
+    maxRows,
+  );
 
   if (selectedPricingRuleId) {
     const ruleExists = await prisma.pricingRule.findUnique({
@@ -2350,6 +2698,12 @@ async function processGoogleSheetBatch(params: {
   }
 
   const shopifyClient = await ShopifyService.getClientFromDb(prisma);
+  const shopifyInventoryLocation = isApprovedCatalogSheet
+    ? await ShopifyService.getInventoryLocation(shopifyClient)
+    : null;
+  if (isApprovedCatalogSheet && !shopifyInventoryLocation?.id) {
+    throw new Error("Shopify inventory location is required for safe catalog reconciliation");
+  }
   const shopifyCollections = await ShopifyService.getCollections(shopifyClient);
   const collectionByName = new Map<string, string>(
     shopifyCollections
@@ -2357,16 +2711,16 @@ async function processGoogleSheetBatch(params: {
       .filter((entry) => Boolean(entry[0] && entry[1])),
   );
 
-  const seenMap = getProcessedSheetRowsMap(sheetKey);
   const successful: Array<{
     rowNumber: number;
     url: string;
-    action?: "published" | "synced_existing";
+    action?: "published" | "synced_existing" | "reconciled_existing";
+    sku?: string;
     priceOverride: number | null;
     priceMultiplier: number | null;
     collection: string;
-    sourceProductId: string;
-    jobId: string;
+    sourceProductId?: string;
+    jobId?: string;
     verification?: {
       shopifyId: string;
       variantsExpected?: number;
@@ -2395,21 +2749,10 @@ async function processGoogleSheetBatch(params: {
   let syncedExistingRows = 0;
 
   for (const row of processRows) {
-    const normalizedUrl = normalizeAnalyzeCacheUrl(row.url);
-    const fingerprint = [
-      normalizedUrl,
-      row.price === null ? "" : row.price.toFixed(2),
-      row.priceMultiplier === null ? "" : row.priceMultiplier.toFixed(4),
-      normalizeLabel(row.collection),
-    ].join("|");
-    const fingerprintHash = crypto
-      .createHash("sha1")
-      .update(fingerprint)
-      .digest("hex");
-
-    if (params.processOnlyNewRows && seenMap[fingerprintHash]) {
-      continue;
-    }
+    const fingerprint = googleSheetRowFingerprint(row);
+    const normalizedUrl = fingerprint.normalizedUrl;
+    const fingerprintHash = fingerprint.hash;
+    processedNewRows += 1;
 
     if (processedUrls.has(normalizedUrl)) {
       skipped.push({
@@ -2418,7 +2761,6 @@ async function processGoogleSheetBatch(params: {
         reason: "Duplicate URL inside the same Google Sheet batch",
       });
       seenMap[fingerprintHash] = Date.now();
-      processedNewRows += 1;
       continue;
     }
     processedUrls.add(normalizedUrl);
@@ -2451,9 +2793,29 @@ async function processGoogleSheetBatch(params: {
 
     if (!isHttpUrl(normalizedUrl)) {
       await registerFailure("Invalid product URL");
-      seenMap[fingerprintHash] = Date.now();
-      processedNewRows += 1;
       continue;
+    }
+
+    if (params.skipExistingProducts === true) {
+      const existingLink = linkedUrls.has(normalizedUrl)
+        ? { id: undefined }
+        : await prisma.sourceProduct.findFirst({
+            where: {
+              url: normalizedUrl,
+              shopifyProduct: { isNot: null },
+            },
+            select: { id: true },
+          });
+      if (existingLink) {
+        skipped.push({
+          rowNumber: row.rowNumber,
+          url: normalizedUrl,
+          reason: "already_linked_to_shopify_missing_only_guard",
+          sourceProductId: existingLink.id,
+        });
+        seenMap[fingerprintHash] = Date.now();
+        continue;
+      }
     }
 
     const rowCollectionNames = row.collection
@@ -2470,7 +2832,7 @@ async function processGoogleSheetBatch(params: {
       ? rowCollectionIds
       : fallbackCollectionIds;
 
-    const queueExistingLinkedProductSync = async (reason: string) => {
+    const queueExistingLinkedProductSync = async (reason: string, sku?: string) => {
       const existing = await prisma.sourceProduct.findUnique({
         where: { url: normalizedUrl },
         select: {
@@ -2510,13 +2872,25 @@ async function processGoogleSheetBatch(params: {
           mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
           sheetCollection: row.collection || null,
           sheetPriceMultiplier: row.priceMultiplier,
+          sheetSku: row.sku || null,
         },
       });
+
+      if (waitForPublishCompletion) {
+        const completedSyncJob = await waitForSyncJobCompletion(syncJob.id);
+        if (completedSyncJob.status === "failed") {
+          const syncError =
+            String(completedSyncJob.parsedResult?.error || "").trim() ||
+            `Existing Shopify sync job failed (${syncJob.id})`;
+          throw new Error(syncError);
+        }
+      }
 
       successful.push({
         rowNumber: row.rowNumber,
         url: normalizedUrl,
         action: "synced_existing",
+        sku,
         priceOverride: row.price,
         priceMultiplier: row.priceMultiplier,
         collection: row.collection,
@@ -2527,8 +2901,49 @@ async function processGoogleSheetBatch(params: {
       return true;
     };
 
+    if (isApprovedCatalogSheet && row.priceMultiplier === null) {
+      await registerFailure("Missing or invalid price multiplier in the Google Sheet row");
+      continue;
+    }
+
+    if (linkedUrls.has(normalizedUrl) && !isApprovedCatalogSheet) {
+      try {
+        const queued = await queueExistingLinkedProductSync(
+          "sheet_existing_product_first",
+        );
+        if (queued) {
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+      } catch (error: any) {
+        await registerFailure(
+          error?.message || "Failed to refresh the existing Shopify product",
+        );
+        continue;
+      }
+    }
+
+    if (
+      !params.linkExistingProductsOnly &&
+      shouldDeferMissingCatalogRow(
+        isApprovedCatalogSheet,
+        linkedUrls.has(normalizedUrl),
+        params.createMissingProducts,
+      )
+    ) {
+      skipped.push({
+        rowNumber: row.rowNumber,
+        url: normalizedUrl,
+        reason: "missing_product_deferred_for_publish_phase",
+      });
+      continue;
+    }
+
     try {
-      const analyzed = await scrapeWithBridgeFallback(normalizedUrl);
+      let analyzed = await withImportScrapeTimeout(
+        scrapeWithBridgeFallback(normalizedUrl),
+        normalizedUrl,
+      );
       if (row.price !== null && PricingEngine.validatePrice(row.price)) {
         analyzed.price = row.price;
         analyzed.variants = analyzed.variants.map((variant: any) => ({
@@ -2544,7 +2959,187 @@ async function processGoogleSheetBatch(params: {
         sheetCollection: row.collection || null,
         sheetPriceMultiplier: row.priceMultiplier,
       };
+      let skuPlan = isApprovedCatalogSheet
+        ? applyDeterministicDabSkus({
+            product: analyzed,
+            url: normalizedUrl,
+            multiplier: row.priceMultiplier,
+            existingProductSku: row.sku,
+          })
+        : null;
       setCachedAnalyzeProduct(normalizedUrl, analyzed);
+
+      if (
+        isApprovedCatalogSheet &&
+        linkedUrls.has(normalizedUrl) &&
+        analyzed.raw?.repairedFlattenedNextVariants === true
+      ) {
+        const queued = await queueExistingLinkedProductSync(
+          "sheet_repair_flattened_next_variants",
+          skuPlan?.canonicalSku,
+        );
+        if (queued) {
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+      }
+
+      if (isApprovedCatalogSheet && shopifyInventoryLocation?.id) {
+        const reconcileExisting = (fresh: typeof analyzed) =>
+          reconcileExistingShopifyProductForImport({
+            client: shopifyClient,
+            locationId: shopifyInventoryLocation.id,
+            url: normalizedUrl,
+            rowNumber: row.rowNumber,
+            multiplier: row.priceMultiplier || 1,
+            collection: row.collection,
+            sheetId: Number(approvedCatalogGid),
+            sheetName: approvedCatalogSheetName || "Google Sheet",
+            existingSku: row.sku,
+            fresh,
+          });
+
+        let reconciliation: Awaited<ReturnType<typeof reconcileExisting>>;
+        try {
+          reconciliation = await reconcileExisting(analyzed);
+        } catch (error: any) {
+          const reason = String(error?.message || error || "");
+          const retryableCentrepointVariantMap =
+            normalizedUrl.includes("centrepointstores.com") &&
+            /Could not map \d+\/\d+ Shopify variants to fresh source variants/i.test(reason);
+          if (!retryableCentrepointVariantMap) throw error;
+
+          const refreshed = await withImportScrapeTimeout(
+            scrapeWithBridgeFallback(normalizedUrl),
+            normalizedUrl,
+          );
+          if (row.price !== null && PricingEngine.validatePrice(row.price)) {
+            refreshed.price = row.price;
+            refreshed.variants = refreshed.variants.map((variant: any) => ({
+              ...variant,
+              price: row.price,
+            }));
+          }
+          refreshed.importMeta = analyzed.importMeta;
+          skuPlan = applyDeterministicDabSkus({
+            product: refreshed,
+            url: normalizedUrl,
+            multiplier: row.priceMultiplier,
+            existingProductSku: row.sku,
+          });
+          setCachedAnalyzeProduct(normalizedUrl, refreshed);
+          analyzed = refreshed;
+          reconciliation = await reconcileExisting(analyzed);
+        }
+
+        if (reconciliation.status === "verified" && reconciliation.shopifyProductId) {
+          let linkedSourceProductId: string | undefined;
+          if (params.linkExistingProductsOnly) {
+            const persisted = await persistVerifiedExistingShopifyLink({
+              fresh: analyzed,
+              shopifyProductId: reconciliation.shopifyProductId,
+              shopifyHandle: reconciliation.shopifyHandle,
+              multiplier: row.priceMultiplier || 1,
+              sheetUrl: params.sheetUrl,
+              sheetName: approvedCatalogSheetName || "Google Sheet",
+              sheetId: Number(approvedCatalogGid),
+              rowNumber: row.rowNumber,
+              collection: row.collection,
+              variantLinks: reconciliation.variantLinks || [],
+            });
+            linkedSourceProductId = persisted.sourceProductId;
+          }
+          successful.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            action: "reconciled_existing",
+            sku: reconciliation.expectedSku || skuPlan?.canonicalSku,
+            priceOverride: row.price,
+            priceMultiplier: row.priceMultiplier,
+            collection: row.collection,
+            sourceProductId: linkedSourceProductId,
+            verification: {
+              shopifyId: reconciliation.shopifyProductId,
+              variantsExpected: reconciliation.variantsChecked,
+              variantsCreated: 0,
+              variantsLinked: reconciliation.variantsChecked,
+            },
+          });
+          syncedExistingRows += 1;
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+
+        if (
+          reconciliation.status === "rebuild_required" &&
+          reconciliation.shopifyProductId &&
+          reconciliation.shopifyHandle
+        ) {
+          const publishResult = await publishPreparedProductToQueue({
+            productData: analyzed,
+            pricingRuleId: selectedPricingRuleId,
+            collections: selectedCollectionIds,
+            priceMultiplier: row.priceMultiplier,
+            replaceShopifyProductId: reconciliation.shopifyProductId,
+            replaceShopifyHandle: reconciliation.shopifyHandle,
+          });
+          const publishJob = await waitForSyncJobCompletion(publishResult.jobId);
+          if (publishJob.status === "failed") {
+            const reason =
+              String(publishJob.parsedResult?.error || "").trim() ||
+              `Shopify rebuild job failed (${publishResult.jobId})`;
+            throw new Error(reason);
+          }
+          verifyPublishJobResult(publishJob.parsedResult || {});
+          successful.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            action: "reconciled_existing",
+            sku: skuPlan?.canonicalSku,
+            priceOverride: row.price,
+            priceMultiplier: row.priceMultiplier,
+            collection: row.collection,
+            sourceProductId: publishResult.sourceProductId,
+            jobId: publishResult.jobId,
+            verification: {
+              shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+              variantsExpected: Number(publishJob.parsedResult?.variantsExpected),
+              variantsCreated: Number(publishJob.parsedResult?.variantsCreated),
+              variantsLinked: Number(publishJob.parsedResult?.variantsLinked),
+              variantImagesRequested: Number(
+                publishJob.parsedResult?.variantImagesRequested,
+              ),
+              variantImagesLinked: Number(
+                publishJob.parsedResult?.variantImagesLinked,
+              ),
+              salesChannelsPublished: Number(
+                publishJob.parsedResult?.salesChannelsPublished,
+              ),
+            },
+          });
+          syncedExistingRows += 1;
+          seenMap[fingerprintHash] = Date.now();
+          continue;
+        }
+
+        if (reconciliation.status !== "missing") {
+          await registerFailure(
+            reconciliation.reason ||
+              `Existing Shopify product reconciliation stopped with status ${reconciliation.status}`,
+          );
+          continue;
+        }
+
+
+        if (params.createMissingProducts === false || params.linkExistingProductsOnly) {
+          skipped.push({
+            rowNumber: row.rowNumber,
+            url: normalizedUrl,
+            reason: "missing_product_deferred_for_publish_phase",
+          });
+          continue;
+        }
+      }
 
       const publishResult = await publishPreparedProductToQueue({
         productData: analyzed,
@@ -2594,6 +3189,8 @@ async function processGoogleSheetBatch(params: {
       successful.push({
         rowNumber: row.rowNumber,
         url: normalizedUrl,
+        action: "published",
+        sku: skuPlan?.canonicalSku,
         priceOverride: row.price,
         priceMultiplier: row.priceMultiplier,
         collection: row.collection,
@@ -2601,10 +3198,12 @@ async function processGoogleSheetBatch(params: {
         jobId: publishResult.jobId,
         ...(verification ? { verification } : {}),
       });
+      seenMap[fingerprintHash] = Date.now();
     } catch (error: any) {
       const reason = error?.message || "Failed to analyze or publish this URL";
       if (isAlreadyLinkedToShopifyMessage(reason)) {
         const queued = await queueExistingLinkedProductSync("sheet_row_already_linked");
+        if (queued) seenMap[fingerprintHash] = Date.now();
         if (!queued) {
           const existing = await prisma.sourceProduct.findUnique({
             where: { url: normalizedUrl },
@@ -2617,7 +3216,12 @@ async function processGoogleSheetBatch(params: {
             sourceProductId: existing?.id,
           });
         }
-      } else if (isLikelyBlockedImportError(error) && row.price !== null && PricingEngine.validatePrice(row.price)) {
+      } else if (
+        params.allowBlockedSheetFallback !== false &&
+        isLikelyBlockedImportError(error) &&
+        row.price !== null &&
+        PricingEngine.validatePrice(row.price)
+      ) {
         try {
           const fallbackProduct = await buildBlockedSheetFallbackProduct({
             url: normalizedUrl,
@@ -2628,6 +3232,14 @@ async function processGoogleSheetBatch(params: {
             mode: params.mode || (params.processOnlyNewRows ? "auto_sync" : "sheet_link"),
             collection: row.collection,
           });
+          const fallbackSkuPlan = isApprovedCatalogSheet
+            ? applyDeterministicDabSkus({
+                product: fallbackProduct,
+                url: normalizedUrl,
+                multiplier: row.priceMultiplier,
+                existingProductSku: row.sku,
+              })
+            : null;
           const publishResult = await publishPreparedProductToQueue({
             productData: fallbackProduct,
             pricingRuleId: selectedPricingRuleId,
@@ -2681,6 +3293,8 @@ async function processGoogleSheetBatch(params: {
           successful.push({
             rowNumber: row.rowNumber,
             url: normalizedUrl,
+            action: "published",
+            sku: fallbackSkuPlan?.canonicalSku,
             priceOverride: row.price,
             priceMultiplier: row.priceMultiplier,
             collection: row.collection,
@@ -2688,12 +3302,14 @@ async function processGoogleSheetBatch(params: {
             jobId: publishResult.jobId,
             ...(verification ? { verification } : {}),
           });
+          seenMap[fingerprintHash] = Date.now();
         } catch (fallbackError: any) {
           const fallbackReason =
             fallbackError?.message ||
             `Fallback publish failed after source blocked: ${reason}`;
           if (isAlreadyLinkedToShopifyMessage(fallbackReason)) {
             const queued = await queueExistingLinkedProductSync("sheet_fallback_already_linked");
+            if (queued) seenMap[fingerprintHash] = Date.now();
             if (!queued) {
               const existing = await prisma.sourceProduct.findUnique({
                 where: { url: normalizedUrl },
@@ -2715,13 +3331,13 @@ async function processGoogleSheetBatch(params: {
       }
     }
 
-    seenMap[fingerprintHash] = Date.now();
-    processedNewRows += 1;
   }
 
   setProcessedSheetRowsMap(sheetKey, seenMap);
   const publishedRows = successful.filter(
-    (entry) => entry.action !== "synced_existing",
+    (entry) =>
+      entry.action !== "synced_existing" &&
+      entry.action !== "reconciled_existing",
   ).length;
 
   const responsePayload = {
@@ -2731,8 +3347,10 @@ async function processGoogleSheetBatch(params: {
     summary: {
       totalRowsInSheet: sheetData.rows.length,
       selectedRows: filteredRows.length,
+      eligibleRows: eligibleRows.length,
       processedRows: processRows.length,
       processedNewRows,
+      remainingRows: Math.max(0, eligibleRows.length - processRows.length),
       published: publishedRows,
       syncedExisting: syncedExistingRows,
       skipped: skipped.length,
@@ -2757,6 +3375,8 @@ async function processGoogleSheetBatch(params: {
       rowNumbers: rowFilterSet.size ? [...rowFilterSet] : null,
       pricingRuleId: selectedPricingRuleId,
       defaultCollections: params.defaultCollections || [],
+      createMissingProducts: params.createMissingProducts !== false,
+      linkExistingProductsOnly: params.linkExistingProductsOnly === true,
     },
   });
 
@@ -2867,8 +3487,17 @@ async function publishPreparedProductToQueue(params: {
   pricingRuleId?: string | null;
   collections?: string[];
   priceMultiplier?: number | null;
+  replaceShopifyProductId?: string;
+  replaceShopifyHandle?: string;
 }) {
-  const { productData, pricingRuleId, collections, priceMultiplier } = params;
+  const {
+    productData,
+    pricingRuleId,
+    collections,
+    priceMultiplier,
+    replaceShopifyProductId,
+    replaceShopifyHandle,
+  } = params;
   const sourceUrl = String(productData?.source?.url || "").trim();
   if (!sourceUrl || !isHttpUrl(sourceUrl)) {
     throw Object.assign(new Error("Product source URL is missing or invalid"), {
@@ -3059,12 +3688,22 @@ async function publishPreparedProductToQueue(params: {
         variants: { create: variantRecords },
       },
     });
+  }, {
+    maxWait: 10_000,
+    timeout: 30_000,
   });
 
   const job = await QueueService.addTask("PUBLISH_TO_SHOPIFY", {
     sourceProductId: sourceProduct.id,
     pricingRuleId: selectedPricingRuleId,
     collections: collectionIds,
+    ...(replaceShopifyProductId && replaceShopifyHandle
+      ? {
+          replaceShopifyProductId,
+          replaceShopifyHandle,
+          handle: replaceShopifyHandle,
+        }
+      : {}),
     ...(selectedPriceMultiplier ? { priceMultiplier: selectedPriceMultiplier } : {}),
   });
 
@@ -3316,7 +3955,10 @@ router.post("/imports/analyze", async (req, res) => {
 
       if (cachedSourceProduct) {
         const cachedProduct = sourceProductToNormalizedProduct(cachedSourceProduct);
-        if (productSupplierMatchesUrl(url, cachedProduct)) {
+        if (
+          productSupplierMatchesUrl(url, cachedProduct) &&
+          isUsableAnalyzeProduct(cachedProduct)
+        ) {
           data = cachedProduct;
           setCachedAnalyzeProduct(url, data);
         }
@@ -3359,6 +4001,7 @@ router.post("/imports/analyze", async (req, res) => {
 
           const staleProduct = sourceProductToNormalizedProduct(staleSourceProduct);
           if (!productSupplierMatchesUrl(url, staleProduct)) throw error;
+          if (!isUsableAnalyzeProduct(staleProduct)) throw error;
           data = staleProduct;
           data.raw = {
             ...(data.raw || {}),
@@ -3429,7 +4072,7 @@ router.post("/imports/analyze", async (req, res) => {
 
 // Products
 router.get("/products/stats", async (req, res) => {
-  const [totalLinked, activeSync] = await Promise.all([
+  const [totalLinked, activeSync, pendingReviewProducts] = await Promise.all([
     prisma.sourceProduct.count({
       where: {
         shopifyProduct: { isNot: null },
@@ -3441,11 +4084,20 @@ router.get("/products/stats", async (req, res) => {
         shopifyProduct: { isNot: null },
       },
     }),
+    prisma.manualReviewItem.findMany({
+      where: {
+        status: "pending",
+        sourceProduct: { shopifyProduct: { isNot: null } },
+      },
+      distinct: ["sourceProductId"],
+      select: { sourceProductId: true },
+    }),
   ]);
 
   res.json({
     totalLinked,
     activeSync,
+    pendingReview: pendingReviewProducts.length,
   });
 });
 
@@ -3714,6 +4366,9 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
   const createManualReview = req.body?.createManualReview !== false;
   const processOnlyNewRows = req.body?.processOnlyNewRows === true;
   const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
+  const skipExistingProducts = req.body?.skipExistingProducts === true;
+  const allowBlockedSheetFallback = req.body?.allowBlockedSheetFallback !== false;
+  const linkExistingProductsOnly = req.body?.linkExistingProductsOnly === true;
 
   if (!sheetUrl) {
     return res.status(400).json({ error: "sheetUrl is required" });
@@ -3728,6 +4383,10 @@ router.post("/imports/excel/process-sheet-link", async (req, res) => {
       createManualReview,
       processOnlyNewRows,
       waitForPublishCompletion,
+      skipExistingProducts,
+      allowBlockedSheetFallback,
+      linkExistingProductsOnly,
+      createMissingProducts: linkExistingProductsOnly ? false : undefined,
       mode: processOnlyNewRows ? "auto_sync" : "sheet_link",
     });
     res.json(result);
@@ -3760,6 +4419,13 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
   }
 
   const run = async () => {
+    if (googleSheetAutoSyncState.inProgress) {
+      console.warn("Google Sheet auto sync skipped an overlapping interval");
+      return;
+    }
+
+    googleSheetAutoSyncState.inProgress = true;
+    googleSheetAutoSyncState.currentRunStartedAt = new Date().toISOString();
     try {
       const result = await processGoogleSheetBatch({
         sheetUrl,
@@ -3778,6 +4444,9 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
       googleSheetAutoSyncState.lastRunAt = new Date().toISOString();
       googleSheetAutoSyncState.lastError = error?.message || "Auto sync failed";
       googleSheetAutoSyncState.lastBatchId = null;
+    } finally {
+      googleSheetAutoSyncState.inProgress = false;
+      googleSheetAutoSyncState.currentRunStartedAt = null;
     }
   };
 
@@ -3787,6 +4456,8 @@ router.post("/imports/excel/auto-sync/start", async (req, res) => {
   }
 
   googleSheetAutoSyncState.running = true;
+  googleSheetAutoSyncState.inProgress = false;
+  googleSheetAutoSyncState.currentRunStartedAt = null;
   googleSheetAutoSyncState.sheetUrl = sheetUrl;
   googleSheetAutoSyncState.csvUrl = normalizeGoogleSheetUrl(sheetUrl);
   googleSheetAutoSyncState.intervalSeconds = intervalSeconds;
@@ -3887,6 +4558,42 @@ router.get("/imports/excel/runs/:id", async (req, res) => {
   });
 });
 
+router.post("/imports/excel/process-async", async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (rows.length === 0) {
+    return res.status(400).json({ error: "rows is required" });
+  }
+
+  const payload = {
+    ...req.body,
+    rows,
+    // Background processing performs the same Shopify read-back verification.
+    waitForPublishCompletion: req.body?.waitForPublishCompletion !== false,
+  };
+  const port = Number(process.env.PORT || 8080);
+  const target = `http://127.0.0.1:${port}/api/imports/excel/process`;
+
+  res.status(202).json({
+    accepted: true,
+    rows: rows.length,
+    message: "Import accepted and is running in the background.",
+  });
+
+  void fetch(target, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        console.error("Background Excel import failed:", await response.text());
+      }
+    })
+    .catch((error) => {
+      console.error("Background Excel import request failed:", error);
+    });
+});
+
 router.post("/imports/excel/process", async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   const selectedPricingRuleId = asOptionalString(req.body?.pricingRuleId);
@@ -3956,6 +4663,7 @@ router.post("/imports/excel/process", async (req, res) => {
         : index + 2;
       const rawUrl = String(row?.url || "").trim();
       const normalizedUrl = normalizeAnalyzeCacheUrl(rawUrl);
+      const priceMultiplier = toPositiveSheetNumber(row?.priceMultiplier ?? row?.multiplier);
 
       const registerFailure = async (reason: string) => {
         let review: { sourceProductId: string; manualReviewId: string } | null = null;
@@ -3991,6 +4699,10 @@ router.post("/imports/excel/process", async (req, res) => {
         await registerFailure("Invalid product URL");
         continue;
       }
+      if (priceMultiplier === null) {
+        await registerFailure("Missing or invalid price multiplier");
+        continue;
+      }
       if (processedUrls.has(normalizedUrl)) {
         await registerFailure("Duplicate URL inside the same Excel batch");
         continue;
@@ -4003,11 +4715,18 @@ router.post("/imports/excel/process", async (req, res) => {
           excelRowNumber: rowNumber,
           mode: "file_upload",
         };
+        applyDeterministicDabSkus({
+          product: analyzed,
+          url: normalizedUrl,
+          multiplier: priceMultiplier,
+          existingProductSku: String(row?.sku || ""),
+        });
         setCachedAnalyzeProduct(normalizedUrl, analyzed);
         const publishResult = await publishPreparedProductToQueue({
           productData: analyzed,
           pricingRuleId: selectedPricingRuleId,
           collections,
+          priceMultiplier,
         });
 
         let verification:
@@ -4048,7 +4767,7 @@ router.post("/imports/excel/process", async (req, res) => {
           };
         }
 
-        successful.push({
+          successful.push({
           rowNumber,
           url: normalizedUrl,
           sourceProductId: publishResult.sourceProductId,
@@ -4615,6 +5334,32 @@ router.get("/shopify/collections", async (req, res) => {
 
     console.error("Failed to load Shopify collections:", error.message);
     res.json([]);
+  }
+});
+
+router.post("/shopify/collections", async (req, res) => {
+  const title = String(req.body?.title || "").trim();
+  if (!title || title.length > 255) {
+    return res.status(400).json({ error: "A collection title between 1 and 255 characters is required" });
+  }
+
+  try {
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const existing = (await ShopifyService.getCollections(client)).find(
+      (collection: any) => String(collection.title || "").trim().toLocaleLowerCase() === title.toLocaleLowerCase(),
+    );
+    if (existing) {
+      return res.json({ collection: existing, created: false });
+    }
+
+    const collection = await ShopifyService.createCollection(client, title);
+    res.status(201).json({ collection, created: true });
+  } catch (error: any) {
+    if (isShopifyReconnectRequired(error)) {
+      return res.status(409).json({ error: error.message, code: "SHOPIFY_RECONNECT_REQUIRED" });
+    }
+    console.error("Failed to create Shopify collection:", error.message);
+    res.status(500).json({ error: error.message || "Failed to create Shopify collection" });
   }
 });
 

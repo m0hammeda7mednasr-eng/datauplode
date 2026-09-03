@@ -1,0 +1,186 @@
+name: Shopify Existing Product Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      audit_revision:
+        description: "Exact 40-character CI-green commit SHA to audit"
+        required: true
+        type: string
+      skus_json:
+        description: 'SKU audit input: [{"sku":"SKU-1","expectedProductId":"gid://shopify/Product/123"}]'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dabdoob-shopify-existing-product-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+      SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+      SHOPIFY_API_VERSION: "2026-04"
+      EXISTING_PRODUCT_AUDIT_SKUS_JSON: ${{ inputs.skus_json }}
+      EXISTING_PRODUCT_AUDIT_TIMEOUT_MS: "30000"
+      EXISTING_PRODUCT_AUDIT_MAX_RETRIES: "2"
+      AUDIT_REVISION: ${{ inputs.audit_revision }}
+      AUDIT_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL }}
+
+    steps:
+      - name: Validate requested revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${AUDIT_REVISION}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "audit_revision must be an exact 40-character commit SHA." >&2
+            exit 2
+          fi
+
+      - name: Checkout requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.audit_revision }}
+          fetch-depth: 1
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_revision="$(git rev-parse HEAD)"
+          expected_revision="$(printf '%s' "${AUDIT_REVISION}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${actual_revision}" != "${expected_revision}" ]]; then
+            echo "Checked-out revision does not match requested audit_revision." >&2
+            echo "Expected: ${expected_revision}" >&2
+            echo "Actual:   ${actual_revision}" >&2
+            exit 2
+          fi
+          echo "AUDIT_CHECKED_OUT_REVISION=${actual_revision}" >> "$GITHUB_ENV"
+
+      - name: Validate live Railway target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AUDIT_BASE_URL}" ]]; then
+            echo "Missing Railway target URL. Configure RAILWAY_SMOKE_BASE_URL." >&2
+            exit 2
+          fi
+          if [[ ! "${AUDIT_BASE_URL}" =~ ^https:// ]]; then
+            echo "Existing-product audit target must use HTTPS." >&2
+            exit 2
+          fi
+
+      - name: Verify live Railway and Supabase readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready_url="${AUDIT_BASE_URL%/}/api/ready"
+          curl --fail --silent --show-error --location --max-redirs 0 --max-time 30 \
+            --output existing-product-audit-readiness.json \
+            "${ready_url}"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('existing-product-audit-readiness.json', 'utf8'));
+          const expectedRevision = String(process.env.AUDIT_REVISION || '').trim().toLowerCase();
+          const actualRevision = String(body?.deployment?.revision || '').trim().toLowerCase();
+          const fail = (message) => { console.error(message); process.exit(2); };
+
+          if (body?.ok !== true) fail('Live readiness must report ok=true before Shopify audit access.');
+          if (body?.database?.ok !== true) fail('Live production database readiness is not healthy.');
+          if (body?.database?.target !== 'supabase') fail('Live production database target must be Supabase.');
+          if (body?.database?.projectRefPinned !== true) fail('Supabase project ref is not explicitly pinned.');
+          if (body?.database?.projectRefMatched !== true) fail('Live DATABASE_URL does not match the pinned Supabase project ref.');
+          if (body?.deployment?.revisionVerified !== true || actualRevision !== expectedRevision) {
+            fail(`Live Railway revision ${actualRevision || '<unknown>'} does not match requested audit revision ${expectedRevision}.`);
+          }
+          if (body?.platform?.productionEnvironment !== true) fail('Audit target is not reporting production environment.');
+          if (body?.platform?.writeSafetyReady !== true || body?.platform?.ready !== true) {
+            fail('Live production write-safety/readiness is not satisfied.');
+          }
+
+          const configuration = body?.configuration || {};
+          const mustBeFalse = [
+            'runtimeWriteGateEnabled',
+            'inventoryAutostartConfigured',
+            'inventoryAutostartEnabled',
+            'jobRecoveryConfigured',
+            'jobRecoveryShopifyWritesConfigured',
+            'jobRecoveryEnabled',
+            'sheetImportAutostartConfigured',
+            'sheetImportAutostartEnabled',
+            'catalogWriteGateEnabled',
+            'catalogSheetWriteGateEnabled',
+          ];
+          for (const key of mustBeFalse) {
+            if (configuration[key] !== false) fail(`Existing-product audit requires configuration.${key}=false.`);
+          }
+
+          const jobs = body?.jobs || {};
+          for (const key of ['pending', 'running', 'staleRunning', 'recentFailed']) {
+            if (Number(jobs[key]) !== 0) fail(`Existing-product audit requires jobs.${key}=0, received ${String(jobs[key])}.`);
+          }
+
+          console.log(JSON.stringify({
+            ok: true,
+            revision: actualRevision,
+            databaseTarget: body.database.target,
+            projectRefPinned: body.database.projectRefPinned,
+            projectRefMatched: body.database.projectRefMatched,
+            writeSafetyReady: body.platform.writeSafetyReady,
+            queue: {
+              pending: jobs.pending,
+              running: jobs.running,
+              staleRunning: jobs.staleRunning,
+              recentFailed: jobs.recentFailed,
+            },
+            shopifyMutations: 0,
+          }, null, 2));
+          NODE
+
+      - name: Validate required Shopify read secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SHOPIFY_SHOP_DOMAIN}" || -z "${SHOPIFY_ACCESS_TOKEN}" ]]; then
+            echo "Missing Shopify audit secrets." >&2
+            exit 2
+          fi
+          if [[ ! "${SHOPIFY_SHOP_DOMAIN}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$ ]]; then
+            echo "SHOPIFY_SHOP_DOMAIN must be a direct *.myshopify.com hostname." >&2
+            exit 2
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=dev
+
+      - name: Run read-only existing product audit
+        run: npm run shopify:audit-existing
+
+      - name: Publish audit summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Shopify existing-product audit"
+            echo
+            echo "- Requested revision: \`${AUDIT_REVISION}\`"
+            echo "- Checked-out revision: \`${AUDIT_CHECKED_OUT_REVISION:-unverified}\`"
+            echo "- Live Railway/Supabase readiness pinned to the same revision before Shopify access: \`true\`"
+            echo "- Broad/background write gates and job queue must be closed/quiet before Shopify access: \`true\`"
+            echo "- Mode: read-only GraphQL queries"
+            echo "- Maximum SKUs per run: \`50\`"
+            echo "- Shopify mutations: \`0\`"
+            echo "- HTTP 403 classification: blocked, never out-of-stock"
+          } >> "$GITHUB_STEP_SUMMARY"

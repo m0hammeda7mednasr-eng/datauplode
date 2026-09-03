@@ -154,6 +154,34 @@ export class ShopifyService {
     return data.collections.edges.map((e: any) => e.node);
   }
 
+  static async createCollection(client: ShopifyGraphqlClient, title: string) {
+    const mutation = `
+      mutation CollectionCreate($input: CollectionInput!) {
+        collectionCreate(input: $input) {
+          collection {
+            id
+            title
+            handle
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    const data = await client.request(mutation, { input: { title } });
+    const result = data.collectionCreate;
+    const userErrors = result?.userErrors || [];
+    if (userErrors.length > 0) {
+      throw new Error(userErrors.map((error: any) => error.message).join("; "));
+    }
+    if (!result?.collection) {
+      throw new Error("Shopify did not return the created collection");
+    }
+    return result.collection;
+  }
+
   static async getPublications(client: ShopifyGraphqlClient) {
     const query = `
       query SalesChannelPublications {
@@ -234,6 +262,98 @@ export class ShopifyService {
     `;
     const data = await client.request(query, { id: productId });
     return data.product || null;
+  }
+
+  static async getProductCatalogSnapshot(client: ShopifyGraphqlClient, productId: string) {
+    const query = `
+      query ProductCatalogSnapshot($id: ID!) {
+        product(id: $id) {
+          id
+          handle
+          title
+          descriptionHtml
+          vendor
+          status
+          media(first: 250) {
+            nodes {
+              id
+              alt
+              mediaContentType
+              ... on MediaImage {
+                image { url }
+              }
+            }
+          }
+          variants(first: 250) {
+            nodes {
+              id
+              title
+              price
+              sku
+              inventoryQuantity
+              selectedOptions { name value }
+              media(first: 10) {
+                nodes { id alt mediaContentType }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await client.request(query, { id: productId });
+    const product = data.product || null;
+    if (!product) return null;
+    return {
+      ...product,
+      media: product.media?.nodes || [],
+      variants: product.variants?.nodes || [],
+    };
+  }
+
+  static async setProductCatalog(
+    client: ShopifyGraphqlClient,
+    productId: string,
+    input: Record<string, any>,
+  ) {
+    const mutation = `
+      mutation SetProductCatalog(
+        $identifier: ProductSetIdentifiers
+        $input: ProductSetInput!
+        $synchronous: Boolean!
+      ) {
+        productSet(
+          identifier: $identifier
+          input: $input
+          synchronous: $synchronous
+        ) {
+          product {
+            id
+            handle
+            title
+            descriptionHtml
+            status
+            media(first: 250) { nodes { id alt mediaContentType status } }
+            variants(first: 250) {
+              nodes {
+                id
+                title
+                price
+                sku
+                inventoryQuantity
+                selectedOptions { name value }
+                media(first: 10) { nodes { id alt mediaContentType status } }
+              }
+            }
+          }
+          userErrors { code field message }
+        }
+      }
+    `;
+    return client.request(mutation, {
+      identifier: { id: productId },
+      input,
+      synchronous: true,
+    });
   }
 
   static async updateProductStatus(client: ShopifyGraphqlClient, productId: string, status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED') {
@@ -424,6 +544,7 @@ export class ShopifyService {
               title
               price
               sku
+              inventoryQuantity
               inventoryItem {
                 id
                 sku

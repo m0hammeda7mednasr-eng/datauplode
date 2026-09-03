@@ -2,7 +2,9 @@
 import * as cheerio from "cheerio";
 import axios from "axios";
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import { promisify } from "node:util";
+import { reserveScraperApiCredits } from "./scraperCreditBudget.js";
 
 export interface NormalizedProduct {
   source: {
@@ -225,12 +227,12 @@ function managedBypassMode(): ManagedBypassMode {
   if (configuredMode) {
     const mode = normalizeManagedBypassMode(configuredMode);
     if (mode !== "never") return mode;
-    if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+    if (configuredScraperApiKeyCount() > 0) return "auto";
     return mode;
   }
   // Prefer managed bypass automatically when ScraperAPI is configured,
   // so blocked suppliers still scrape successfully without manual env tweaking.
-  if (cleanText(process.env.SCRAPERAPI_KEY)) return "auto";
+  if (configuredScraperApiKeyCount() > 0) return "auto";
   return "never";
 }
 
@@ -303,6 +305,65 @@ const managedBypassUsageByDay = new Map<string, number>();
 const managedBypassCooldownUntil = new Map<string, number>();
 const managedBypassProviderCooldownUntil = new Map<string, number>();
 const managedBypassUsageByProviderMonth = new Map<string, number>();
+const scraperApiKeyCooldownUntil = new Map<string, number>();
+let scraperApiRoundRobinIndex = 0;
+
+function configuredScraperApiKeys(): string[] {
+  const pooled = String(process.env.SCRAPERAPI_KEYS || "")
+    .split(/[\s,;]+/)
+    .map((value) => cleanText(value))
+    .filter(Boolean);
+  const legacy = cleanText(process.env.SCRAPERAPI_KEY);
+  return [...new Set(legacy ? [...pooled, legacy] : pooled)];
+}
+
+export function configuredScraperApiKeyCount(): number {
+  return configuredScraperApiKeys().length;
+}
+
+function scraperApiKeyIdentity(apiKey: string): string {
+  return crypto.createHash("sha256").update(apiKey).digest("hex");
+}
+
+export function scraperApiStatusExhaustsKey(status: number): boolean {
+  // ScraperAPI HTTP 403 is usually a target/source block for a specific
+  // product request, not proof that the API key itself is exhausted. Cooling a
+  // key for 24h on target 403s quickly disables the whole pool on blocked
+  // stores like Next/SHEIN and stalls catalog replacement. Keep true
+  // quota/auth exhaustion to statuses that reliably represent account/key
+  // state.
+  return [401, 402, 429].includes(Number(status));
+}
+
+function orderedAvailableScraperApiKeys(): string[] {
+  const keys = configuredScraperApiKeys();
+  if (!keys.length) return [];
+  const start = scraperApiRoundRobinIndex % keys.length;
+  scraperApiRoundRobinIndex = (start + 1) % keys.length;
+  return keys
+    .map((_, index) => keys[(start + index) % keys.length])
+    .filter(
+      (key) =>
+        (scraperApiKeyCooldownUntil.get(scraperApiKeyIdentity(key)) || 0) <=
+        Date.now(),
+    );
+}
+
+function coolDownScraperApiKey(apiKey: string, status?: number) {
+  const quotaOrAuthFailure = scraperApiStatusExhaustsKey(Number(status));
+  const defaultMinutes = quotaOrAuthFailure ? 24 * 60 : 5;
+  const cooldownEnv = quotaOrAuthFailure
+    ? "SCRAPERAPI_EXHAUSTED_KEY_COOLDOWN_MINUTES"
+    : "SCRAPERAPI_KEY_COOLDOWN_MINUTES";
+  const minutes = Math.max(
+    1,
+    envNumber(cooldownEnv, defaultMinutes),
+  );
+  scraperApiKeyCooldownUntil.set(
+    scraperApiKeyIdentity(apiKey),
+    Date.now() + minutes * 60_000,
+  );
+}
 
 function getManagedBypassDayKey(): string {
   return new Date().toISOString().slice(0, 10);
@@ -363,6 +424,9 @@ function isProviderCoolingDown(provider: ManagedBypassProvider): boolean {
 }
 
 function noteProviderFailure(provider: ManagedBypassProvider) {
+  // ScraperAPI pools manage failures per key. A URL-specific failure across
+  // several keys must never pause the entire provider for every other product.
+  if (provider === "scraperapi" && configuredScraperApiKeyCount() > 1) return;
   const cooldownMinutes = Math.max(
     0,
     envNumber("SCRAPER_BYPASS_PROVIDER_COOLDOWN_MINUTES", 30),
@@ -467,7 +531,7 @@ function activeManagedBypassProviders(
   }
 
   const providers: ManagedBypassProvider[] = [];
-  if (cleanText(process.env.SCRAPERAPI_KEY)) providers.push("scraperapi");
+  if (configuredScraperApiKeyCount() > 0) providers.push("scraperapi");
   if (cleanText(process.env.ZENROWS_API_KEY)) providers.push("zenrows");
   if (cleanText(process.env.SCRAPINGBEE_API_KEY))
     providers.push("scrapingbee");
@@ -500,8 +564,12 @@ async function fetchHtmlViaScraperApi(
   url: string,
   options: ManagedBypassOptions,
 ): Promise<string> {
-  const apiKey = cleanText(process.env.SCRAPERAPI_KEY);
-  if (!apiKey) throw new Error("SCRAPERAPI_KEY is not configured");
+  const configuredKeyCount = configuredScraperApiKeyCount();
+  const apiKeys = orderedAvailableScraperApiKeys();
+  if (!configuredKeyCount) throw new Error("No ScraperAPI key is configured");
+  if (!apiKeys.length) {
+    throw new Error("All configured ScraperAPI keys are cooling down");
+  }
 
   const countryCode =
     options.countryCode ||
@@ -520,7 +588,7 @@ async function fetchHtmlViaScraperApi(
   const ultraPremium =
     options.ultraPremium ?? envFlag("SCRAPERAPI_ULTRA_PREMIUM", false);
 
-  const buildParams = (config: {
+  const buildParams = (apiKey: string, config: {
     render: boolean;
     includeCountryAndDevice: boolean;
     premium: boolean;
@@ -547,7 +615,7 @@ async function fetchHtmlViaScraperApi(
     return params;
   };
 
-  const requestHtml = async (params: URLSearchParams) => {
+  const requestHtml = async (apiKey: string, params: URLSearchParams) => {
     const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
       timeout: 90000,
       responseType: "text",
@@ -555,6 +623,9 @@ async function fetchHtmlViaScraperApi(
     });
 
     if (response.status !== 200) {
+      if (scraperApiStatusExhaustsKey(response.status)) {
+        coolDownScraperApiKey(apiKey, response.status);
+      }
       throw new Error(`ScraperAPI HTTP ${response.status}`);
     }
 
@@ -592,11 +663,14 @@ async function fetchHtmlViaScraperApi(
   }
 
   const errors: string[] = [];
-  for (const attempt of attempts) {
-    try {
-      return await requestHtml(buildParams(attempt));
-    } catch (error: any) {
-      errors.push(error?.message || String(error));
+  for (let keyIndex = 0; keyIndex < apiKeys.length; keyIndex += 1) {
+    const apiKey = apiKeys[keyIndex];
+    for (const attempt of attempts) {
+      try {
+        return await requestHtml(apiKey, buildParams(apiKey, attempt));
+      } catch (error: any) {
+        errors.push(`key ${keyIndex + 1}: ${error?.message || String(error)}`);
+      }
     }
   }
 
@@ -655,10 +729,19 @@ async function fetchHtmlViaManagedBypassProvider(
   url: string,
   options: ManagedBypassOptions,
 ): Promise<string> {
-  noteProviderUsage(provider);
   if (provider === "scraperapi") {
+    const estimatedCredits = options.ultraPremium
+      ? (options.jsRender ? 75 : 30)
+      : options.premium && options.jsRender
+        ? 25
+        : options.premium || options.jsRender
+          ? 10
+          : 1;
+    await reserveScraperApiCredits(url, estimatedCredits);
+    noteProviderUsage(provider, estimatedCredits);
     return fetchHtmlViaScraperApi(url, options);
   }
+  noteProviderUsage(provider);
   if (provider === "zenrows") {
     return fetchHtmlViaZenRows(url, options);
   }
@@ -961,28 +1044,28 @@ function parsePriceRange(value: any): { min: number; max: number } {
 
 function detectCurrency(text: string | undefined, fallback = "USD"): string {
   if (!text) return fallback;
-  if (/EGP|\u062c\s*\.?\s*\u0645/i.test(text)) return "EGP";
-  if (/AED|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645/i.test(text))
+  if (/\bEGP\b|\u062c\s*\.?\s*\u0645/i.test(text)) return "EGP";
+  if (/\bAED\b|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645/i.test(text))
     return "AED";
-  if (/SAR|\u0631\s*\.?\s*\u0633|\u0631\u064a\u0627\u0644/i.test(text))
+  if (/\bSAR\b|\u0631\s*\.?\s*\u0633|\u0631\u064a\u0627\u0644/i.test(text))
     return "SAR";
-  if (/QAR/i.test(text)) return "QAR";
-  if (/KWD/i.test(text)) return "KWD";
-  if (/BHD/i.test(text)) return "BHD";
-  if (/OMR/i.test(text)) return "OMR";
-  if (/MXN/i.test(text)) return "MXN";
-  if (/TRY|TL|\u20ba/i.test(text)) return "TRY";
-  if (/GBP|\u00a3/i.test(text)) return "GBP";
-  if (/EUR|\u20ac/i.test(text)) return "EUR";
-  if (/GBP|Ã‚Â£/i.test(text)) return "GBP";
-  if (/EUR|Ã¢â€šÂ¬/i.test(text)) return "EUR";
-  if (/USD|\$/i.test(text)) return "USD";
+  if (/\bQAR\b/i.test(text)) return "QAR";
+  if (/\bKWD\b/i.test(text)) return "KWD";
+  if (/\bBHD\b/i.test(text)) return "BHD";
+  if (/\bOMR\b/i.test(text)) return "OMR";
+  if (/\bMXN\b/i.test(text)) return "MXN";
+  if (/\b(?:TRY|TL)\b|\u20ba/i.test(text)) return "TRY";
+  if (/\bGBP\b|\u00a3/i.test(text)) return "GBP";
+  if (/\bEUR\b|\u20ac/i.test(text)) return "EUR";
+  if (/\bGBP\b|Ã‚Â£/i.test(text)) return "GBP";
+  if (/\bEUR\b|Ã¢â€šÂ¬/i.test(text)) return "EUR";
+  if (/\bUSD\b|\$/i.test(text)) return "USD";
   return fallback;
 }
 
 function looksLikeCurrencyText(text: string): boolean {
   return (
-    /(?:EGP|AED|SAR|QAR|KWD|BHD|OMR|MXN|TRY|GBP|EUR|USD|TL|\$|\u00a3|\u20ac|\u20ba|\u062c\s*\.?\s*\u0645|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645)/i.test(
+    /(?:\b(?:EGP|AED|SAR|QAR|KWD|BHD|OMR|MXN|TRY|GBP|EUR|USD|TL)\b|\$|\u00a3|\u20ac|\u20ba|\u062c\s*\.?\s*\u0645|\u062f\s*\.?\s*\u0625|\u062f\u0631\u0647\u0645)/i.test(
       text,
     ) || /(?:Ãƒâ€šÃ‚Â£|ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬)/i.test(text)
   );
@@ -1631,19 +1714,23 @@ function parseNextColourFromHtml(
   return cleanColorOptionValue(inferNextColourFromTitle(title)) || undefined;
 }
 
-function inferNextBabySizes(text: string): string[] {
+export function inferNextBabySizes(text: string): string[] {
   const normalized = cleanText(text);
   let maxYears = 0;
+  let minMonths = 0;
 
   const englishRange = normalized.match(
-    /(?:0\s*mths?|0\s*months?)\s*-\s*(\d+)\s*(?:yrs?|years?)/i,
+    /(\d+)\s*(?:mths?|months?)\s*-\s*(\d+)\s*(?:yrs?|years?)/i,
   );
   const upToRange = normalized.match(/up to\s*(\d+)\s*-\s*(\d+)\s*years?/i);
   const arabicRange = normalized.match(
     /(?:0\s*(?:\u0634\u0647\u0631|\u0634\u0647\u0648\u0631))\s*-\s*(\d+)\s*(?:\u0633\u0646\u0629|\u0633\u0646\u062a\u064a\u0646|\u0633\u0646\u0648\u0627\u062a)/i,
   );
 
-  if (englishRange) maxYears = parseInt(englishRange[1], 10);
+  if (englishRange) {
+    minMonths = parseInt(englishRange[1], 10);
+    maxYears = parseInt(englishRange[2], 10);
+  }
   if (!maxYears && upToRange) maxYears = parseInt(upToRange[2], 10);
   if (!maxYears && arabicRange) maxYears = parseInt(arabicRange[1], 10);
   if (!maxYears && /baby|babies|\u0628\u064a\u0628\u064a/i.test(normalized))
@@ -1651,20 +1738,48 @@ function inferNextBabySizes(text: string): string[] {
 
   if (!maxYears) return [];
 
-  const sizes = [
-    "Up to 1 Month",
-    "0-3 Months",
-    "3-6 Months",
-    "6-9 Months",
-    "9-12 Months",
-    "12-18 Months",
-    "1.5-2 Years",
+  const ladder = [
+    { startMonths: 0, endMonths: 1, label: "Up to 1 Month (50-56cm)" },
+    { startMonths: 0, endMonths: 3, label: "0-3 Months (56-62cm)" },
+    { startMonths: 3, endMonths: 6, label: "3-6 Months (62-68cm)" },
+    { startMonths: 6, endMonths: 9, label: "6-9 Months (68-74cm)" },
+    { startMonths: 9, endMonths: 12, label: "9-12 Months (74-80cm)" },
+    { startMonths: 12, endMonths: 18, label: "12-18 Months (80-86cm)" },
+    { startMonths: 18, endMonths: 24, label: "1.5-2 Years (86-92cm)" },
+    { startMonths: 24, endMonths: 36, label: "2-3 Years (92-98cm)" },
+    { startMonths: 36, endMonths: 48, label: "3-4 Years (98-104cm)" },
+    { startMonths: 48, endMonths: 60, label: "4-5 Years (104-110cm)" },
+    { startMonths: 60, endMonths: 72, label: "5-6 Years (110-116cm)" },
+    { startMonths: 72, endMonths: 84, label: "6-7 Years (116-122cm)" },
+    { startMonths: 84, endMonths: 96, label: "7-8 Years (122-128cm)" },
+    { startMonths: 96, endMonths: 108, label: "8-9 Years (128-134cm)" },
+    { startMonths: 108, endMonths: 120, label: "9-10 Years (134-140cm)" },
+    { startMonths: 120, endMonths: 132, label: "10-11 Years (140-146cm)" },
+    { startMonths: 132, endMonths: 144, label: "11-12 Years (146-152cm)" },
   ];
+  const maxMonths = maxYears * 12;
+  return ladder
+    .filter(
+      (size) =>
+        size.startMonths >= minMonths &&
+        size.endMonths <= maxMonths,
+    )
+    .map((size) => size.label);
+}
 
-  if (maxYears >= 3) sizes.push("2-3 Years");
-  if (maxYears >= 4) sizes.push("3-4 Years");
-
-  return sizes;
+function advertisedCurrencyPriceRanges(value: unknown) {
+  const text = cleanText(value);
+  if (!text) return [] as Array<{ min: number; max: number }>;
+  const currency =
+    "(?:AED|SAR|QAR|KWD|BHD|OMR|EGP|GBP|EUR|USD|TRY|TL|£|€|\\$|د\\s*\\.?\\s*إ|ج\\s*\\.?\\s*م)";
+  const amount = "\\d[\\d,.]*(?:\\s?\\d{3})*(?:[.,]\\d{1,2})?";
+  const pattern = new RegExp(
+    `${currency}\\s*${amount}\\s*(?:-|–|—|to)\\s*(?:${currency}\\s*)?${amount}`,
+    "gi",
+  );
+  return [...text.matchAll(pattern)]
+    .map((match) => parsePriceRange(match[0]))
+    .filter((range) => range.min > 0 && range.max >= range.min);
 }
 
 function buildInferredNextVariants(
@@ -5144,7 +5259,7 @@ function parseMarksAndSpencerHtml(
 
 export class MarksAndSpencerScraper implements SupplierScraper {
   canHandle(url: string): boolean {
-    return hostMatches(url, ["marksandspencerme.com"]);
+    return hostMatches(url, ["marksandspencerme.com", "marksandspencer.ae"]);
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
@@ -5173,7 +5288,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     try {
       const html = await fetchHtml(url, {
         "Accept-Language": "en-AE,en;q=0.9",
-        Referer: "https://www.marksandspencerme.com/en-ae/",
+        Referer: "https://www.marksandspencer.ae/en/",
       });
       return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
@@ -5183,7 +5298,7 @@ export class MarksAndSpencerScraper implements SupplierScraper {
     try {
       const html = await fetchHtmlWithCurl(url, {
         "Accept-Language": "en-AE,en;q=0.9",
-        Referer: "https://www.marksandspencerme.com/en-ae/",
+        Referer: "https://www.marksandspencer.ae/en/",
       });
       return parseMarksAndSpencerHtml(html, url);
     } catch (error: any) {
@@ -6006,8 +6121,32 @@ export class SheinScraper implements SupplierScraper {
     return hostMatches(url, ["shein.com"]);
   }
 
+  private assertTrustworthySheinSnapshot(
+    product: NormalizedProduct,
+    snapshotText: string,
+  ) {
+    const combined = `${product.title || ""}\n${snapshotText || ""}`;
+    if (
+      /too many requests|exceeds our limit|risk\/challenge|risk challenge|captcha|security verification|access denied|forbidden/i.test(
+        combined,
+      )
+    ) {
+      throw new Error(
+        "SHEIN snapshot returned a challenge or rate-limit page instead of a product",
+      );
+    }
+    const currency = String(product.currency || "").trim().toUpperCase();
+    if (!["AED", "USD"].includes(currency)) {
+      throw new Error("SHEIN snapshot did not expose a trusted product currency");
+    }
+    if (!product.images?.length) {
+      throw new Error("SHEIN snapshot did not expose product images");
+    }
+  }
+
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
     const product = parseGenericReaderMarkdown(snapshotText, url);
+    this.assertTrustworthySheinSnapshot(product, snapshotText);
     return normalizeProductOptionsAndVariants({
       ...product,
       source: {
@@ -7579,22 +7718,144 @@ function nextNeedsReaderColorwayEnrichment(product: NormalizedProduct): boolean 
   return (hasColorOption || hasVariantColor) && !hasVariantImages;
 }
 
+function stripNextSelectedSizeSuffix(value: string) {
+  return cleanText(value)
+    .replace(/\s*-\s*Size\s+.+$/i, "")
+    .trim();
+}
+
+function nextNeedsReaderVariantRepair(product: NormalizedProduct): boolean {
+  const cleanTitle = stripNextSelectedSizeSuffix(product.title);
+  const advertisedSizes = inferNextBabySizes(cleanTitle);
+  const actualSizes = getNextSizeValues(product);
+  const productId = cleanText(product.source.productId);
+  return (
+    /\s-\sSize\s+/i.test(product.title) ||
+    /(?:Months?|Mths?|Years?|Yrs?)\s*\(/i.test(productId) ||
+    (advertisedSizes.length > 1 && actualSizes.length <= 1)
+  );
+}
+
+function repairFlattenedNextVariantsFromTitle(
+  product: NormalizedProduct,
+  url: string,
+): NormalizedProduct | null {
+  const title = stripNextSelectedSizeSuffix(product.title);
+  const sizes = inferNextBabySizes(title);
+  if (sizes.length <= 1) return null;
+
+  const productCode =
+    formatNextProductCodeFromProductId(getProductIdFromUrl(url)) ||
+    formatNextProductCodeFromProductId(product.source.productId);
+  if (!productCode) return null;
+
+  const rawRange = product.raw?.priceRange || {};
+  const minPrice = Number(rawRange.min || product.price);
+  const maxPrice = Number(rawRange.max || minPrice);
+  if (!Number.isFinite(minPrice) || minPrice <= 0) return null;
+  const color = getNextCurrentColor(product);
+  const variants = buildInferredNextVariants(
+    productCode,
+    sizes,
+    {
+      min: minPrice,
+      max: Number.isFinite(maxPrice) && maxPrice >= minPrice ? maxPrice : minPrice,
+    },
+    color,
+  );
+
+  return normalizeProductOptionsAndVariants({
+    ...product,
+    source: { ...product.source, url, productId: productCode },
+    title,
+    price: minPrice,
+    options: [
+      ...(color ? [{ name: "Color", values: [color] }] : []),
+      { name: "Size", values: sizes },
+    ],
+    variants,
+    raw: {
+      ...(product.raw || {}),
+      repairedFlattenedNextVariants: true,
+      flattenedVariantCountBeforeRepair: product.variants.length,
+      sizeListInferredFromAdvertisedAgeRange: true,
+    },
+  });
+}
+
 async function enrichNextProductWithReaderColorways(
   product: NormalizedProduct,
   url: string,
 ): Promise<NormalizedProduct> {
-  if (!nextNeedsReaderColorwayEnrichment(product)) return product;
+  const needsVariantRepair = nextNeedsReaderVariantRepair(product);
+  const needsColorwayEnrichment = nextNeedsReaderColorwayEnrichment(product);
+  if (!needsVariantRepair && !needsColorwayEnrichment) return product;
 
   try {
     const reader = await fetchNextReaderMarkdown(url);
-    if (!reader) return product;
+    if (!reader) {
+      if (needsVariantRepair) {
+        const inferredRepair = repairFlattenedNextVariantsFromTitle(product, url);
+        if (inferredRepair) return inferredRepair;
+        throw new Error("Regional reader data was unavailable for a flattened Next product");
+      }
+      return product;
+    }
+
+    if (needsVariantRepair) {
+      const repaired = parseNextReaderMarkdown(
+        reader.markdown,
+        url,
+        reader.readerUrl,
+      );
+      const cleanTitle = stripNextSelectedSizeSuffix(repaired.title);
+      const expectedProductCode = formatNextProductCodeFromProductId(
+        getProductIdFromUrl(url),
+      );
+      if (repaired.variants.length <= 1 || getNextSizeValues(repaired).length <= 1) {
+        throw new Error("Regional reader data still exposed only one Next size");
+      }
+
+      return normalizeProductOptionsAndVariants({
+        ...repaired,
+        source: {
+          ...repaired.source,
+          url,
+          productId: expectedProductCode || repaired.source.productId,
+        },
+        title: cleanTitle,
+        images: product.images.length ? product.images : repaired.images,
+        raw: {
+          ...(product.raw || {}),
+          ...(repaired.raw || {}),
+          repairedFlattenedNextVariants: true,
+          flattenedVariantCountBeforeRepair: product.variants.length,
+          readerUrl: reader.readerUrl,
+        },
+      });
+    }
+
     return applyNextColorwaysFromMarkdown(
       product,
       reader.markdown,
       url,
       reader.readerUrl,
     );
-  } catch {
+  } catch (error: any) {
+    if (needsVariantRepair) {
+      const inferredRepair = repairFlattenedNextVariantsFromTitle(product, url);
+      if (inferredRepair) return inferredRepair;
+      throw new ScraperError(
+        "Next exposed only one selected size for a multi-size product. The product was stopped before Shopify sync because the complete regional size list could not be verified.",
+        {
+          code: "NEXT_VARIANT_STRUCTURE_UNSAFE",
+          status: 422,
+          supplier: "Next",
+          retryWithSnapshot: true,
+          details: [cleanText(error?.message || error)],
+        },
+      );
+    }
     return product;
   }
 }
@@ -7753,16 +8014,28 @@ function extractNextProductFromHtml(
       productData?.offers?.price,
   );
   const priceValues = offerList
-    .map((offer: any) => parsePrice(offer?.price))
+    .flatMap((offer: any) => [offer?.price, offer?.lowPrice, offer?.highPrice])
+    .map((value: any) => parsePrice(value))
     .filter((price: number) => price > 0);
   const priceRangeFromDom = parsePriceRange(priceText);
   const fallbackPrice =
     priceRangeFromDom.min ||
-    parsePrice(productData?.offers?.price || priceText);
+    parsePrice(
+      productData?.offers?.lowPrice ||
+        productData?.offers?.price ||
+        priceText,
+    );
   const price = priceValues.length ? Math.min(...priceValues) : fallbackPrice;
-  const maxPrice = priceValues.length
+  const structuredMaxPrice = priceValues.length
     ? Math.max(...priceValues)
     : priceRangeFromDom.max || price;
+  const advertisedRange = advertisedCurrencyPriceRanges($("body").text()).find(
+    (range) => Math.abs(range.min - price) < 0.01 && range.max >= price,
+  );
+  const maxPrice = Math.max(
+    structuredMaxPrice,
+    advertisedRange?.max || price,
+  );
   const currency = detectCurrency(
     offerList[0]?.priceCurrency || priceText,
     defaultNextCurrencyForUrl(url) || offerList[0]?.priceCurrency || "USD",
@@ -7832,6 +8105,8 @@ function extractNextProductFromHtml(
       htmlFallback: pageUrl !== url,
       htmlUrl: pageUrl,
       productCode,
+      priceRange: { min: price, max: maxPrice },
+      structuredOfferCount: offerList.length,
       extractedAt: new Date().toISOString(),
     },
   };
@@ -7904,15 +8179,29 @@ function parseGenericReaderMarkdown(
     throw new Error("Reader fallback did not expose a product title");
   }
 
+  const looksLikeReaderPriceLine = (line: string) => {
+    if (/https?:\/\//i.test(line) || /!\[[^\]]*]\(/.test(line)) return false;
+    if (/\.(?:jpg|jpeg|png|webp|svg)(?:\?|$)/i.test(line)) return false;
+    if (parsePrice(line) <= 0) return false;
+    return (
+      looksLikeCurrencyText(line) ||
+      /\b(?:price|now|was|sale|regular|current|from|starting\s+at)\b/i.test(
+        line,
+      )
+    );
+  };
   const priceLine =
     lines.find((line) => looksLikeCurrencyText(line) && parsePrice(line) > 0) ||
-    lines.find((line) => parsePrice(line) > 0);
+    lines.find(looksLikeReaderPriceLine);
   const price = parsePrice(priceLine);
   if (price <= 0) {
     throw new Error("Reader fallback did not expose a product price");
   }
 
-  const currency = detectCurrency(priceLine || markdown, "USD");
+  const currency = detectCurrency(
+    priceLine || markdown,
+    inferCountryCodeFromUrl(url) === "ae" ? "AED" : "USD",
+  );
   const images: NormalizedProduct["images"] = [];
   const imageRegex = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
   for (const match of markdown.matchAll(imageRegex)) {
@@ -8026,7 +8315,45 @@ function extractCentrepointDescription(
   return uniqueCleanValues([intro || fallback, ...details]).join("\n");
 }
 
-function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
+function normalizeCentrepointSnapshotText(snapshotText: string): string {
+  const lines = snapshotText.split(/\r?\n/);
+  const normalized: string[] = [];
+  for (const line of lines) {
+    normalized.push(line);
+    const privateCurrencyMatch = line.match(
+      /[\uE000-\uF8FF]\s*([0-9]+(?:[.,][0-9]+)?)/,
+    );
+    if (privateCurrencyMatch) {
+      normalized.push(`Price: AED ${privateCurrencyMatch[1]}`);
+    }
+  }
+  return normalized.join("\n");
+}
+
+function isCentrepointProductImageUrl(value: unknown): boolean {
+  const raw = cleanText(value);
+  if (!raw) return false;
+
+  try {
+    const parsed = new URL(raw);
+    return (
+      (parsed.hostname.toLowerCase() === "media.centrepointstores.com" &&
+        parsed.pathname.toLowerCase().startsWith("/i/centrepoint/")) ||
+      (parsed.hostname.toLowerCase() === "media.babyshopstores.com" &&
+        parsed.pathname.toLowerCase().startsWith("/i/lmg/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function filterCentrepointProductImages(
+  images: NormalizedProduct["images"],
+): NormalizedProduct["images"] {
+  return images.filter((image) => isCentrepointProductImageUrl(image.url));
+}
+
+export function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
   const $ = cheerio.load(html);
   const product = extractGenericProductFromHtml(html, url, "Centrepoint");
   const jsonLdProduct = extractProductJsonLdFromHtml(html);
@@ -8038,7 +8365,7 @@ function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
         ?.values?.[0] ||
       product.variants.find((variant) => variant.color)?.color,
   );
-  const images = [...product.images];
+  const images = filterCentrepointProductImages(product.images);
   const centrepointImageRegex =
     /https:\/\/media\.centrepointstores\.com\/i\/centrepoint\/[^"',\s?&<]+\.(?:jpg|jpeg|png|webp)/gi;
   for (const match of html.matchAll(centrepointImageRegex)) {
@@ -8076,7 +8403,19 @@ function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
         stockStatus,
         imageUrl: images[0]?.url,
       }))
-    : product.variants;
+    : [
+        {
+          sourceVariantId: productId || "centrepoint-default",
+          sku: productId || "CP-DEFAULT",
+          color: color || undefined,
+          price: product.price,
+          currency: product.currency,
+          optionValues: buildVariantOptionValues(color),
+          available: stockStatus !== "out_of_stock",
+          stockStatus,
+          imageUrl: images[0]?.url,
+        },
+      ];
 
   return normalizeProductOptionsAndVariants({
     ...product,
@@ -8109,7 +8448,15 @@ export class CentrepointScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
-    const product = parseGenericReaderMarkdown(snapshotText, url);
+    const product = parseGenericReaderMarkdown(
+      normalizeCentrepointSnapshotText(snapshotText),
+      url,
+    );
+    if (product.currency !== "AED" || product.price <= 1) {
+      throw new Error(
+        "Reader fallback did not expose a trustworthy Centrepoint AED product price",
+      );
+    }
     return normalizeProductOptionsAndVariants({
       ...product,
       source: {
@@ -8121,6 +8468,7 @@ export class CentrepointScraper implements SupplierScraper {
         product.brand && product.brand !== "Generic"
           ? product.brand
           : "Centrepoint",
+      images: filterCentrepointProductImages(product.images),
       raw: {
         ...(product.raw || {}),
         pastedSnapshotFallback: true,
@@ -8166,14 +8514,21 @@ export class CentrepointScraper implements SupplierScraper {
 
     try {
       const markdown = await fetchReaderMarkdown(url);
+      const product = parseGenericReaderMarkdown(markdown, url);
+      if (product.currency !== "AED" || product.price <= 1) {
+        throw new Error(
+          "Reader fallback did not expose a trustworthy Centrepoint AED product price",
+        );
+      }
       return {
-        ...parseGenericReaderMarkdown(markdown, url),
+        ...product,
         source: {
           supplier: "Centrepoint",
           url,
           productId: getProductIdFromUrl(url),
         },
         brand: "Centrepoint",
+        images: filterCentrepointProductImages(product.images),
       };
     } catch (error: any) {
       errors.push(`reader: ${error.message}`);
@@ -8211,8 +8566,21 @@ export class HmScraper implements SupplierScraper {
     return hostMatches(url, ["ae.hm.com", "hm.com"]);
   }
 
+  private assertTrustworthyHmPrice(product: NormalizedProduct, url: string) {
+    const host = new URL(url).hostname.toLowerCase();
+    if (!host.includes("ae.hm.com")) return;
+    const currency = String(product.currency || "").trim().toUpperCase();
+    const price = Number(product.price);
+    if (currency !== "AED" || !Number.isFinite(price) || price < 10) {
+      throw new Error(
+        "H&M UAE product did not expose a trustworthy AED product price",
+      );
+    }
+  }
+
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
     const product = parseGenericReaderMarkdown(snapshotText, url);
+    this.assertTrustworthyHmPrice(product, url);
     return {
       ...product,
       source: {
@@ -8235,6 +8603,17 @@ export class HmScraper implements SupplierScraper {
       Referer: "https://ae.hm.com/en/",
     });
     const fallback = extractGenericProductFromHtml(html, url, "H&M");
+    const fallbackUsable =
+      fallback.price > 0 &&
+      !/client challenge|metadata/i.test(fallback.title) &&
+      (() => {
+        try {
+          this.assertTrustworthyHmPrice(fallback, url);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
     const $ = cheerio.load(html);
     const sku = cleanText(
       extractProductJsonLdFromHtml(html)?.sku ||
@@ -8242,11 +8621,26 @@ export class HmScraper implements SupplierScraper {
         fallback.source.productId,
     );
 
-    if (!sku) return fallback;
+    if (!sku) {
+      if (fallbackUsable) return normalizeProductOptionsAndVariants(fallback);
+      throw new ScraperError(
+        "H&M did not expose usable product data to server analysis. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.",
+        {
+          code: "SOURCE_BLOCKED",
+          status: 422,
+          supplier: "H&M",
+          retryWithSnapshot: true,
+          details: ["H&M page did not expose a usable SKU"],
+        },
+      );
+    }
 
     try {
       const product = await fetchHmGraphqlProduct(url, sku);
-      if (!product) return fallback;
+      if (!product) {
+        if (fallbackUsable) return normalizeProductOptionsAndVariants(fallback);
+        throw new Error("H&M GraphQL did not return a product");
+      }
       const normalized = normalizeProductOptionsAndVariants(
         normalizeHmGraphqlProduct(product, fallback, url),
       );
@@ -8256,12 +8650,10 @@ export class HmScraper implements SupplierScraper {
       ) {
         throw new Error("H&M GraphQL did not expose usable product data");
       }
+      this.assertTrustworthyHmPrice(normalized, url);
       return normalized;
     } catch (error: any) {
-      if (
-        fallback.price <= 0 ||
-        /client challenge|metadata/i.test(fallback.title)
-      ) {
+      if (!fallbackUsable) {
         throw new ScraperError(
           "H&M did not expose usable product data to server analysis. Open the product in your browser and paste the visible product text to analyze it from a page snapshot.",
           {
@@ -8269,7 +8661,10 @@ export class HmScraper implements SupplierScraper {
             status: 422,
             supplier: "H&M",
             retryWithSnapshot: true,
-            details: [error.message],
+            details: [
+              error.message,
+              "H&M fallback did not expose a trustworthy AED product price",
+            ],
           },
         );
       }
@@ -8466,7 +8861,7 @@ export class NextScraper implements SupplierScraper {
           try {
             const fastBypassOptions: ManagedBypassOptions = {
               deviceType: envBypassDevice("NEXT_FAST_BYPASS_DEVICE", "mobile"),
-              jsRender: false,
+              jsRender: envFlag("NEXT_FAST_BYPASS_RENDER", false),
               premium: envFlag("NEXT_FAST_BYPASS_PREMIUM", false),
             };
             const html = envFlag("NEXT_FAST_BYPASS_RACE", true)
@@ -8503,6 +8898,9 @@ export class NextScraper implements SupplierScraper {
               url,
             );
           } catch (bypassError: any) {
+            if (bypassError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+              throw bypassError;
+            }
             bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
           }
         }
@@ -8536,6 +8934,9 @@ export class NextScraper implements SupplierScraper {
             url,
           );
         } catch (htmlError: any) {
+          if (htmlError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+            throw htmlError;
+          }
           lastError = htmlError;
           htmlErrors.push(`${pageUrl}: ${htmlError.message}`);
         }
@@ -8573,6 +8974,9 @@ export class NextScraper implements SupplierScraper {
             url,
           );
         } catch (playwrightError: any) {
+          if (playwrightError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+            throw playwrightError;
+          }
           const message = String(playwrightError?.message || "");
           if (
             /Executable doesn't exist|playwright install|chrome-headless-shell/i.test(
@@ -8593,7 +8997,7 @@ export class NextScraper implements SupplierScraper {
           try {
             const bypassOptions: ManagedBypassOptions = {
               deviceType: envBypassDevice("NEXT_BYPASS_DEVICE", "mobile"),
-              jsRender: false,
+              jsRender: envFlag("NEXT_BYPASS_RENDER", false),
               premium: envFlag("NEXT_BYPASS_PREMIUM", false),
             };
             const html = envFlag("NEXT_BYPASS_RACE", true)
@@ -8629,6 +9033,9 @@ export class NextScraper implements SupplierScraper {
               url,
             );
           } catch (bypassError: any) {
+            if (bypassError?.code === "NEXT_VARIANT_STRUCTURE_UNSAFE") {
+              throw bypassError;
+            }
             bypassErrors.push(`${pageUrl}: ${bypassError.message}`);
           }
         }

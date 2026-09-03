@@ -1,0 +1,85 @@
+name: Materialize Post-Canary Readiness Gate
+
+on:
+  push:
+    branches:
+      - stabilize-supabase-railway
+    paths:
+      - .github/workflows/materialize-post-canary-readiness-gate.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: stabilize-supabase-railway
+          fetch-depth: 0
+
+      - name: Make readiness reflect the independent broad-write gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/server/routes/readiness.routes.ts')
+          text = path.read_text()
+
+          old_decl = '  const runtimeWriteGateEnabled = enabled("SYNC_RUNTIME_WRITE_ENABLED");\n'
+          new_decl = old_decl + '  const postCanaryBroadWritesConfigured = enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED");\n'
+          if 'const postCanaryBroadWritesConfigured' not in text:
+              if old_decl not in text:
+                  raise SystemExit('Runtime write gate declaration not found; refusing ambiguous readiness patch')
+              text = text.replace(old_decl, new_decl, 1)
+
+          old_config = '    runtimeWriteGateEnabled,\n    inventoryAutostartConfigured,'
+          new_config = '    runtimeWriteGateEnabled,\n    postCanaryBroadWritesConfigured,\n    inventoryAutostartConfigured,'
+          if 'postCanaryBroadWritesConfigured,' not in text.split('const configuration = {', 1)[1]:
+              if old_config not in text:
+                  raise SystemExit('Readiness configuration insertion point not found')
+              text = text.replace(old_config, new_config, 1)
+
+          old_sheet1 = '''    sheet1CatalogAutostartEnabled:\n      runtimeWriteGateEnabled &&\n      sheet1CatalogAutostartConfigured &&\n      !sheet1CatalogKillSwitch,'''
+          new_sheet1 = '''    sheet1CatalogAutostartEnabled:\n      runtimeWriteGateEnabled &&\n      postCanaryBroadWritesConfigured &&\n      sheet1CatalogAutostartConfigured &&\n      !sheet1CatalogKillSwitch &&\n      /^[0-9a-f]{40}$/i.test(sheet1CatalogExpectedRevision) &&\n      sheet1CatalogExpectedRevision.toLowerCase() ===\n        String(deploymentMetadata().revision || "").toLowerCase(),'''
+          if old_sheet1 in text:
+              text = text.replace(old_sheet1, new_sheet1, 1)
+          elif 'postCanaryBroadWritesConfigured &&\n      sheet1CatalogAutostartConfigured' not in text:
+              raise SystemExit('Sheet1 readiness enablement block not found')
+
+          old_safety = '''  const productionWriteSafetyReady =\n    !runtimeWriteGateEnabled &&\n    !inventoryAutostartConfigured &&'''
+          new_safety = '''  const productionWriteSafetyReady =\n    !runtimeWriteGateEnabled &&\n    !postCanaryBroadWritesConfigured &&\n    !inventoryAutostartConfigured &&'''
+          if old_safety in text:
+              text = text.replace(old_safety, new_safety, 1)
+          elif '!postCanaryBroadWritesConfigured &&\n    !inventoryAutostartConfigured' not in text:
+              raise SystemExit('Production write-safety block not found')
+
+          path.write_text(text)
+          PY
+
+      - name: Verify readiness is fail-closed before canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'const postCanaryBroadWritesConfigured = enabled("SYNC_POST_CANARY_BROAD_WRITES_ENABLED")' src/server/routes/readiness.routes.ts
+          grep -F 'postCanaryBroadWritesConfigured,' src/server/routes/readiness.routes.ts
+          grep -F '!postCanaryBroadWritesConfigured &&' src/server/routes/readiness.routes.ts
+          git diff --check
+
+      - name: Commit readiness source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/server/routes/readiness.routes.ts; then
+            echo 'No readiness source change required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/server/routes/readiness.routes.ts
+          git commit -m 'Expose post-canary broad write gate in readiness'
+          git push origin HEAD:stabilize-supabase-railway
