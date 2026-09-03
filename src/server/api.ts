@@ -4024,7 +4024,7 @@ router.post("/imports/analyze", async (req, res) => {
 
 // Products
 router.get("/products/stats", async (req, res) => {
-  const [totalLinked, activeSync] = await Promise.all([
+  const [totalLinked, activeSync, pendingReviewProducts] = await Promise.all([
     prisma.sourceProduct.count({
       where: {
         shopifyProduct: { isNot: null },
@@ -4036,11 +4036,20 @@ router.get("/products/stats", async (req, res) => {
         shopifyProduct: { isNot: null },
       },
     }),
+    prisma.manualReviewItem.findMany({
+      where: {
+        status: "pending",
+        sourceProduct: { shopifyProduct: { isNot: null } },
+      },
+      distinct: ["sourceProductId"],
+      select: { sourceProductId: true },
+    }),
   ]);
 
   res.json({
     totalLinked,
     activeSync,
+    pendingReview: pendingReviewProducts.length,
   });
 });
 

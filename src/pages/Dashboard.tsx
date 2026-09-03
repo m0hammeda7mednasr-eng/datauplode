@@ -28,32 +28,28 @@ export default function Dashboard() {
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard-real-data"],
     queryFn: async () => {
-      const [statsRes, linkedRes, reviewRes] = await Promise.all([
+      const [statsRes, linkedRes] = await Promise.all([
         axios.get("/api/products/stats"),
         axios.get("/api/products", { params: { limit: 12 } }),
-        axios.get("/api/manual-review"),
       ]);
       const linked = Array.isArray(linkedRes.data) ? linkedRes.data : [];
-      const reviewItems = Array.isArray(reviewRes.data) ? reviewRes.data : [];
       const stats = statsRes.data || {};
-      return { linked, reviewItems, stats };
+      return { linked, stats };
     },
     refetchInterval: 10000,
     refetchOnWindowFocus: true,
   });
 
   const linked = data?.linked || [];
-  const reviewItems = data?.reviewItems || [];
-
   const stats = useMemo(() => {
     const totalLinked = Number(data?.stats?.totalLinked || linked.length || 0);
     const activeSync = Number(data?.stats?.activeSync || 0);
     return {
       totalLinked,
       activeSync,
-      pendingReview: reviewItems.length,
+      pendingReview: Number(data?.stats?.pendingReview || 0),
     };
-  }, [data?.stats?.activeSync, data?.stats?.totalLinked, linked.length, reviewItems.length]);
+  }, [data?.stats?.activeSync, data?.stats?.pendingReview, data?.stats?.totalLinked, linked.length]);
 
   const recentLinked = linked.slice(0, 6);
 

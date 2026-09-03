@@ -276,6 +276,10 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
       where: { id: product.shopifyProduct!.id },
       data: { status: "active", handle: verified.handle, price: Number(variants[0].price) },
     });
+    await tx.manualReviewItem.updateMany({
+      where: { sourceProductId, status: "pending" },
+      data: { status: "approved", resolvedAt: new Date() },
+    });
     await tx.auditLog.create({
       data: {
         sourceProductId,

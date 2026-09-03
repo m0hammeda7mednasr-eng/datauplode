@@ -1,4 +1,5 @@
 import PQueue from 'p-queue';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { ShopifyService } from './shopify.js';
 import { PricingEngine } from './pricing.js';
@@ -1996,8 +1997,7 @@ export class QueueService {
       : 60;
     const successCutoff = new Date(Date.now() - minAgeDays * 24 * 60 * 60 * 1000);
     const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
-    const candidates = await prisma.sourceProduct.findMany({
-      where: {
+    const candidateWhere: Prisma.SourceProductWhereInput = {
         syncStatus: { not: 'paused' },
         url: { contains: 'centrepointstores.com', mode: 'insensitive' },
         raw: { contains: 'sheetPriceMultiplier' },
@@ -2014,11 +2014,29 @@ export class QueueService {
             },
           },
         ],
+      };
+    const reviewCandidates = await prisma.sourceProduct.findMany({
+      where: {
+        ...candidateWhere,
+        manualReviews: { some: { status: 'pending' } },
       },
       select: { id: true, title: true, updatedAt: true },
       orderBy: { updatedAt: 'asc' },
       take,
     });
+    const remaining = take - reviewCandidates.length;
+    const otherCandidates = remaining > 0
+      ? await prisma.sourceProduct.findMany({
+          where: {
+            ...candidateWhere,
+            id: { notIn: reviewCandidates.map((candidate) => candidate.id) },
+          },
+          select: { id: true, title: true, updatedAt: true },
+          orderBy: { updatedAt: 'asc' },
+          take: remaining,
+        })
+      : [];
+    const candidates = [...reviewCandidates, ...otherCandidates];
     if (candidates.length === 0) {
       return { selected: 0, completed: 0, failed: 0, readbackVerified: 0 };
     }

@@ -44,6 +44,15 @@ const assertions: Array<[string, boolean]> = [
       /variantsMatch/.test(fullCatalogSync),
   ],
   [
+    "full-catalog sync resolves review only after exact read-back",
+    /if \(!verified\)[\s\S]*tx\.manualReviewItem\.updateMany\([\s\S]*status:\s*"approved"/.test(fullCatalogSync),
+  ],
+  [
+    "full-catalog batch prioritizes pending linked reviews",
+    /manualReviews:\s*\{\s*some:\s*\{\s*status:\s*'pending'\s*\}\s*\}/.test(queue) &&
+      /const candidates = \[\.\.\.reviewCandidates, \.\.\.otherCandidates\]/.test(queue),
+  ],
+  [
     "full-catalog sync rejects suspicious images and duplicate SKUs",
     /isLikelyProductImageSource/.test(fullCatalogSync) &&
       /new Set\(skus\)\.size\s*!==\s*skus\.length/.test(fullCatalogSync),
