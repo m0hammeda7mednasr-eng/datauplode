@@ -2028,7 +2028,7 @@ export class QueueService {
         ...candidateWhere,
         manualReviews: { some: { status: 'pending' } },
       },
-      select: { id: true, title: true, updatedAt: true },
+      select: { id: true, title: true, url: true, updatedAt: true },
       orderBy: { updatedAt: 'asc' },
       take,
     });
@@ -2039,12 +2039,15 @@ export class QueueService {
             ...candidateWhere,
             id: { notIn: reviewCandidates.map((candidate) => candidate.id) },
           },
-          select: { id: true, title: true, updatedAt: true },
+          select: { id: true, title: true, url: true, updatedAt: true },
           orderBy: { updatedAt: 'asc' },
           take: remaining,
         })
       : [];
-    const candidates = [...reviewCandidates, ...otherCandidates];
+    const candidates = [...reviewCandidates, ...otherCandidates].filter((candidate) => {
+      const url = cleanOptionText(candidate.url).toLowerCase();
+      return FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain));
+    });
     if (candidates.length === 0) {
       return { selected: 0, completed: 0, failed: 0, readbackVerified: 0 };
     }
