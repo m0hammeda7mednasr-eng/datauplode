@@ -36,6 +36,21 @@ function isSupportedCatalogSource(url: string) {
   }
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function filenameFor(url: string, index: number) {
   try {
     const name = new URL(url).pathname.split("/").filter(Boolean).at(-1);
@@ -95,7 +110,11 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
 
   const oldRaw = parseRaw(product.raw);
   const multiplier = Number(oldRaw?.import?.sheetPriceMultiplier);
-  const fresh = await new ScraperService().scrape(product.url);
+  const fresh = await withTimeout(
+    new ScraperService().scrape(product.url),
+    120_000,
+    "Fresh source scrape timed out before Shopify mutation",
+  );
   applyDeterministicDabSkus({ product: fresh, url: product.url, multiplier });
   validateFreshProduct(fresh, multiplier);
 

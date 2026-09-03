@@ -64,6 +64,10 @@ const assertions: Array<[string, boolean]> = [
       /Only linked Centrepoint and Next UAE products/.test(fullCatalogSync),
   ],
   [
+    "full-catalog source scraping is bounded before Shopify mutation",
+    /withTimeout\([\s\S]*new ScraperService\(\)\.scrape\(product\.url\)[\s\S]*120_000[\s\S]*before Shopify mutation/.test(fullCatalogSync),
+  ],
+  [
     "full-catalog rolling batch remains capped at five",
     /Math\.min\(5,\s*Math\.floor\(FULL_CATALOG_SYNC_BATCH_SIZE\)\)/.test(queue),
   ],
