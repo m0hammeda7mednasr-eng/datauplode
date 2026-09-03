@@ -1,0 +1,49 @@
+name: Railway CLI Capability Probe
+
+on:
+  push:
+    branches:
+      - probe/railway-readiness-20260904
+    paths:
+      - .github/workflows/railway-cli-capability-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Check Railway CLI capability without deploying
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
+            echo "RAILWAY_TOKEN_PRESENT=false"
+            exit 0
+          fi
+          echo "RAILWAY_TOKEN_PRESENT=true"
+          npx -y @railway/cli@latest --version
+          set +e
+          npx -y @railway/cli@latest status --json > railway-status.json 2> railway-status.err
+          code=$?
+          set -e
+          echo "RAILWAY_STATUS_EXIT=$code"
+          if [[ -s railway-status.json ]]; then
+            node <<'NODE'
+const fs = require('node:fs');
+let b={};try{b=JSON.parse(fs.readFileSync('railway-status.json','utf8'))}catch{}
+const out={
+  project: b?.project?.name || b?.name || null,
+  environment: b?.environment?.name || null,
+  service: b?.service?.name || null,
+  linked: Boolean(b?.project || b?.environment || b?.service || b?.name),
+};
+console.log('RAILWAY_STATUS=' + JSON.stringify(out));
+NODE
+          fi
+          if [[ -s railway-status.err ]]; then
+            echo "RAILWAY_STATUS_ERROR=$(tr '\n' ' ' < railway-status.err | head -c 500)"
+          fi
