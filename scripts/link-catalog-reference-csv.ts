@@ -9,6 +9,7 @@ const apply = process.argv.includes("--apply");
 const confirmed = process.argv.includes(`--confirm=${CONFIRMATION}`);
 const reassignInactiveOwners = process.argv.includes("--reassign-inactive-owner");
 const linkSharedActiveOwners = process.argv.includes("--link-shared-active-owner");
+const crossVendorProductCode = process.argv.includes("--cross-vendor-product-code");
 const limit = Math.max(1, Number(process.argv.find((arg) => arg.startsWith("--limit="))?.slice(8) || 10_000));
 
 if (!csvPath) throw new Error("Pass --file=<absolute CSV path>");
@@ -110,7 +111,7 @@ const candidates = cacheRows.flatMap((row) => {
   const vendor = normalizedVendor(row.vendor);
   const codeMatches = compactSku
     ? codeReferences.filter((entry) => compactSku.includes(entry.code)
-      && (!vendor || !normalizedVendor(entry.row.Supplier) || normalizedVendor(entry.row.Supplier) === vendor))
+      && (crossVendorProductCode || !vendor || !normalizedVendor(entry.row.Supplier) || normalizedVendor(entry.row.Supplier) === vendor))
         .map((entry) => entry.row)
     : [];
   const exactSkuUrls = [...new Set(skuMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
@@ -173,6 +174,7 @@ const summary = {
   conflictsOwnedByInactiveOrMissingCatalog: conflicts.filter((entry) => !activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || "")).length,
   reassignInactiveOwners,
   linkSharedActiveOwners,
+  crossVendorProductCode,
   sharedActiveOwnerCandidates: sharedActiveOwnerCandidates.length,
   alreadyLinked: candidates.filter((entry) => linkedShopifyIds.has(entry.cache.shopifyId)).length,
   byStatus: Object.fromEntries(["needs_link", "needs_review"].map((status) => [status, available.filter((entry) => entry.cache.matchStatus === status).length])),
@@ -208,7 +210,7 @@ function verifyLiveReference(product: any, entry: (typeof candidates)[number]) {
     }
     const liveVendor = normalizedVendor(product.vendor);
     const referenceVendor = normalizedVendor(entry.reference.Supplier);
-    if (liveVendor && referenceVendor && liveVendor !== referenceVendor) {
+    if (!crossVendorProductCode && liveVendor && referenceVendor && liveVendor !== referenceVendor) {
       throw new Error("Live Shopify vendor does not match the CSV supplier");
     }
   }

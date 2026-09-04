@@ -2,7 +2,7 @@ import { prisma } from './db.js';
 
 const CACHE_TABLE = 'ShopifyCatalogIndexV2';
 
-async function installVerifiedOverrideGuard() {
+export async function installVerifiedOverrideGuard() {
   try {
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "${CACHE_TABLE}"
@@ -13,9 +13,13 @@ async function installVerifiedOverrideGuard() {
       UPDATE "${CACHE_TABLE}"
       SET "verifiedOverride" = TRUE
       WHERE "matchStatus" = 'linked'
-        AND "matchMethod" IN (
-          'shared_source_sibling_title_vendor',
-          'unique_source_url_title_vendor'
+        AND (
+          "matchMethod" IN (
+            'shared_source_sibling_title_vendor',
+            'unique_source_url_title_vendor',
+            'verified_shopify_explicit_source'
+          )
+          OR "matchMethod" LIKE 'csv_reference_shared_%'
         )
     `);
 
@@ -24,9 +28,13 @@ async function installVerifiedOverrideGuard() {
       RETURNS trigger AS $$
       BEGIN
         IF NEW."matchStatus" = 'linked'
-           AND NEW."matchMethod" IN (
-             'shared_source_sibling_title_vendor',
-             'unique_source_url_title_vendor'
+           AND (
+             NEW."matchMethod" IN (
+               'shared_source_sibling_title_vendor',
+               'unique_source_url_title_vendor',
+               'verified_shopify_explicit_source'
+             )
+             OR NEW."matchMethod" LIKE 'csv_reference_shared_%'
            ) THEN
           NEW."verifiedOverride" := TRUE;
         END IF;
