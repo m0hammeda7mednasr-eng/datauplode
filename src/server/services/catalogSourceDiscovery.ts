@@ -273,6 +273,24 @@ async function persistLink(row: DiscoveryRow, result: Awaited<ReturnType<typeof 
 
 export async function runCatalogSourceDiscoveryBatch() {
   const batchSize = Math.max(1, Math.min(50, Number(process.env.CATALOG_SOURCE_DISCOVERY_BATCH_SIZE || 5)));
+  const staleCutoff = new Date(Date.now() - 10 * 60 * 1000);
+  const existingJob = await prisma.syncJob.findFirst({
+    where: { type: JOB_TYPE, status: "running" },
+    orderBy: { startedAt: "desc" },
+  });
+  if (existingJob?.startedAt && existingJob.startedAt >= staleCutoff) {
+    return { selected: 0, linked: 0, failed: 0, deferred: 0, skipped: true, reason: "Another source discovery batch is running" };
+  }
+  if (existingJob) {
+    await prisma.syncJob.update({
+      where: { id: existingJob.id },
+      data: {
+        status: "failed",
+        completedAt: new Date(),
+        result: JSON.stringify({ error: "Stale source discovery batch was closed before replacement" }),
+      },
+    });
+  }
   const rows = await prisma.$queryRawUnsafe<DiscoveryRow[]>(`
     SELECT "shopifyId", "title", "vendor", "handle", "price"
     FROM "${CACHE_TABLE}"
@@ -287,17 +305,28 @@ export async function runCatalogSourceDiscoveryBatch() {
   `);
   const candidates = rows.filter((row) => SEARCH_BY_VENDOR[vendorKey(row.vendor)]).slice(0, batchSize);
   const job = await prisma.syncJob.create({ data: { type: JOB_TYPE, status: "running", startedAt: new Date(), payload: JSON.stringify({ batchSize }) } });
-  const result = { selected: candidates.length, linked: 0, failed: 0, issues: [] as Array<Record<string, unknown>> };
+  const result = { selected: candidates.length, linked: 0, failed: 0, deferred: 0, issues: [] as Array<Record<string, unknown>> };
   const concurrency = Math.max(1, Math.min(5, Number(process.env.CATALOG_SOURCE_DISCOVERY_CONCURRENCY || 2)));
+  let providerUnavailable = false;
   for (let offset = 0; offset < candidates.length; offset += concurrency) {
     await Promise.all(candidates.slice(offset, offset + concurrency).map(async (row) => {
+      if (providerUnavailable) {
+        result.deferred += 1;
+        return;
+      }
       try {
         const discovered = await discoverSource(row, SEARCH_BY_VENDOR[vendorKey(row.vendor)]);
         await persistLink(row, discovered);
         result.linked += 1;
       } catch (error: any) {
-        result.failed += 1;
         const message = clean(error?.message || error).slice(0, 500);
+        if (/No managed bypass provider is configured|All configured ScraperAPI keys are cooling down|operational budget reached/i.test(message)) {
+          providerUnavailable = true;
+          result.deferred += 1;
+          result.issues.push({ shopifyId: row.shopifyId, title: row.title, vendor: row.vendor, error: message, deferred: true });
+          return;
+        }
+        result.failed += 1;
         result.issues.push({ shopifyId: row.shopifyId, title: row.title, vendor: row.vendor, error: message });
         await prisma.$executeRawUnsafe(`
           UPDATE "${CACHE_TABLE}"

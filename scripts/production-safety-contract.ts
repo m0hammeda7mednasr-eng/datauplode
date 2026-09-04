@@ -49,6 +49,17 @@ const assertions: Array<[string, boolean]> = [
       /"updatedAt" < NOW\(\) - INTERVAL '24 hours'/.test(catalogSourceDiscovery),
   ],
   [
+    "catalog source discovery prevents overlapping batches",
+    /type:\s*JOB_TYPE, status:\s*"running"/.test(catalogSourceDiscovery) &&
+      /Another source discovery batch is running/.test(catalogSourceDiscovery),
+  ],
+  [
+    "catalog source discovery defers rows during provider cooldown",
+    /providerUnavailable/.test(catalogSourceDiscovery) &&
+      /All configured ScraperAPI keys are cooling down/.test(catalogSourceDiscovery) &&
+      /result\.deferred \+= 1/.test(catalogSourceDiscovery),
+  ],
+  [
     "full-catalog autostart requires runtime write gate and exact revision",
     /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
       /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
