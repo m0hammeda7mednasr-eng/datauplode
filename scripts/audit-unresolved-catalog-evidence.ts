@@ -13,6 +13,7 @@ type Row = {
 
 const limit = Math.max(1, Number(process.argv.find((arg) => arg.startsWith("--limit="))?.slice(8) || 40));
 const compact = process.argv.includes("--compact");
+const summary = process.argv.includes("--summary");
 const requestedStatus = process.argv.find((arg) => arg.startsWith("--status="))?.slice(9);
 const requestedMethod = process.argv.find((arg) => arg.startsWith("--method="))?.slice(9);
 const allowedStatuses = new Set(["needs_link", "needs_review"]);
@@ -23,6 +24,19 @@ const statusClause = requestedStatus && allowedStatuses.has(requestedStatus)
 const methodClause = requestedMethod && allowedMethods.has(requestedMethod)
   ? `AND "matchMethod"='${requestedMethod}'`
   : "";
+if (summary) {
+  const groups = await prisma.$queryRawUnsafe<Array<{ matchStatus: string; matchMethod: string; vendor: string; count: number }>>(`
+    SELECT "matchStatus", "matchMethod", COALESCE("vendor", '') AS "vendor", COUNT(*)::int AS "count"
+    FROM "${"ShopifyCatalogIndexV2"}"
+    WHERE UPPER(COALESCE("status", ''))='ACTIVE'
+      AND "matchStatus" IN ('needs_link','needs_review')
+    GROUP BY 1, 2, 3
+    ORDER BY 1, 4 DESC
+  `);
+  console.log(JSON.stringify(groups));
+  await prisma.$disconnect();
+  process.exit(0);
+}
 const rows = await prisma.$queryRawUnsafe<Row[]>(`
   SELECT "shopifyId", "title", "vendor", "primarySku", "matchStatus", "matchMethod",
          "explicitSourceUrls", "reason"
