@@ -48,6 +48,11 @@ const normalizedTitle = (value: unknown) => clean(value)
   .replace(/\s+/g, " ")
   .trim();
 const normalizedSku = (value: unknown) => clean(value).toUpperCase().replace(/\s+/g, "");
+const compactIdentity = (value: unknown) => clean(value).toUpperCase().replace(/[^A-Z0-9]+/g, "");
+const normalizedVendor = (value: unknown) => compactIdentity(value)
+  .replace(/^HAN(D|)M$/, "HM")
+  .replace(/^MANDS$/, "MS")
+  .replace(/^MAXFASHION$/, "MAX");
 const rowSkus = (row: ReferenceRow) => clean(row["Sheet SKU(s)"])
   .split("|")
   .map(normalizedSku)
@@ -58,11 +63,14 @@ const sheet = workbook.Sheets[workbook.SheetNames[0]];
 const references = XLSX.utils.sheet_to_json<ReferenceRow>(sheet, { defval: "" });
 const referencesByTitle = new Map<string, ReferenceRow[]>();
 const referencesBySku = new Map<string, ReferenceRow[]>();
+const codeReferences: Array<{ code: string; row: ReferenceRow }> = [];
 for (const row of references) {
   if (!clean(row["Source Link"])) continue;
   for (const sku of rowSkus(row)) {
     referencesBySku.set(sku, [...(referencesBySku.get(sku) || []), row]);
   }
+  const code = compactIdentity(row["Source Product Code"]);
+  if (code.length >= 5) codeReferences.push({ code, row });
   if (clean(row["Name Status"]) !== "Needs lookup") {
     const key = normalizedTitle(row["Product Name"]);
     if (key) referencesByTitle.set(key, [...(referencesByTitle.get(key) || []), row]);
@@ -80,11 +88,25 @@ const cacheRows = await prisma.$queryRawUnsafe<CacheRow[]>(`
 const candidates = cacheRows.flatMap((row) => {
   const skuMatches = referencesBySku.get(normalizedSku(row.primarySku)) || [];
   const titleMatches = referencesByTitle.get(normalizedTitle(row.title)) || [];
+  const compactSku = compactIdentity(row.primarySku);
+  const vendor = normalizedVendor(row.vendor);
+  const codeMatches = compactSku
+    ? codeReferences.filter((entry) => compactSku.includes(entry.code)
+      && (!vendor || !normalizedVendor(entry.row.Supplier) || normalizedVendor(entry.row.Supplier) === vendor))
+        .map((entry) => entry.row)
+    : [];
   const exactSkuUrls = [...new Set(skuMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
   const exactTitleUrls = [...new Set(titleMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
-  const method = exactSkuUrls.length === 1 ? "exact_sku" : exactTitleUrls.length === 1 ? "exact_title" : null;
-  const matches = method === "exact_sku" ? skuMatches : titleMatches;
-  const url = method === "exact_sku" ? exactSkuUrls[0] : exactTitleUrls[0];
+  const productCodeUrls = [...new Set(codeMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
+  const method = exactSkuUrls.length === 1
+    ? "exact_sku"
+    : exactTitleUrls.length === 1
+      ? "exact_title"
+      : productCodeUrls.length === 1
+        ? "product_code_in_sku"
+        : null;
+  const matches = method === "exact_sku" ? skuMatches : method === "exact_title" ? titleMatches : codeMatches;
+  const url = method === "exact_sku" ? exactSkuUrls[0] : method === "exact_title" ? exactTitleUrls[0] : productCodeUrls[0];
   if (!method || !url) return [];
   return [{ cache: row, reference: matches.find((entry) => clean(entry["Source Link"]) === url)!, url, method }];
 });
@@ -125,7 +147,7 @@ const summary = {
   reassignInactiveOwners,
   alreadyLinked: candidates.filter((entry) => linkedShopifyIds.has(entry.cache.shopifyId)).length,
   byStatus: Object.fromEntries(["needs_link", "needs_review"].map((status) => [status, available.filter((entry) => entry.cache.matchStatus === status).length])),
-  byMethod: Object.fromEntries(["exact_sku", "exact_title"].map((method) => [method, available.filter((entry) => entry.method === method).length])),
+  byMethod: Object.fromEntries(["exact_sku", "exact_title", "product_code_in_sku"].map((method) => [method, available.filter((entry) => entry.method === method).length])),
   apply,
   limit,
 };
@@ -149,6 +171,18 @@ for (const entry of available.slice(0, limit)) {
       const liveSkus = new Set(product.variants.map((variant) => normalizedSku(variant.sku)).filter(Boolean));
       if (!rowSkus(entry.reference).some((sku) => liveSkus.has(sku))) {
         throw new Error("Live Shopify variants no longer contain the exact CSV SKU");
+      }
+    }
+    if (entry.method === "product_code_in_sku") {
+      const code = compactIdentity(entry.reference["Source Product Code"]);
+      const liveSkus = product.variants.map((variant) => compactIdentity(variant.sku)).filter(Boolean);
+      if (!code || !liveSkus.some((sku) => sku.includes(code))) {
+        throw new Error("Live Shopify variants no longer contain the CSV source product code");
+      }
+      const liveVendor = normalizedVendor(product.vendor);
+      const referenceVendor = normalizedVendor(entry.reference.Supplier);
+      if (liveVendor && referenceVendor && liveVendor !== referenceVendor) {
+        throw new Error("Live Shopify vendor does not match the CSV supplier");
       }
     }
     if (!product.variants.length) throw new Error("Live Shopify product has no variants");
