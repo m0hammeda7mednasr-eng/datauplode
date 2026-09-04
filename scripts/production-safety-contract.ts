@@ -123,6 +123,11 @@ const assertions: Array<[string, boolean]> = [
       /candidateOwner !== product\.id[\s\S]*status:\s*"needs_review"[\s\S]*database_conflict/.test(shopifyCatalogLinkRoutes),
   ],
   [
+    "Shopify catalog auto refresh only runs for an incomplete index",
+    /catalogIndexIncomplete\s*=\s*indexedTotal === 0 \|\| indexedTotal < counts\.shopifyTotal/.test(shopifyCatalogLinkRoutes) &&
+      /!refresh\s*&&\s*catalogIndexIncomplete/.test(shopifyCatalogLinkRoutes),
+  ],
+  [
     "Shopify-first catalog scan bounds nested connection cost",
     /PAGE_SIZE = 50/.test(shopifyCatalogLinkRoutes) &&
       /VARIANT_SAMPLE_SIZE = 10/.test(shopifyCatalogLinkRoutes) &&

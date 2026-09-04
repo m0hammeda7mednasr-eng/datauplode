@@ -1246,7 +1246,13 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     const connection = await prisma.shopifyConnection.findFirst({ where: { isConnected: true }, select: { shopDomain: true } });
     const latestJob = await latestCatalogJob();
     const latestJobIsStale = latestJob && ["pending", "running"].includes(latestJob.status) && isStaleCatalogJob(latestJob);
-    if (!autoRefreshStarted && !refresh && (!latestJob || !["pending", "running"].includes(latestJob.status) || latestJobIsStale)) {
+    const catalogIndexIncomplete = indexedTotal === 0 || indexedTotal < counts.shopifyTotal;
+    if (
+      !autoRefreshStarted &&
+      !refresh &&
+      catalogIndexIncomplete &&
+      (!latestJob || !["pending", "running"].includes(latestJob.status) || latestJobIsStale)
+    ) {
       autoRefreshStarted = true;
       const recoverExactLink = Boolean(latestJobIsStale && latestJob?.type === RECONCILE_JOB_TYPE);
       setTimeout(() => {
