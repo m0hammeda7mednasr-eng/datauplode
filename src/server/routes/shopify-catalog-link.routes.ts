@@ -415,7 +415,7 @@ async function shopifyRequestWithBackoff(client: any, query: string, variables: 
 async function readShopifyPage(client: any, after: string | null) {
   const data: any = await shopifyRequestWithBackoff(client, `
     query SyncEngineCatalogIndex($after: String) {
-      products(first: ${PAGE_SIZE}, after: $after, sortKey: ID) {
+        products(first: ${PAGE_SIZE}, after: $after, sortKey: ID, query: "status:active") {
         nodes {
           id title handle status vendor descriptionHtml
           synclySource: metafield(namespace: "syncly", key: "source_url") { value }
@@ -655,6 +655,15 @@ async function updateJob(jobId: string, result: Record<string, any>, status?: st
   });
 }
 
+async function readActiveShopifyProductCount(client: any) {
+  const data: any = await shopifyRequestWithBackoff(client, `
+    query SyncEngineActiveCatalogCount {
+      productsCount(query: "status:active", limit: null) { count precision }
+    }
+  `, {});
+  return Number(data?.productsCount?.count || 0);
+}
+
 function jobResult(job: { result?: string | null } | null | undefined) {
   return parseJson(job?.result);
 }
@@ -670,8 +679,15 @@ function isStaleCatalogJob(job: { result?: string | null; startedAt?: Date | nul
   return Date.now() - jobHeartbeat(job) > STALE_CATALOG_JOB_MS;
 }
 
-async function runCatalogJob(jobId: string, linkExact: boolean, resumeAfter: string | null = null) {
+async function runCatalogJob(
+  jobId: string,
+  linkExact: boolean,
+  resumeAfter: string | null = null,
+  resumedScanStartedAt: string | null = null,
+) {
   const started = Date.now();
+  const parsedScanStartedAt = resumedScanStartedAt ? new Date(resumedScanStartedAt) : new Date();
+  const scanStartedAt = Number.isFinite(parsedScanStartedAt.getTime()) ? parsedScanStartedAt : new Date();
   const result: Record<string, any> = {
     stage: "starting",
     shopifyProductsRead: 0,
@@ -685,6 +701,7 @@ async function runCatalogJob(jobId: string, linkExact: boolean, resumeAfter: str
     failed: 0,
     scraperApiCreditsUsed: 0,
     resumed: Boolean(resumeAfter),
+    scanStartedAt: scanStartedAt.toISOString(),
     nextCursor: resumeAfter,
   };
   try {
@@ -696,6 +713,8 @@ async function runCatalogJob(jobId: string, linkExact: boolean, resumeAfter: str
     result.sheetErrors = sheetIndex.errors.length;
     await updateJob(jobId, result);
     const client = await ShopifyService.getClientFromDb(prisma);
+    result.activeProductsExpected = await readActiveShopifyProductCount(client);
+    await updateJob(jobId, result);
     let after: string | null = resumeAfter;
     let pages = 0;
     result.stage = linkExact ? "linking_exact_matches" : "indexing_shopify";
@@ -759,6 +778,10 @@ async function runCatalogJob(jobId: string, linkExact: boolean, resumeAfter: str
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (pages >= MAX_SHOPIFY_PAGES) throw new Error(`Shopify catalog exceeded ${MAX_SHOPIFY_PAGES * PAGE_SIZE} indexed products`);
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "${CACHE_TABLE}" WHERE "lastSeenAt" < $1`,
+      scanStartedAt,
+    );
     result.stage = "completed";
     result.elapsedSeconds = Math.round((Date.now() - started) / 1000);
     await updateJob(jobId, result, "completed");
@@ -782,9 +805,13 @@ async function startBackgroundJob(linkExact: boolean) {
   if (existing && !isStaleCatalogJob(existing)) return { alreadyRunning: true, job: existing };
 
   let resumeAfter: string | null = null;
+  let resumedScanStartedAt: string | null = null;
   if (existing) {
     const previous = jobResult(existing);
-    if (existing.type === type) resumeAfter = clean(previous.nextCursor) || null;
+    if (existing.type === type) {
+      resumeAfter = clean(previous.nextCursor) || null;
+      resumedScanStartedAt = clean(previous.scanStartedAt) || null;
+    }
     await prisma.syncJob.updateMany({
       where: { id: existing.id, status: { in: ["pending", "running"] } },
       data: {
@@ -811,10 +838,11 @@ async function startBackgroundJob(linkExact: boolean) {
         scraperApiCreditsUsed: 0,
         requestedAt: new Date().toISOString(),
         resumeAfter,
+        resumedScanStartedAt,
       }),
     },
   });
-  const promise = runCatalogJob(job.id, linkExact, resumeAfter).finally(() => {
+  const promise = runCatalogJob(job.id, linkExact, resumeAfter, resumedScanStartedAt).finally(() => {
     if (linkExact) reconcilePromise = null;
     else refreshPromise = null;
   });
@@ -845,8 +873,7 @@ async function knownShopifyCatalogTotal(indexedTotal: number) {
     const result = jobResult(job);
     return Math.max(
       known,
-      Number(result.shopifyProducts || 0),
-      result.stage === "completed" ? Number(result.shopifyProductsRead || 0) : 0,
+      Number(result.activeProductsExpected || 0),
     );
   }, indexedTotal);
 }
@@ -965,7 +992,7 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     if (refresh) {
       void startBackgroundJob(false).catch((error) => console.error("[shopify-catalog] refresh start failed:", error));
     }
-    const clauses: string[] = [];
+    const clauses: string[] = [`UPPER(COALESCE("status", '')) = 'ACTIVE'`];
     const params: any[] = [];
     if (search) {
       params.push(`%${search}%`);
@@ -1074,7 +1101,7 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
         evidence: parseJson(row.evidence),
       };
     });
-    const grouped = await prisma.$queryRawUnsafe<any[]>(`SELECT "matchStatus", COUNT(*)::int AS count FROM "${CACHE_TABLE}" GROUP BY "matchStatus"`);
+    const grouped = await prisma.$queryRawUnsafe<any[]>(`SELECT "matchStatus", COUNT(*)::int AS count FROM "${CACHE_TABLE}" WHERE UPPER(COALESCE("status", '')) = 'ACTIVE' GROUP BY "matchStatus"`);
     const group = new Map(grouped.map((entry) => [String(entry.matchStatus), Number(entry.count || 0)]));
     const indexedTotal = [...group.values()].reduce((sum, count) => sum + count, 0);
     const activeSync = group.get("active") || 0;
