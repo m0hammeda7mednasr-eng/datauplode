@@ -8,6 +8,7 @@ const csvPath = process.argv.find((arg) => arg.startsWith("--file="))?.slice(7);
 const apply = process.argv.includes("--apply");
 const confirmed = process.argv.includes(`--confirm=${CONFIRMATION}`);
 const reassignInactiveOwners = process.argv.includes("--reassign-inactive-owner");
+const linkSharedActiveOwners = process.argv.includes("--link-shared-active-owner");
 const limit = Math.max(1, Number(process.argv.find((arg) => arg.startsWith("--limit="))?.slice(8) || 10_000));
 
 if (!csvPath) throw new Error("Pass --file=<absolute CSV path>");
@@ -41,6 +42,23 @@ type CacheRow = {
 };
 
 const clean = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+const chunks = <T>(values: T[], size = 200) => Array.from(
+  { length: Math.ceil(values.length / size) },
+  (_, index) => values.slice(index * size, (index + 1) * size),
+);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+async function withDbRetry<T>(operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try { return await operation(); }
+    catch (error: any) {
+      lastError = error;
+      if (!/P1017|closed the connection|connection.*closed/i.test(clean(error?.code || error?.message || error)) || attempt === 4) throw error;
+      await sleep(attempt * 1_500);
+    }
+  }
+  throw lastError;
+}
 const normalizedTitle = (value: unknown) => clean(value)
   .toLowerCase()
   .replace(/&(?:amp;)?/g, " and ")
@@ -110,14 +128,20 @@ const candidates = cacheRows.flatMap((row) => {
   if (!method || !url) return [];
   return [{ cache: row, reference: matches.find((entry) => clean(entry["Source Link"]) === url)!, url, method }];
 });
-const existingShopify = await prisma.shopifyProduct.findMany({
-  where: { shopifyId: { in: candidates.map((entry) => entry.cache.shopifyId) } },
-  select: { shopifyId: true },
-});
-const existingSources = await prisma.sourceProduct.findMany({
-  where: { url: { in: candidates.map((entry) => entry.url) } },
-  include: { shopifyProduct: { select: { shopifyId: true, status: true } } },
-});
+const existingShopify = [] as Array<{ shopifyId: string }>;
+for (const ids of chunks(candidates.map((entry) => entry.cache.shopifyId))) {
+  existingShopify.push(...await withDbRetry(() => prisma.shopifyProduct.findMany({
+    where: { shopifyId: { in: ids } },
+    select: { shopifyId: true },
+  })));
+}
+const existingSources: Array<any> = [];
+for (const urls of chunks(candidates.map((entry) => entry.url))) {
+  existingSources.push(...await withDbRetry(() => prisma.sourceProduct.findMany({
+    where: { url: { in: urls } },
+    include: { shopifyProduct: { select: { shopifyId: true, status: true } } },
+  })));
+}
 const activeCatalogRows = await prisma.$queryRawUnsafe<Array<{ shopifyId: string }>>(`
   SELECT "shopifyId" FROM "${CACHE_TABLE}" WHERE UPPER(COALESCE("status", '')) = 'ACTIVE'
 `);
@@ -135,6 +159,9 @@ const conflicts = candidates.filter((entry) => {
 });
 const reassignable = conflicts.filter((entry) => !activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || ""));
 const available = reassignInactiveOwners ? [...unowned, ...reassignable] : unowned;
+const sharedActiveOwnerCandidates = linkSharedActiveOwners
+  ? conflicts.filter((entry) => activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || ""))
+  : [];
 
 const summary = {
   csvRows: references.length,
@@ -145,6 +172,8 @@ const summary = {
   conflictsOwnedByActiveCatalog: conflicts.filter((entry) => activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || "")).length,
   conflictsOwnedByInactiveOrMissingCatalog: conflicts.filter((entry) => !activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || "")).length,
   reassignInactiveOwners,
+  linkSharedActiveOwners,
+  sharedActiveOwnerCandidates: sharedActiveOwnerCandidates.length,
   alreadyLinked: candidates.filter((entry) => linkedShopifyIds.has(entry.cache.shopifyId)).length,
   byStatus: Object.fromEntries(["needs_link", "needs_review"].map((status) => [status, available.filter((entry) => entry.cache.matchStatus === status).length])),
   byMethod: Object.fromEntries(["exact_sku", "exact_title", "product_code_in_sku"].map((method) => [method, available.filter((entry) => entry.method === method).length])),
@@ -158,34 +187,39 @@ if (!apply) {
 }
 
 const client = await ShopifyService.getClientFromDb(prisma);
-const results = { linked: 0, failed: 0, issues: [] as Array<{ shopifyId: string; error: string }> };
+const results = { linked: 0, sharedLinked: 0, failed: 0, issues: [] as Array<{ shopifyId: string; error: string }> };
+
+function verifyLiveReference(product: any, entry: (typeof candidates)[number]) {
+  if (!product || product.status !== "ACTIVE") throw new Error("Shopify product is missing or not active");
+  if (entry.method === "exact_title" && normalizedTitle(product.title) !== normalizedTitle(entry.reference["Product Name"])) {
+    throw new Error("Live Shopify title no longer exactly matches the CSV reference title");
+  }
+  if (entry.method === "exact_sku") {
+    const liveSkus = new Set(product.variants.map((variant: any) => normalizedSku(variant.sku)).filter(Boolean));
+    if (!rowSkus(entry.reference).some((sku) => liveSkus.has(sku))) {
+      throw new Error("Live Shopify variants no longer contain the exact CSV SKU");
+    }
+  }
+  if (entry.method === "product_code_in_sku") {
+    const code = compactIdentity(entry.reference["Source Product Code"]);
+    const liveSkus = product.variants.map((variant: any) => compactIdentity(variant.sku)).filter(Boolean);
+    if (!code || !liveSkus.some((sku: string) => sku.includes(code))) {
+      throw new Error("Live Shopify variants no longer contain the CSV source product code");
+    }
+    const liveVendor = normalizedVendor(product.vendor);
+    const referenceVendor = normalizedVendor(entry.reference.Supplier);
+    if (liveVendor && referenceVendor && liveVendor !== referenceVendor) {
+      throw new Error("Live Shopify vendor does not match the CSV supplier");
+    }
+  }
+  if (!product.variants.length) throw new Error("Live Shopify product has no variants");
+}
+
 for (const entry of available.slice(0, limit)) {
   try {
     const previousOwnerId = sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || null;
     const product = await ShopifyService.getProductCatalogSnapshot(client, entry.cache.shopifyId);
-    if (!product || product.status !== "ACTIVE") throw new Error("Shopify product is missing or not active");
-    if (entry.method === "exact_title" && normalizedTitle(product.title) !== normalizedTitle(entry.reference["Product Name"])) {
-      throw new Error("Live Shopify title no longer exactly matches the CSV reference title");
-    }
-    if (entry.method === "exact_sku") {
-      const liveSkus = new Set(product.variants.map((variant) => normalizedSku(variant.sku)).filter(Boolean));
-      if (!rowSkus(entry.reference).some((sku) => liveSkus.has(sku))) {
-        throw new Error("Live Shopify variants no longer contain the exact CSV SKU");
-      }
-    }
-    if (entry.method === "product_code_in_sku") {
-      const code = compactIdentity(entry.reference["Source Product Code"]);
-      const liveSkus = product.variants.map((variant) => compactIdentity(variant.sku)).filter(Boolean);
-      if (!code || !liveSkus.some((sku) => sku.includes(code))) {
-        throw new Error("Live Shopify variants no longer contain the CSV source product code");
-      }
-      const liveVendor = normalizedVendor(product.vendor);
-      const referenceVendor = normalizedVendor(entry.reference.Supplier);
-      if (liveVendor && referenceVendor && liveVendor !== referenceVendor) {
-        throw new Error("Live Shopify vendor does not match the CSV supplier");
-      }
-    }
-    if (!product.variants.length) throw new Error("Live Shopify product has no variants");
+    verifyLiveReference(product, entry);
     if (previousOwnerId && previousOwnerId !== product.id) {
       const previousOwner = await ShopifyService.getProductCatalogSnapshot(client, previousOwnerId);
       if (previousOwner?.status === "ACTIVE") {
@@ -301,6 +335,40 @@ for (const entry of available.slice(0, limit)) {
       `, product.id, entry.url, `csv_reference_${entry.method}`, JSON.stringify(["csv_unique_source_url", `live_shopify_${entry.method}`]));
     }, { maxWait: 15_000, timeout: 45_000 });
     results.linked += 1;
+  } catch (error: any) {
+    results.failed += 1;
+    results.issues.push({ shopifyId: entry.cache.shopifyId, error: clean(error?.message || error).slice(0, 500) });
+  }
+}
+
+for (const entry of sharedActiveOwnerCandidates.slice(0, Math.max(0, limit - results.linked))) {
+  try {
+    const source = sourceByUrl.get(entry.url);
+    const ownerId = source?.shopifyProduct?.shopifyId || "";
+    if (!source || !ownerId || !activeCatalogIds.has(ownerId)) {
+      throw new Error("Shared source owner is no longer an active Shopify catalog product");
+    }
+    const product = await ShopifyService.getProductCatalogSnapshot(client, entry.cache.shopifyId);
+    verifyLiveReference(product, entry);
+    await prisma.$transaction(async (tx) => {
+      const changed = await tx.$executeRawUnsafe(`
+        UPDATE "${CACHE_TABLE}"
+        SET "matchStatus"='linked', "matchMethod"=$3,
+            "matchedSourceUrl"=$2,
+            "reason"='Verified shared source URL; variant-group materialization pending',
+            "evidence"=$4, "updatedAt"=NOW()
+        WHERE "shopifyId"=$1 AND "matchStatus" IN ('needs_link', 'needs_review')
+      `, product.id, entry.url, `csv_reference_shared_${entry.method}`, JSON.stringify(["csv_unique_source_url", `live_shopify_${entry.method}`, "active_source_owner"]));
+      if (!changed) return;
+      await tx.auditLog.create({
+        data: {
+          sourceProductId: source.id,
+          action: "LINK_EXISTING_SHOPIFY_CATALOG_SHARED_REFERENCE",
+          details: JSON.stringify({ shopifyId: product.id, sourceUrl: entry.url, ownerShopifyId: ownerId, method: entry.method, liveReadbackVerified: true }),
+        },
+      });
+      results.sharedLinked += 1;
+    }, { maxWait: 15_000, timeout: 45_000 });
   } catch (error: any) {
     results.failed += 1;
     results.issues.push({ shopifyId: entry.cache.shopifyId, error: clean(error?.message || error).slice(0, 500) });
