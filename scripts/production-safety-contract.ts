@@ -128,6 +128,11 @@ const assertions: Array<[string, boolean]> = [
       /!refresh\s*&&\s*catalogIndexIncomplete/.test(shopifyCatalogLinkRoutes),
   ],
   [
+    "Shopify catalog closes stale jobs when the index is complete",
+    /latestJobIsStale && !catalogIndexIncomplete/.test(shopifyCatalogLinkRoutes) &&
+      /stale_closed_complete_index/.test(shopifyCatalogLinkRoutes),
+  ],
+  [
     "Shopify-first catalog scan bounds nested connection cost",
     /PAGE_SIZE = 50/.test(shopifyCatalogLinkRoutes) &&
       /VARIANT_SAMPLE_SIZE = 10/.test(shopifyCatalogLinkRoutes) &&

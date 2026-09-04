@@ -1244,9 +1244,22 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
       pausedOrLinked,
     };
     const connection = await prisma.shopifyConnection.findFirst({ where: { isConnected: true }, select: { shopDomain: true } });
-    const latestJob = await latestCatalogJob();
+    let latestJob = await latestCatalogJob();
     const latestJobIsStale = latestJob && ["pending", "running"].includes(latestJob.status) && isStaleCatalogJob(latestJob);
     const catalogIndexIncomplete = indexedTotal === 0 || indexedTotal < counts.shopifyTotal;
+    if (latestJob && latestJobIsStale && !catalogIndexIncomplete) {
+      const recoveredResult = {
+        ...latestJob.result,
+        stage: "stale_closed_complete_index",
+        error: "Catalog worker heartbeat expired after the complete index had already been preserved.",
+        recoveredAt: new Date().toISOString(),
+      };
+      await prisma.syncJob.update({
+        where: { id: latestJob.id },
+        data: { status: "failed", completedAt: new Date(), result: JSON.stringify(recoveredResult) },
+      });
+      latestJob = { ...latestJob, status: "failed", completedAt: new Date(), result: recoveredResult };
+    }
     if (
       !autoRefreshStarted &&
       !refresh &&
