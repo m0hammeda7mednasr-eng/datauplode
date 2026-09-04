@@ -101,7 +101,7 @@ const assertions: Array<[string, boolean]> = [
     /ShopifyCatalogIndexV2/.test(shopifyCatalogLinkRoutes) &&
       /isStaleCatalogJob/.test(shopifyCatalogLinkRoutes) &&
       /nextCursor/.test(shopifyCatalogLinkRoutes) &&
-      /void startBackgroundJob\(false\)/.test(shopifyCatalogLinkRoutes),
+      /startBackgroundJob\(recoverExactLink\)/.test(shopifyCatalogLinkRoutes),
   ],
   ["job recovery default off", /SYNC_JOB_RECOVERY_ENABLED=false/.test(envExample)],
   [

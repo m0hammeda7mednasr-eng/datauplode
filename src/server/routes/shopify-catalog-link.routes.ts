@@ -1120,8 +1120,9 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     const latestJobIsStale = latestJob && ["pending", "running"].includes(latestJob.status) && isStaleCatalogJob(latestJob);
     if (!autoRefreshStarted && !refresh && (!latestJob || !["pending", "running"].includes(latestJob.status) || latestJobIsStale)) {
       autoRefreshStarted = true;
+      const recoverExactLink = Boolean(latestJobIsStale && latestJob?.type === RECONCILE_JOB_TYPE);
       setTimeout(() => {
-        void startBackgroundJob(false).catch((error) => console.error("[shopify-catalog] automatic refresh start failed:", error));
+        void startBackgroundJob(recoverExactLink).catch((error) => console.error("[shopify-catalog] automatic catalog job start failed:", error));
       }, 1000);
     }
     return res.json({
