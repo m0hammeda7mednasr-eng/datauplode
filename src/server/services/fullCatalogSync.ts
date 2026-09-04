@@ -126,21 +126,15 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   if (!before || before.id !== shopifyProductId) {
     throw new Error("Linked Shopify product could not be read before mutation");
   }
-  const beforeIsDefault = before.variants.length === 1 && (
-    /^(?:default(?: title| 1)?|title)$/i.test(clean(before.variants[0]?.title)) ||
-    (before.variants[0]?.selectedOptions || []).some((option: any) =>
-      /^(?:default(?: title| 1)?|title)$/i.test(clean(option?.value)),
-    )
-  );
-  if (options.requireVariantExpansion && (!beforeIsDefault || fresh.variants.length <= 1)) {
+  if (options.requireVariantExpansion && (before.variants.length > 1 || fresh.variants.length <= 1)) {
     return {
       success: true,
       skipped: true,
       sourceProductId,
       shopifyProductId,
-      reason: beforeIsDefault
-        ? "Source is a genuine single-variant product"
-        : "Shopify product is no longer a default-variant candidate",
+      reason: before.variants.length > 1
+        ? "Shopify product is no longer a single-variant candidate"
+        : "Source is a genuine single-variant product",
       sourceVariants: fresh.variants.length,
       shopifyVariants: before.variants.length,
       readbackVerified: true,

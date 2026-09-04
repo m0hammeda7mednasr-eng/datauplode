@@ -33,7 +33,6 @@ const candidates = await prisma.$queryRawUnsafe<Candidate[]>(`
     )
   GROUP BY s."id", s."title", s."url", s."updatedAt"
   HAVING COUNT(sv."id") <= 1
-    AND COALESCE(MAX(LOWER(TRIM(sv."size"))), '') IN ('', 'default title', 'default 1', 'title')
   ORDER BY s."updatedAt" ASC
   LIMIT ${limit}
 `);

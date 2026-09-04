@@ -25,7 +25,7 @@ const FULL_CATALOG_TARGET_DOMAINS = String(
 )
   .split(",")
   .map((value) => value.trim().toLowerCase())
-  .filter(Boolean);
+  .filter((value) => /^[a-z0-9.-]+$/.test(value));
 const PRICE_STOCK_TARGET_SPREADSHEET_IDS = new Set(
   String(
     process.env.SYNC_PRICE_STOCK_SPREADSHEET_IDS ||
@@ -2011,21 +2011,6 @@ export class QueueService {
         })),
         raw: { contains: 'sheetPriceMultiplier' },
         shopifyProduct: { is: { syncEnabled: true } },
-        ...(FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? {
-          variants: {
-            none: {
-              NOT: {
-                OR: [
-                  { size: null },
-                  { size: { equals: '', mode: 'insensitive' as const } },
-                  { size: { equals: 'default title', mode: 'insensitive' as const } },
-                  { size: { equals: 'default 1', mode: 'insensitive' as const } },
-                  { size: { equals: 'title', mode: 'insensitive' as const } },
-                ],
-              },
-            },
-          },
-        } : {}),
         AND: [
           {
             auditLogs: {
@@ -2044,7 +2029,51 @@ export class QueueService {
           }] : []),
         ],
       };
-    const reviewCandidates = await prisma.sourceProduct.findMany({
+    const singleVariantIds = FULL_CATALOG_DEFAULT_VARIANTS_ONLY
+      ? await prisma.$queryRawUnsafe<Array<{ id: string }>>(`
+          SELECT s."id"
+          FROM "SourceProduct" s
+          JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
+          LEFT JOIN "SourceVariant" sv ON sv."sourceProductId"=s."id"
+          WHERE s."syncStatus" <> 'paused'
+            AND sp."syncEnabled"=TRUE
+            AND s."raw" LIKE '%sheetPriceMultiplier%'
+            AND (${FULL_CATALOG_TARGET_DOMAINS.map((domain) => `LOWER(s."url") LIKE '%${domain}%'`).join(' OR ')})
+            AND NOT EXISTS (
+              SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
+                AND a."action"='SYNC_PRODUCT_CATALOG_SET' AND a."createdAt">=$1
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
+                AND a."action"='SYNC_PRODUCT_CATALOG_FAILED' AND a."createdAt">=$2
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
+                AND a."action"='SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT' AND a."createdAt">=$1
+            )
+          GROUP BY s."id", s."lastScrapedAt"
+          HAVING COUNT(sv."id") <= 1
+          ORDER BY EXISTS (
+            SELECT 1 FROM "ManualReviewItem" mr
+            WHERE mr."sourceProductId"=s."id" AND mr."status"='pending'
+          ) DESC, s."lastScrapedAt" ASC
+          LIMIT ${take}
+        `, successCutoff, failureCutoff)
+      : [];
+    const singleVariantOrder = new Map(singleVariantIds.map((row, index) => [row.id, index]));
+    const reviewCandidates = FULL_CATALOG_DEFAULT_VARIANTS_ONLY
+      ? await prisma.sourceProduct.findMany({
+          where: { id: { in: singleVariantIds.map((row) => row.id) } },
+          select: {
+            id: true,
+            title: true,
+            url: true,
+            updatedAt: true,
+            lastScrapedAt: true,
+            variants: { select: { size: true }, take: 2 },
+          },
+        })
+      : await prisma.sourceProduct.findMany({
       where: {
         ...candidateWhere,
         manualReviews: { some: { status: 'pending' } },
@@ -2061,7 +2090,7 @@ export class QueueService {
       take,
     });
     const remaining = take - reviewCandidates.length;
-    const otherCandidates = remaining > 0
+    const otherCandidates = !FULL_CATALOG_DEFAULT_VARIANTS_ONLY && remaining > 0
       ? await prisma.sourceProduct.findMany({
           where: {
             ...candidateWhere,
@@ -2080,13 +2109,11 @@ export class QueueService {
         })
       : [];
     const candidates = [...reviewCandidates, ...otherCandidates]
+      .sort((left, right) => (singleVariantOrder.get(left.id) ?? 0) - (singleVariantOrder.get(right.id) ?? 0))
       .filter((candidate) => {
         const url = cleanOptionText(candidate.url).toLowerCase();
         if (!FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain))) return false;
-        if (!FULL_CATALOG_DEFAULT_VARIANTS_ONLY) return true;
-        if (candidate.variants.length > 1) return false;
-        const size = cleanOptionText(candidate.variants[0]?.size).toLowerCase();
-        return !size || ['default title', 'default 1', 'title'].includes(size);
+        return !FULL_CATALOG_DEFAULT_VARIANTS_ONLY || candidate.variants.length <= 1;
       })
       .slice(0, take);
     if (candidates.length === 0) {
