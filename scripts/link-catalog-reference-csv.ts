@@ -7,6 +7,7 @@ const CONFIRMATION = "LINK_REFERENCE_CSV_EXACT";
 const csvPath = process.argv.find((arg) => arg.startsWith("--file="))?.slice(7);
 const apply = process.argv.includes("--apply");
 const confirmed = process.argv.includes(`--confirm=${CONFIRMATION}`);
+const reassignInactiveOwners = process.argv.includes("--reassign-inactive-owner");
 const limit = Math.max(1, Number(process.argv.find((arg) => arg.startsWith("--limit="))?.slice(8) || 10_000));
 
 if (!csvPath) throw new Error("Pass --file=<absolute CSV path>");
@@ -46,16 +47,26 @@ const normalizedTitle = (value: unknown) => clean(value)
   .replace(/[^a-z0-9]+/g, " ")
   .replace(/\s+/g, " ")
   .trim();
+const normalizedSku = (value: unknown) => clean(value).toUpperCase().replace(/\s+/g, "");
+const rowSkus = (row: ReferenceRow) => clean(row["Sheet SKU(s)"])
+  .split("|")
+  .map(normalizedSku)
+  .filter(Boolean);
 
 const workbook = XLSX.readFile(csvPath, { raw: false });
 const sheet = workbook.Sheets[workbook.SheetNames[0]];
 const references = XLSX.utils.sheet_to_json<ReferenceRow>(sheet, { defval: "" });
 const referencesByTitle = new Map<string, ReferenceRow[]>();
+const referencesBySku = new Map<string, ReferenceRow[]>();
 for (const row of references) {
-  if (!clean(row["Source Link"]) || clean(row["Name Status"]) === "Needs lookup") continue;
-  const key = normalizedTitle(row["Product Name"]);
-  if (!key) continue;
-  referencesByTitle.set(key, [...(referencesByTitle.get(key) || []), row]);
+  if (!clean(row["Source Link"])) continue;
+  for (const sku of rowSkus(row)) {
+    referencesBySku.set(sku, [...(referencesBySku.get(sku) || []), row]);
+  }
+  if (clean(row["Name Status"]) !== "Needs lookup") {
+    const key = normalizedTitle(row["Product Name"]);
+    if (key) referencesByTitle.set(key, [...(referencesByTitle.get(key) || []), row]);
+  }
 }
 
 const cacheRows = await prisma.$queryRawUnsafe<CacheRow[]>(`
@@ -67,9 +78,15 @@ const cacheRows = await prisma.$queryRawUnsafe<CacheRow[]>(`
 `);
 
 const candidates = cacheRows.flatMap((row) => {
-  const matches = referencesByTitle.get(normalizedTitle(row.title)) || [];
-  const urls = [...new Set(matches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
-  return urls.length === 1 ? [{ cache: row, reference: matches[0], url: urls[0] }] : [];
+  const skuMatches = referencesBySku.get(normalizedSku(row.primarySku)) || [];
+  const titleMatches = referencesByTitle.get(normalizedTitle(row.title)) || [];
+  const exactSkuUrls = [...new Set(skuMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
+  const exactTitleUrls = [...new Set(titleMatches.map((entry) => clean(entry["Source Link"])).filter(Boolean))];
+  const method = exactSkuUrls.length === 1 ? "exact_sku" : exactTitleUrls.length === 1 ? "exact_title" : null;
+  const matches = method === "exact_sku" ? skuMatches : titleMatches;
+  const url = method === "exact_sku" ? exactSkuUrls[0] : exactTitleUrls[0];
+  if (!method || !url) return [];
+  return [{ cache: row, reference: matches.find((entry) => clean(entry["Source Link"]) === url)!, url, method }];
 });
 const existingShopify = await prisma.shopifyProduct.findMany({
   where: { shopifyId: { in: candidates.map((entry) => entry.cache.shopifyId) } },
@@ -77,11 +94,15 @@ const existingShopify = await prisma.shopifyProduct.findMany({
 });
 const existingSources = await prisma.sourceProduct.findMany({
   where: { url: { in: candidates.map((entry) => entry.url) } },
-  include: { shopifyProduct: { select: { shopifyId: true } } },
+  include: { shopifyProduct: { select: { shopifyId: true, status: true } } },
 });
+const activeCatalogRows = await prisma.$queryRawUnsafe<Array<{ shopifyId: string }>>(`
+  SELECT "shopifyId" FROM "${CACHE_TABLE}" WHERE UPPER(COALESCE("status", '')) = 'ACTIVE'
+`);
+const activeCatalogIds = new Set(activeCatalogRows.map((entry) => entry.shopifyId));
 const linkedShopifyIds = new Set(existingShopify.map((entry) => entry.shopifyId));
 const sourceByUrl = new Map(existingSources.map((entry) => [entry.url, entry]));
-const available = candidates.filter((entry) => {
+const unowned = candidates.filter((entry) => {
   if (linkedShopifyIds.has(entry.cache.shopifyId)) return false;
   const owner = sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId;
   return !owner || owner === entry.cache.shopifyId;
@@ -90,15 +111,21 @@ const conflicts = candidates.filter((entry) => {
   const owner = sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId;
   return Boolean(owner && owner !== entry.cache.shopifyId);
 });
+const reassignable = conflicts.filter((entry) => !activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || ""));
+const available = reassignInactiveOwners ? [...unowned, ...reassignable] : unowned;
 
 const summary = {
   csvRows: references.length,
   cacheRows: cacheRows.length,
-  uniqueExactTitleCandidates: candidates.length,
+  deterministicCandidates: candidates.length,
   available: available.length,
   conflicts: conflicts.length,
+  conflictsOwnedByActiveCatalog: conflicts.filter((entry) => activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || "")).length,
+  conflictsOwnedByInactiveOrMissingCatalog: conflicts.filter((entry) => !activeCatalogIds.has(sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || "")).length,
+  reassignInactiveOwners,
   alreadyLinked: candidates.filter((entry) => linkedShopifyIds.has(entry.cache.shopifyId)).length,
   byStatus: Object.fromEntries(["needs_link", "needs_review"].map((status) => [status, available.filter((entry) => entry.cache.matchStatus === status).length])),
+  byMethod: Object.fromEntries(["exact_sku", "exact_title"].map((method) => [method, available.filter((entry) => entry.method === method).length])),
   apply,
   limit,
 };
@@ -112,12 +139,25 @@ const client = await ShopifyService.getClientFromDb(prisma);
 const results = { linked: 0, failed: 0, issues: [] as Array<{ shopifyId: string; error: string }> };
 for (const entry of available.slice(0, limit)) {
   try {
+    const previousOwnerId = sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || null;
     const product = await ShopifyService.getProductCatalogSnapshot(client, entry.cache.shopifyId);
     if (!product || product.status !== "ACTIVE") throw new Error("Shopify product is missing or not active");
-    if (normalizedTitle(product.title) !== normalizedTitle(entry.reference["Product Name"])) {
+    if (entry.method === "exact_title" && normalizedTitle(product.title) !== normalizedTitle(entry.reference["Product Name"])) {
       throw new Error("Live Shopify title no longer exactly matches the CSV reference title");
     }
+    if (entry.method === "exact_sku") {
+      const liveSkus = new Set(product.variants.map((variant) => normalizedSku(variant.sku)).filter(Boolean));
+      if (!rowSkus(entry.reference).some((sku) => liveSkus.has(sku))) {
+        throw new Error("Live Shopify variants no longer contain the exact CSV SKU");
+      }
+    }
     if (!product.variants.length) throw new Error("Live Shopify product has no variants");
+    if (previousOwnerId && previousOwnerId !== product.id) {
+      const previousOwner = await ShopifyService.getProductCatalogSnapshot(client, previousOwnerId);
+      if (previousOwner?.status === "ACTIVE") {
+        throw new Error("CSV source URL is still owned by another active Shopify product");
+      }
+    }
     const multiplier = Number(entry.reference.Multiplier || 23) || 23;
     const firstPrice = Number(product.variants[0]?.price || entry.cache.price || 0);
     await prisma.$transaction(async (tx) => {
@@ -128,7 +168,11 @@ for (const entry of available.slice(0, limit)) {
         include: { shopifyProduct: true, variants: { include: { shopifyVariant: true } } },
       });
       if (currentSource?.shopifyProduct && currentSource.shopifyProduct.shopifyId !== product.id) {
-        throw new Error("CSV source URL became owned by another Shopify product");
+        if (!reassignInactiveOwners || currentSource.shopifyProduct.shopifyId !== previousOwnerId) {
+          throw new Error("CSV source URL became owned by another Shopify product");
+        }
+        await tx.shopifyVariant.deleteMany({ where: { shopifyProductId: currentSource.shopifyProduct.id } });
+        await tx.shopifyProduct.delete({ where: { id: currentSource.shopifyProduct.id } });
       }
       const supplierName = clean(entry.reference.Supplier) || clean(product.vendor) || "CSV Reference";
       const supplier = await tx.supplier.upsert({
@@ -212,15 +256,15 @@ for (const entry of available.slice(0, limit)) {
       }
       await tx.manualReviewItem.deleteMany({ where: { sourceProductId: source.id, status: "pending" } });
       await tx.auditLog.create({
-        data: { sourceProductId: source.id, action: "LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV", details: JSON.stringify({ shopifyId: product.id, sourceUrl: entry.url, title: product.title, multiplier }) },
+        data: { sourceProductId: source.id, action: "LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV", details: JSON.stringify({ shopifyId: product.id, sourceUrl: entry.url, title: product.title, multiplier, method: entry.method, previousOwnerId }) },
       });
       await tx.$executeRawUnsafe(`
         UPDATE "${CACHE_TABLE}"
-        SET "matchStatus"='active', "matchMethod"='csv_reference_exact_title',
+        SET "matchStatus"='active', "matchMethod"=$3,
             "matchedSourceUrl"=$2, "reason"=NULL,
-            "evidence"='["csv_unique_source_url","live_shopify_exact_title"]', "updatedAt"=NOW()
+            "evidence"=$4, "updatedAt"=NOW()
         WHERE "shopifyId"=$1
-      `, product.id, entry.url);
+      `, product.id, entry.url, `csv_reference_${entry.method}`, JSON.stringify(["csv_unique_source_url", `live_shopify_${entry.method}`]));
     }, { maxWait: 15_000, timeout: 45_000 });
     results.linked += 1;
   } catch (error: any) {
