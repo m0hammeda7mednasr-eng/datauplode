@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   AlertCircle,
+  CheckCircle2,
   ExternalLink,
   Link2,
   TrendingUp,
@@ -48,10 +49,15 @@ export default function Dashboard() {
       totalLinked,
       activeSync,
       pendingReview: Number(data?.stats?.pendingReview || 0),
+      catalogSuccess24h: Number(data?.stats?.catalog24h?.success || 0),
+      catalogFailed24h: Number(data?.stats?.catalog24h?.failed || 0),
     };
-  }, [data?.stats?.activeSync, data?.stats?.pendingReview, data?.stats?.totalLinked, linked.length]);
+  }, [data?.stats, linked.length]);
 
   const recentLinked = linked.slice(0, 6);
+  const recentCatalogUpdates = Array.isArray(data?.stats?.catalog24h?.recent)
+    ? data.stats.catalog24h.recent
+    : [];
 
   return (
     <div className="space-y-8">
@@ -66,6 +72,7 @@ export default function Dashboard() {
         <StatCard icon={Link2} label="Linked Products" value={stats.totalLinked} tone="indigo" />
         <StatCard icon={TrendingUp} label="Active Sync" value={stats.activeSync} tone="emerald" />
         <StatCard icon={AlertCircle} label="Needs Review" value={stats.pendingReview} tone="amber" />
+        <StatCard icon={CheckCircle2} label="Catalog 24h" value={stats.catalogSuccess24h} tone="slate" />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -105,6 +112,39 @@ export default function Dashboard() {
                       Details
                     </Link>
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-card-border bg-white p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <h2 className="text-sm font-black uppercase tracking-widest text-slate-500">Catalog Updates 24h</h2>
+              <div className="flex items-center gap-3 text-xs font-bold">
+                <span className="text-emerald-700">{stats.catalogSuccess24h} verified</span>
+                <span className="text-rose-700">{stats.catalogFailed24h} failed</span>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {!isLoading && recentCatalogUpdates.length === 0 && (
+                <p className="text-sm text-slate-500">No catalog updates in the last 24 hours.</p>
+              )}
+              {recentCatalogUpdates.map((item: any) => (
+                <div key={item.id} className="flex items-center justify-between gap-4 rounded-lg border border-slate-100 p-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-900">{item.title}</p>
+                    <p className="text-[11px] font-medium text-slate-500">
+                      {formatRelative(item.createdAt)} | {item.variants || 0} variants | {item.images || 0} images
+                    </p>
+                  </div>
+                  <span className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest",
+                    item.status === "success"
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-rose-100 text-rose-700",
+                  )}>
+                    {item.status === "success" ? "Verified" : "Failed"}
+                  </span>
                 </div>
               ))}
             </div>

@@ -4072,7 +4072,15 @@ router.post("/imports/analyze", async (req, res) => {
 
 // Products
 router.get("/products/stats", async (req, res) => {
-  const [totalLinked, activeSync, pendingReviewProducts] = await Promise.all([
+  const since24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [
+    totalLinked,
+    activeSync,
+    pendingReviewProducts,
+    catalogSuccess24h,
+    catalogFailed24h,
+    recentCatalogUpdates,
+  ] = await Promise.all([
     prisma.sourceProduct.count({
       where: {
         shopifyProduct: { isNot: null },
@@ -4092,12 +4100,61 @@ router.get("/products/stats", async (req, res) => {
       distinct: ["sourceProductId"],
       select: { sourceProductId: true },
     }),
+    prisma.auditLog.count({
+      where: { action: "SYNC_PRODUCT_CATALOG_SET", createdAt: { gte: since24Hours } },
+    }),
+    prisma.auditLog.count({
+      where: { action: "SYNC_PRODUCT_CATALOG_FAILED", createdAt: { gte: since24Hours } },
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        action: { in: ["SYNC_PRODUCT_CATALOG_SET", "SYNC_PRODUCT_CATALOG_FAILED"] },
+        createdAt: { gte: since24Hours },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      select: {
+        id: true,
+        action: true,
+        details: true,
+        createdAt: true,
+        sourceProduct: {
+          select: {
+            id: true,
+            title: true,
+            url: true,
+            shopifyProduct: { select: { shopifyId: true, handle: true } },
+          },
+        },
+      },
+    }),
   ]);
 
   res.json({
     totalLinked,
     activeSync,
     pendingReview: pendingReviewProducts.length,
+    catalog24h: {
+      success: catalogSuccess24h,
+      failed: catalogFailed24h,
+      recent: recentCatalogUpdates.map((entry) => {
+        const details = readJsonObject(entry.details);
+        return {
+          id: entry.id,
+          status: entry.action === "SYNC_PRODUCT_CATALOG_SET" ? "success" : "failed",
+          createdAt: entry.createdAt,
+          sourceProductId: entry.sourceProduct?.id || null,
+          title: entry.sourceProduct?.title || "Unknown product",
+          sourceUrl: entry.sourceProduct?.url || null,
+          shopifyProductId: entry.sourceProduct?.shopifyProduct?.shopifyId || null,
+          shopifyHandle: entry.sourceProduct?.shopifyProduct?.handle || null,
+          variants: Number(details?.variants || 0),
+          images: Number(details?.images || 0),
+          readbackVerified: details?.readbackVerified === true,
+          error: entry.action === "SYNC_PRODUCT_CATALOG_FAILED" ? String(details?.message || "Catalog sync failed") : null,
+        };
+      }),
+    },
   });
 });
 

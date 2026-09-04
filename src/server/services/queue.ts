@@ -2028,8 +2028,8 @@ export class QueueService {
         ...candidateWhere,
         manualReviews: { some: { status: 'pending' } },
       },
-      select: { id: true, title: true, url: true, updatedAt: true },
-      orderBy: { updatedAt: 'asc' },
+      select: { id: true, title: true, url: true, updatedAt: true, lastScrapedAt: true },
+      orderBy: { lastScrapedAt: 'asc' },
       take,
     });
     const remaining = take - reviewCandidates.length;
@@ -2039,8 +2039,8 @@ export class QueueService {
             ...candidateWhere,
             id: { notIn: reviewCandidates.map((candidate) => candidate.id) },
           },
-          select: { id: true, title: true, url: true, updatedAt: true },
-          orderBy: { updatedAt: 'asc' },
+          select: { id: true, title: true, url: true, updatedAt: true, lastScrapedAt: true },
+          orderBy: { lastScrapedAt: 'asc' },
           take: remaining,
         })
       : [];
