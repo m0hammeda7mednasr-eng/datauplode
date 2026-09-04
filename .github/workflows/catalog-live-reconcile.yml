@@ -25,6 +25,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          curl --fail-with-body --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            "$API_BASE/api/shopify-catalog/link-state?offset=0&limit=1" > /tmp/catalog.json
+          total=$(jq -r '.counts.shopifyTotal // 0' /tmp/catalog.json)
+          status=$(jq -r '.latestJob.status // "none"' /tmp/catalog.json)
+          read=$(jq -r '.scan.shopifyProductsRead // .latestJob.result.shopifyProductsRead // 0' /tmp/catalog.json)
+          if [ "$total" -gt 0 ] && [ "$read" -ge "$total" ] && [ "$status" = "completed" ]; then
+            echo "Current active Shopify index is already complete; reusing it."
+            jq '{success,counts,latestJob,scan}' /tmp/catalog.json
+            exit 0
+          fi
           curl --fail-with-body --retry 5 --retry-all-errors --connect-timeout 10 --max-time 60 \
             "$API_BASE/api/shopify-catalog/link-state?refresh=true&offset=0&limit=1" \
             | tee /tmp/catalog.json \
@@ -45,7 +55,7 @@ jobs:
             read=$(jq -r '.scan.shopifyProductsRead // .latestJob.result.shopifyProductsRead // 0' /tmp/catalog.json)
             echo "attempt=$attempt total=$total indexed=$read job=$type status=$status"
 
-            if [ "$total" -ge 14000 ] && [ "$status" = "completed" ]; then
+            if [ "$total" -gt 0 ] && [ "$read" -ge "$total" ] && [ "$status" = "completed" ]; then
               ready=1
               break
             fi
