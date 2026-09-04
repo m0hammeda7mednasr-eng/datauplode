@@ -246,6 +246,7 @@ async function ensureCacheTable() {
       FROM "ShopifyProduct" sp
       JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
       LEFT JOIN "Supplier" sup ON sup."id" = s."supplierId"
+      WHERE NOT EXISTS (SELECT 1 FROM "${CACHE_TABLE}" LIMIT 1)
       ON CONFLICT ("shopifyId") DO UPDATE SET
         "title" = EXCLUDED."title",
         "handle" = EXCLUDED."handle",
