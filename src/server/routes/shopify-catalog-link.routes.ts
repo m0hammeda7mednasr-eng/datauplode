@@ -65,6 +65,7 @@ type SheetIndex = {
   bySku: Map<string, CatalogSheetRow[]>;
   byPrefix: Map<string, CatalogSheetRow[]>;
   bySourceIdentifier: Map<string, CatalogSheetRow[]>;
+  bySourceUrlTitle: Map<string, CatalogSheetRow[]>;
   errors: Array<{ spreadsheetName: string; sheetName: string; error: string }>;
 };
 
@@ -184,6 +185,29 @@ function possibleSkuPrefixes(sku: string) {
 
 function compactIdentifier(value: unknown) {
   return clean(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function normalizedProductTitle(value: unknown) {
+  return clean(value)
+    .replace(/&amp;/gi, " and ")
+    .replace(/&#(?:189|xbd);/gi, " half ")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function sourceTitleFromUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    const segments = parsed.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
+    const productMarker = segments.findIndex((segment) => segment.toLowerCase() === "p");
+    const candidate = productMarker > 0 ? segments[productMarker - 1] : "";
+    if (!candidate || !/[a-z]/i.test(candidate) || !candidate.includes("-")) return "";
+    return normalizedProductTitle(candidate.replace(/^buy-/i, ""));
+  } catch {
+    return "";
+  }
 }
 
 function sourceIdentifiersFromUrl(value: string) {
@@ -361,6 +385,7 @@ async function loadSheetIndex(force = false): Promise<SheetIndex> {
   const bySku = new Map<string, CatalogSheetRow[]>();
   const byPrefix = new Map<string, CatalogSheetRow[]>();
   const bySourceIdentifier = new Map<string, CatalogSheetRow[]>();
+  const bySourceUrlTitle = new Map<string, CatalogSheetRow[]>();
   for (const row of rows) {
     const urlRows = byUrl.get(row.canonicalUrl) || [];
     urlRows.push(row);
@@ -381,8 +406,14 @@ async function loadSheetIndex(force = false): Promise<SheetIndex> {
       identifierRows.push(row);
       bySourceIdentifier.set(identifier, identifierRows);
     }
+    const sourceUrlTitle = sourceTitleFromUrl(row.url);
+    if (sourceUrlTitle) {
+      const titleRows = bySourceUrlTitle.get(sourceUrlTitle) || [];
+      titleRows.push(row);
+      bySourceUrlTitle.set(sourceUrlTitle, titleRows);
+    }
   }
-  const value = { rows, byUrl, bySku, byPrefix, bySourceIdentifier, errors };
+  const value = { rows, byUrl, bySku, byPrefix, bySourceIdentifier, bySourceUrlTitle, errors };
   sheetIndexCache = { expiresAt: Date.now() + SHEET_INDEX_TTL_MS, value };
   return value;
 }
@@ -402,6 +433,12 @@ function resolveCandidate(product: ShopifyCatalogProduct, index: SheetIndex): Ca
       for (const row of index.bySourceIdentifier.get(identifier) || []) {
         evidence.push({ method: "source_product_identifier", row });
       }
+    }
+  }
+  const exactUrlTitle = normalizedProductTitle(product.title);
+  if (evidence.length === 0 && exactUrlTitle) {
+    for (const row of index.bySourceUrlTitle.get(exactUrlTitle) || []) {
+      evidence.push({ method: "source_url_title", row });
     }
   }
   const byCanonical = new Map<string, CatalogSheetRow[]>();
@@ -429,7 +466,9 @@ function resolveCandidate(product: ShopifyCatalogProduct, index: SheetIndex): Ca
           ? "exact_sku"
           : methods.includes("dab_product_prefix")
             ? "dab_product_prefix"
-            : "source_product_identifier",
+            : methods.includes("source_product_identifier")
+              ? "source_product_identifier"
+              : "source_url_title",
       reason: null,
       evidence: methods,
     };
