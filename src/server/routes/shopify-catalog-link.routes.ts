@@ -823,6 +823,12 @@ async function runCatalogJob(
     await updateJob(jobId, result);
     const client = await ShopifyService.getClientFromDb(prisma);
     result.activeProductsExpected = await readActiveShopifyProductCount(client);
+    const linkedSourceOwners = await prisma.shopifyProduct.findMany({
+      select: { shopifyId: true, sourceProduct: { select: { url: true } } },
+    });
+    const sourceOwnerByUrl = new Map(
+      linkedSourceOwners.map((entry) => [canonicalUrl(entry.sourceProduct.url), entry.shopifyId]),
+    );
     await updateJob(jobId, result);
     let after: string | null = resumeAfter;
     let pages = 0;
@@ -851,11 +857,24 @@ async function runCatalogJob(
           continue;
         }
         let candidate = resolveCandidate(product, sheetIndex);
+        const candidateOwner = candidate.row
+          ? sourceOwnerByUrl.get(canonicalUrl(candidate.row.url))
+          : null;
+        if (candidate.status === "matched" && candidateOwner && candidateOwner !== product.id) {
+          candidate = {
+            ...candidate,
+            status: "needs_review",
+            matchMethod: "conflict",
+            reason: "Source URL is already linked to a different Shopify product",
+            evidence: [...candidate.evidence, "database_conflict"],
+          };
+        }
         if (candidate.status === "matched" && linkExact) {
           try {
             const linked = await persistCatalogLink(product, candidate);
             result.linked += linked.status === "linked" ? 1 : 0;
             result.alreadyLinked += linked.status === "already_linked" ? 1 : 0;
+            sourceOwnerByUrl.set(canonicalUrl(linked.sourceUrl), product.id);
             await upsertCatalogIndex(product, candidate, "active", linked.sourceUrl);
             continue;
           } catch (error: any) {

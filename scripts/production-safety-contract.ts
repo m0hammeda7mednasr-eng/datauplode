@@ -118,6 +118,11 @@ const assertions: Array<[string, boolean]> = [
       /maxAttempts = 9/.test(shopifyCatalogLinkRoutes),
   ],
   [
+    "Shopify catalog refresh preserves source ownership conflicts",
+    /sourceOwnerByUrl\.get\(canonicalUrl\(candidate\.row\.url\)\)/.test(shopifyCatalogLinkRoutes) &&
+      /candidateOwner !== product\.id[\s\S]*status:\s*"needs_review"[\s\S]*database_conflict/.test(shopifyCatalogLinkRoutes),
+  ],
+  [
     "Shopify-first catalog scan bounds nested connection cost",
     /PAGE_SIZE = 50/.test(shopifyCatalogLinkRoutes) &&
       /VARIANT_SAMPLE_SIZE = 10/.test(shopifyCatalogLinkRoutes) &&
