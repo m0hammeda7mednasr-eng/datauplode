@@ -11,6 +11,7 @@ const reassignInactiveOwners = process.argv.includes("--reassign-inactive-owner"
 const linkSharedActiveOwners = process.argv.includes("--link-shared-active-owner");
 const crossVendorProductCode = process.argv.includes("--cross-vendor-product-code");
 const limit = Math.max(1, Number(process.argv.find((arg) => arg.startsWith("--limit="))?.slice(8) || 10_000));
+const concurrency = Math.max(1, Math.min(6, Number(process.argv.find((arg) => arg.startsWith("--concurrency="))?.slice(14) || 1)));
 
 if (!csvPath) throw new Error("Pass --file=<absolute CSV path>");
 if (apply && !confirmed) throw new Error(`Apply requires --confirm=${CONFIRMATION}`);
@@ -181,6 +182,7 @@ const summary = {
   byMethod: Object.fromEntries(["exact_sku", "exact_title", "product_code_in_sku"].map((method) => [method, available.filter((entry) => entry.method === method).length])),
   apply,
   limit,
+  concurrency,
 };
 console.log(JSON.stringify(summary));
 if (!apply) {
@@ -217,7 +219,8 @@ function verifyLiveReference(product: any, entry: (typeof candidates)[number]) {
   if (!product.variants.length) throw new Error("Live Shopify product has no variants");
 }
 
-for (const entry of available.slice(0, limit)) {
+for (const batch of chunks(available.slice(0, limit), concurrency)) {
+ await Promise.all(batch.map(async (entry) => {
   try {
     const previousOwnerId = sourceByUrl.get(entry.url)?.shopifyProduct?.shopifyId || null;
     const product = await ShopifyService.getProductCatalogSnapshot(client, entry.cache.shopifyId);
@@ -341,9 +344,11 @@ for (const entry of available.slice(0, limit)) {
     results.failed += 1;
     results.issues.push({ shopifyId: entry.cache.shopifyId, error: clean(error?.message || error).slice(0, 500) });
   }
+ }));
 }
 
-for (const entry of sharedActiveOwnerCandidates.slice(0, Math.max(0, limit - results.linked))) {
+for (const batch of chunks(sharedActiveOwnerCandidates.slice(0, Math.max(0, limit - results.linked)), concurrency)) {
+ await Promise.all(batch.map(async (entry) => {
   try {
     const source = sourceByUrl.get(entry.url);
     const ownerId = source?.shopifyProduct?.shopifyId || "";
@@ -375,6 +380,7 @@ for (const entry of sharedActiveOwnerCandidates.slice(0, Math.max(0, limit - res
     results.failed += 1;
     results.issues.push({ shopifyId: entry.cache.shopifyId, error: clean(error?.message || error).slice(0, 500) });
   }
+ }));
 }
 
 console.log(JSON.stringify(results));
