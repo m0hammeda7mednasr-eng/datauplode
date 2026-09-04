@@ -12,6 +12,8 @@ type DiscoveryRow = {
   vendor: string | null;
   handle: string | null;
   price: number | null;
+  sourceUrl: string | null;
+  matchStatus: "needs_link" | "needs_review";
 };
 
 type VendorSearch = { domains: string[]; queryLabel: string };
@@ -127,6 +129,17 @@ function preferredUrl(urls: string[], identity: string, search: VendorSearch) {
 }
 
 async function discoverSource(row: DiscoveryRow, search: VendorSearch) {
+  const directUrl = clean(row.sourceUrl);
+  if (directUrl && allowedHost(directUrl, search.domains) && productIdentity(directUrl)) {
+    const url = canonicalUrl(directUrl);
+    const product = await scraper.scrape(url);
+    const overlap = titleOverlap(row.title, product.title);
+    if (overlap < 0.55) throw new Error(`Direct source title overlap ${overlap.toFixed(2)} is below 0.55`);
+    if (!(product.price > 0) || !product.images.length || !product.variants.length) {
+      throw new Error("Direct source product failed price/image/variant validation");
+    }
+    return { identity: productIdentity(url), url, product, overlap, searchResultCount: 1, searchAttempts: 0 };
+  }
   const siteQuery = search.domains.map((domain) => `site:${domain}`).join(" OR ");
   const compactTitle = clean(row.title)
     .replace(/\s+-\s+size\s+.+$/i, "")
@@ -292,10 +305,14 @@ export async function runCatalogSourceDiscoveryBatch() {
     });
   }
   const rows = await prisma.$queryRawUnsafe<DiscoveryRow[]>(`
-    SELECT "shopifyId", "title", "vendor", "handle", "price"
+    SELECT "shopifyId", "title", "vendor", "handle", "price",
+           "matchedSourceUrl" AS "sourceUrl", "matchStatus"
     FROM "${CACHE_TABLE}"
     WHERE UPPER(COALESCE("status",''))='ACTIVE'
-      AND "matchStatus"='needs_link'
+      AND (
+        "matchStatus"='needs_link'
+        OR ("matchStatus"='needs_review' AND "matchMethod"='source_url_not_in_sheets')
+      )
       AND (
         "reason" IS NULL
         OR "reason" NOT LIKE 'Source discovery:%'
@@ -331,7 +348,8 @@ export async function runCatalogSourceDiscoveryBatch() {
         await prisma.$executeRawUnsafe(`
           UPDATE "${CACHE_TABLE}"
           SET "reason"=$2, "updatedAt"=NOW()
-          WHERE "shopifyId"=$1 AND "matchStatus"='needs_link'
+          WHERE "shopifyId"=$1
+            AND ("matchStatus"='needs_link' OR ("matchStatus"='needs_review' AND "matchMethod"='source_url_not_in_sheets'))
         `, row.shopifyId, `Source discovery: ${message}`);
       }
     }));

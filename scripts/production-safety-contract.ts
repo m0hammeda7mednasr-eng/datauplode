@@ -60,6 +60,17 @@ const assertions: Array<[string, boolean]> = [
       /result\.deferred \+= 1/.test(catalogSourceDiscovery),
   ],
   [
+    "catalog source discovery only admits unresolved explicit source reviews",
+    /"matchStatus"='needs_review' AND "matchMethod"='source_url_not_in_sheets'/.test(catalogSourceDiscovery),
+  ],
+  [
+    "catalog source discovery validates direct product URLs before linking",
+    /allowedHost\(directUrl, search\.domains\)/.test(catalogSourceDiscovery) &&
+      /productIdentity\(directUrl\)/.test(catalogSourceDiscovery) &&
+      /Direct source title overlap/.test(catalogSourceDiscovery) &&
+      /Direct source product failed price\/image\/variant validation/.test(catalogSourceDiscovery),
+  ],
+  [
     "full-catalog autostart requires runtime write gate and exact revision",
     /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
       /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
