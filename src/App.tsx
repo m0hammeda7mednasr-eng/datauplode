@@ -7,7 +7,8 @@ import {
   Link as LinkIcon, 
   Settings, 
   RefreshCw, 
-  AlertCircle, 
+  AlertCircle,
+  AlertTriangle, 
   History, 
   DollarSign,
   PackageSearch,
@@ -19,6 +20,7 @@ import { cn } from './lib/utils';
 import Dashboard from './pages/Dashboard';
 import ImportProduct from './pages/ImportProduct';
 import LinkedProducts from './pages/LinkedProducts';
+import DefaultVariants from './pages/DefaultVariants';
 import PricingRules from './pages/PricingRules';
 import SyncJobs from './pages/SyncJobs';
 import ManualReview from './pages/ManualReview';
@@ -99,6 +101,7 @@ function Sidebar() {
         <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
         <SidebarItem to="/excel-sheet" icon={Sheet} label="Excel Sheet" active={location.pathname === '/excel-sheet'} />
         <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
+        <SidebarItem to="/default-variants" icon={AlertTriangle} label="Default Variants" active={location.pathname === '/default-variants'} />
         <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
         <SidebarItem to="/pricing" icon={DollarSign} label="Pricing Rules" active={location.pathname === '/pricing'} />
         <SidebarItem to="/sync-jobs" icon={History} label="Sync Jobs" active={location.pathname === '/sync-jobs'} />
@@ -124,6 +127,7 @@ export default function App() {
               <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
               <Route path="/excel-sheet" element={<><TopBar breadcrumb="Excel Sheet" /><main className="flex-1 p-8 overflow-y-auto"><ExcelSheetPage /></main></>} />
               <Route path="/products" element={<><TopBar breadcrumb="Linked Products" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
+              <Route path="/default-variants" element={<><TopBar breadcrumb="Default Variants" /><main className="flex-1 p-8 overflow-y-auto"><DefaultVariants /></main></>} />
               <Route path="/products/:id" element={<><TopBar breadcrumb="Product Details" /><main className="flex-1 p-8 overflow-y-auto"><ProductDetail /></main></>} />
               <Route path="/pricing" element={<><TopBar breadcrumb="Pricing Rules" /><main className="flex-1 p-8 overflow-y-auto"><PricingRules /></main></>} />
               <Route path="/sync-jobs" element={<><TopBar breadcrumb="Sync Jobs" /><main className="flex-1 p-8 overflow-y-auto"><SyncJobs /></main></>} />
