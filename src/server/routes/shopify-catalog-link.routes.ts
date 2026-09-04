@@ -1247,7 +1247,8 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     let latestJob = await latestCatalogJob();
     const latestJobIsStale = latestJob && ["pending", "running"].includes(latestJob.status) && isStaleCatalogJob(latestJob);
     const catalogIndexIncomplete = indexedTotal === 0 || indexedTotal < counts.shopifyTotal;
-    if (latestJob && latestJobIsStale && !catalogIndexIncomplete) {
+    const staleReconcileNeedsResume = Boolean(latestJobIsStale && latestJob?.type === RECONCILE_JOB_TYPE);
+    if (latestJob && latestJobIsStale && !catalogIndexIncomplete && !staleReconcileNeedsResume) {
       const recoveredResult = {
         ...latestJob.result,
         stage: "stale_closed_complete_index",
@@ -1263,11 +1264,11 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     if (
       !autoRefreshStarted &&
       !refresh &&
-      catalogIndexIncomplete &&
+      (catalogIndexIncomplete || staleReconcileNeedsResume) &&
       (!latestJob || !["pending", "running"].includes(latestJob.status) || latestJobIsStale)
     ) {
       autoRefreshStarted = true;
-      const recoverExactLink = Boolean(latestJobIsStale && latestJob?.type === RECONCILE_JOB_TYPE);
+      const recoverExactLink = staleReconcileNeedsResume;
       setTimeout(() => {
         void startBackgroundJob(recoverExactLink).catch((error) => console.error("[shopify-catalog] automatic catalog job start failed:", error));
       }, 1000);

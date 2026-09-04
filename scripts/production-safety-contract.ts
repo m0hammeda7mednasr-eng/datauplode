@@ -45,8 +45,13 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "catalog source discovery cools failed rows before retry",
-    /"reason" NOT LIKE 'Source discovery:%'/.test(catalogSourceDiscovery) &&
+    /"reason" NOT LIKE 'Source discovery v2:%'/.test(catalogSourceDiscovery) &&
       /"updatedAt" < NOW\(\) - INTERVAL '24 hours'/.test(catalogSourceDiscovery),
+  ],
+  [
+    "catalog source discovery searches deterministic SKU identifiers first",
+    catalogSourceDiscovery.includes("const nextCode = sku.match(/(?:^|-)NXT-") &&
+      /searchIdentifiers\(row\)\.map/.test(catalogSourceDiscovery),
   ],
   [
     "catalog source discovery prevents overlapping batches",
@@ -145,14 +150,20 @@ const assertions: Array<[string, boolean]> = [
       /candidateOwner !== product\.id[\s\S]*status:\s*"needs_review"[\s\S]*database_conflict/.test(shopifyCatalogLinkRoutes),
   ],
   [
-    "Shopify catalog auto refresh only runs for an incomplete index",
+    "Shopify catalog auto refresh only runs for an incomplete index or stale reconcile",
     /catalogIndexIncomplete\s*=\s*indexedTotal === 0 \|\| indexedTotal < counts\.shopifyTotal/.test(shopifyCatalogLinkRoutes) &&
-      /!refresh\s*&&\s*catalogIndexIncomplete/.test(shopifyCatalogLinkRoutes),
+      /!refresh[\s\S]*\(catalogIndexIncomplete \|\| staleReconcileNeedsResume\)/.test(shopifyCatalogLinkRoutes),
   ],
   [
     "Shopify catalog closes stale jobs when the index is complete",
-    /latestJobIsStale && !catalogIndexIncomplete/.test(shopifyCatalogLinkRoutes) &&
+    /latestJobIsStale && !catalogIndexIncomplete && !staleReconcileNeedsResume/.test(shopifyCatalogLinkRoutes) &&
       /stale_closed_complete_index/.test(shopifyCatalogLinkRoutes),
+  ],
+  [
+    "Shopify catalog resumes stale exact reconcile jobs from their cursor",
+    /staleReconcileNeedsResume/.test(shopifyCatalogLinkRoutes) &&
+      /\(catalogIndexIncomplete \|\| staleReconcileNeedsResume\)/.test(shopifyCatalogLinkRoutes) &&
+      /const recoverExactLink = staleReconcileNeedsResume/.test(shopifyCatalogLinkRoutes),
   ],
   [
     "Shopify-first catalog scan bounds nested connection cost",

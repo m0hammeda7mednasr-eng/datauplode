@@ -4,6 +4,7 @@ import { fetchHtmlViaManagedBypass, ScraperService, type NormalizedProduct } fro
 const JOB_TYPE = "CATALOG_SOURCE_DISCOVERY_BATCH";
 const CACHE_TABLE = "ShopifyCatalogIndexV2";
 const DEFAULT_MULTIPLIER = 23;
+const FAILURE_PREFIX = "Source discovery v2:";
 const scraper = new ScraperService();
 
 type DiscoveryRow = {
@@ -12,6 +13,7 @@ type DiscoveryRow = {
   vendor: string | null;
   handle: string | null;
   price: number | null;
+  primarySku: string | null;
   sourceUrl: string | null;
   matchStatus: "needs_link" | "needs_review";
 };
@@ -103,6 +105,15 @@ function productIdentity(url: string) {
   }
 }
 
+function searchIdentifiers(row: DiscoveryRow) {
+  const sku = clean(row.primarySku).toUpperCase();
+  const identifiers: string[] = [];
+  const nextCode = sku.match(/(?:^|-)NXT-([A-Z]\d{2})-(\d{3})(?:-|$)/)?.slice(1).join("");
+  if (nextCode) identifiers.push(nextCode);
+  if (/^[A-Z0-9]{5,24}$/.test(sku)) identifiers.push(sku);
+  return [...new Set(identifiers)];
+}
+
 function extractSupplierLinks(html: string, domains: string[]) {
   const decoded = html
     .replace(/&amp;/gi, "&")
@@ -145,6 +156,7 @@ async function discoverSource(row: DiscoveryRow, search: VendorSearch) {
     .replace(/\s+-\s+size\s+.+$/i, "")
     .replace(/\s+\|\s+size\s+.+$/i, "");
   const queries = [
+    ...searchIdentifiers(row).map((identifier) => `(${siteQuery}) "${identifier}" ${search.queryLabel}`),
     `(${siteQuery}) "${row.title}" ${search.queryLabel}`,
     ...(compactTitle !== clean(row.title) ? [`(${siteQuery}) "${compactTitle}" ${search.queryLabel}`] : []),
     `(${siteQuery}) ${compactTitle} ${search.queryLabel}`,
@@ -305,7 +317,7 @@ export async function runCatalogSourceDiscoveryBatch() {
     });
   }
   const rows = await prisma.$queryRawUnsafe<DiscoveryRow[]>(`
-    SELECT "shopifyId", "title", "vendor", "handle", "price",
+    SELECT "shopifyId", "title", "vendor", "handle", "price", "primarySku",
            "matchedSourceUrl" AS "sourceUrl", "matchStatus"
     FROM "${CACHE_TABLE}"
     WHERE UPPER(COALESCE("status",''))='ACTIVE'
@@ -315,7 +327,7 @@ export async function runCatalogSourceDiscoveryBatch() {
       )
       AND (
         "reason" IS NULL
-        OR "reason" NOT LIKE 'Source discovery:%'
+        OR "reason" NOT LIKE 'Source discovery v2:%'
         OR "updatedAt" < NOW() - INTERVAL '24 hours'
       )
     ORDER BY "updatedAt" ASC
@@ -350,7 +362,7 @@ export async function runCatalogSourceDiscoveryBatch() {
           SET "reason"=$2, "updatedAt"=NOW()
           WHERE "shopifyId"=$1
             AND ("matchStatus"='needs_link' OR ("matchStatus"='needs_review' AND "matchMethod"='source_url_not_in_sheets'))
-        `, row.shopifyId, `Source discovery: ${message}`);
+        `, row.shopifyId, `${FAILURE_PREFIX} ${message}`);
       }
     }));
   }
