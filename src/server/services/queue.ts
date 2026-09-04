@@ -2011,6 +2011,21 @@ export class QueueService {
         })),
         raw: { contains: 'sheetPriceMultiplier' },
         shopifyProduct: { is: { syncEnabled: true } },
+        ...(FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? {
+          variants: {
+            none: {
+              NOT: {
+                OR: [
+                  { size: null },
+                  { size: { equals: '', mode: 'insensitive' as const } },
+                  { size: { equals: 'default title', mode: 'insensitive' as const } },
+                  { size: { equals: 'default 1', mode: 'insensitive' as const } },
+                  { size: { equals: 'title', mode: 'insensitive' as const } },
+                ],
+              },
+            },
+          },
+        } : {}),
         AND: [
           {
             auditLogs: {
@@ -2043,7 +2058,7 @@ export class QueueService {
         variants: { select: { size: true }, take: 2 },
       },
       orderBy: { lastScrapedAt: 'asc' },
-      take: FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? Math.min(250, take * 50) : take,
+      take,
     });
     const remaining = take - reviewCandidates.length;
     const otherCandidates = remaining > 0
@@ -2061,7 +2076,7 @@ export class QueueService {
             variants: { select: { size: true }, take: 2 },
           },
           orderBy: { lastScrapedAt: 'asc' },
-          take: FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? Math.min(250, remaining * 50) : remaining,
+          take: remaining,
         })
       : [];
     const candidates = [...reviewCandidates, ...otherCandidates]

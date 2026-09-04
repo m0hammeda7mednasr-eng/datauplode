@@ -67,7 +67,11 @@ for (const candidate of candidates) {
       data: {
         sourceProductId: candidate.id,
         action: "SYNC_PRODUCT_CATALOG_FAILED",
-        details: JSON.stringify({ message, defaultVariantBatch: true, shopifyWriteMayHaveStarted: message.includes("could not be verified") }),
+        details: JSON.stringify({
+          message,
+          defaultVariantBatch: true,
+          shopifyWriteMayHaveStarted: message.includes("Catalog write could not be verified"),
+        }),
       },
     });
     results.push({ success: false, sourceProductId: candidate.id, title: candidate.title, error: message });
