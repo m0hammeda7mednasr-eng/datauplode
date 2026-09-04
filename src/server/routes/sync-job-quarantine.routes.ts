@@ -2,10 +2,12 @@ import crypto from "crypto";
 import { Router, type Request } from "express";
 import { prisma } from "../db.js";
 import shopifyCatalogLinkRouter from "./shopify-catalog-link.routes.js";
+import defaultVariantAuditRouter from "./default-variant-audit.routes.js";
 
 // Production-only maintenance path: exact stale SyncJob IDs, status transition only, never replay.
 const router = Router();
 router.use(shopifyCatalogLinkRouter);
+router.use(defaultVariantAuditRouter);
 const REQUIRED_CONFIRM = "QUARANTINE_STALE_RUNNING_NO_REPLAY";
 const MAX_ROWS = 20;
 const MIN_STALE_MINUTES = 10;
@@ -79,7 +81,7 @@ async function verifyGithubActionsOidc(token: string): Promise<boolean> {
     const jwk = jwks.keys?.find((key) => key.kid === header.kid && key.kty === "RSA" && (!key.use || key.use === "sig"));
     if (!jwk) return false;
 
-    const publicKey = crypto.createPublicKey({ key: jwk as crypto.JsonWebKey, format: "jwk" });
+    const publicKey = crypto.createPublicKey({ jwk: jwk as crypto.JsonWebKey, format: "jwk" });
     return crypto.verify(
       "RSA-SHA256",
       Buffer.from(`${parts[0]}.${parts[1]}`),
