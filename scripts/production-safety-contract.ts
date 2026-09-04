@@ -16,11 +16,28 @@ const fullCatalogSync = read("src/server/services/fullCatalogSync.ts");
 const shopifyService = read("src/server/services/shopify.ts");
 const queue = read("src/server/services/queue.ts");
 const shopifyCatalogLinkRoutes = read("src/server/routes/shopify-catalog-link.routes.ts");
+const catalogSourceDiscovery = read("src/server/services/catalogSourceDiscovery.ts");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
   ["inventory autostart default off", /SYNC_INVENTORY_AUTOSTART=false/.test(envExample)],
   ["full-catalog autostart default off", /SYNC_FULL_CATALOG_AUTOSTART=false/.test(envExample)],
+  ["catalog source discovery autostart default off", /CATALOG_SOURCE_DISCOVERY_AUTOSTART=false/.test(envExample)],
+  [
+    "catalog source discovery requires runtime write gate and exact revision",
+    /runtimeWritesEnabled\(\)[\s\S]*envFlag\("CATALOG_SOURCE_DISCOVERY_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
+      /CATALOG_SOURCE_DISCOVERY_REVISION=/.test(envExample),
+  ],
+  [
+    "catalog source discovery verifies unique product ID and scraped title before linking",
+    /byIdentity\.size !== 1/.test(catalogSourceDiscovery) &&
+      /overlap < 0\.55/.test(catalogSourceDiscovery) &&
+      /failed price\/image\/variant validation/.test(catalogSourceDiscovery),
+  ],
+  [
+    "catalog source discovery does not mutate Shopify catalog",
+    !/setProductCatalog|productSet|productCreate|productUpdate|productDelete/.test(catalogSourceDiscovery),
+  ],
   [
     "full-catalog autostart requires runtime write gate and exact revision",
     /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&

@@ -20,6 +20,7 @@ import syncJobQuarantineRouter from "./src/server/routes/sync-job-quarantine.rou
 import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.js";
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
+import { startCatalogSourceDiscoveryMonitor } from "./src/server/services/catalogSourceDiscovery.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
 import { startOneTimeSheet1Reconcile } from "./src/server/oneTimeSheet1Reconcile.js";
 import { prepareSheet1ReconcileDeploymentTakeover } from "./src/server/sheet1ReconcileRecovery.js";
@@ -129,6 +130,19 @@ function fullCatalogAutostartEnabled() {
   return (
     runtimeWritesEnabled() &&
     envFlag("SYNC_FULL_CATALOG_AUTOSTART") &&
+    Boolean(expected) &&
+    expected === deployed
+  );
+}
+
+function catalogSourceDiscoveryAutostartEnabled() {
+  const expected = exactRevision(process.env.CATALOG_SOURCE_DISCOVERY_REVISION);
+  const deployed = exactRevision(
+    process.env.RAILWAY_GIT_COMMIT_SHA || process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA,
+  );
+  return (
+    runtimeWritesEnabled() &&
+    envFlag("CATALOG_SOURCE_DISCOVERY_AUTOSTART") &&
     Boolean(expected) &&
     expected === deployed
   );
@@ -570,6 +584,13 @@ async function startServer() {
       QueueService.startPriceStockMonitor();
     } else {
       console.log("Price/stock-only monitor disabled by SYNC_PRICE_STOCK_AUTOSTART=false");
+    }
+
+    if (catalogSourceDiscoveryAutostartEnabled()) {
+      console.warn("Catalog source discovery autostart ENABLED");
+      startCatalogSourceDiscoveryMonitor();
+    } else {
+      console.log("Catalog source discovery disabled by revision/runtime gate");
     }
 
     if (fullCatalogAutostartEnabled()) {
