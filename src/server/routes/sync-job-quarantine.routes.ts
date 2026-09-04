@@ -81,7 +81,7 @@ async function verifyGithubActionsOidc(token: string): Promise<boolean> {
     const jwk = jwks.keys?.find((key) => key.kid === header.kid && key.kty === "RSA" && (!key.use || key.use === "sig"));
     if (!jwk) return false;
 
-    const publicKey = crypto.createPublicKey({ jwk: jwk as crypto.JsonWebKey, format: "jwk" });
+    const publicKey = crypto.createPublicKey({ key: jwk as crypto.JsonWebKey, format: "jwk" });
     return crypto.verify(
       "RSA-SHA256",
       Buffer.from(`${parts[0]}.${parts[1]}`),
