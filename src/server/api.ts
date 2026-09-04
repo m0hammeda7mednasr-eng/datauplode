@@ -4080,6 +4080,8 @@ router.get("/products/stats", async (req, res) => {
     catalogSuccess24h,
     catalogFailed24h,
     recentCatalogUpdates,
+    sourceLinks24h,
+    recentSourceLinks,
   ] = await Promise.all([
     prisma.sourceProduct.count({
       where: {
@@ -4128,12 +4130,52 @@ router.get("/products/stats", async (req, res) => {
         },
       },
     }),
+    prisma.auditLog.count({
+      where: { action: "CATALOG_SOURCE_DISCOVERY_LINKED", createdAt: { gte: since24Hours } },
+    }),
+    prisma.auditLog.findMany({
+      where: { action: "CATALOG_SOURCE_DISCOVERY_LINKED", createdAt: { gte: since24Hours } },
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      select: {
+        id: true,
+        details: true,
+        createdAt: true,
+        sourceProduct: {
+          select: {
+            id: true,
+            title: true,
+            url: true,
+            supplier: { select: { name: true } },
+            shopifyProduct: { select: { shopifyId: true, handle: true } },
+          },
+        },
+      },
+    }),
   ]);
 
   res.json({
     totalLinked,
     activeSync,
     pendingReview: pendingReviewProducts.length,
+    sourceLinks24h: {
+      success: sourceLinks24h,
+      recent: recentSourceLinks.map((entry) => {
+        const details = readJsonObject(entry.details);
+        return {
+          id: entry.id,
+          createdAt: entry.createdAt,
+          sourceProductId: entry.sourceProduct?.id || null,
+          title: entry.sourceProduct?.title || "Unknown product",
+          supplier: entry.sourceProduct?.supplier?.name || null,
+          sourceUrl: entry.sourceProduct?.url || null,
+          shopifyProductId: entry.sourceProduct?.shopifyProduct?.shopifyId || null,
+          shopifyHandle: entry.sourceProduct?.shopifyProduct?.handle || null,
+          identity: String(details?.identity || ""),
+          titleOverlap: Number(details?.overlap || 0),
+        };
+      }),
+    },
     catalog24h: {
       success: catalogSuccess24h,
       failed: catalogFailed24h,

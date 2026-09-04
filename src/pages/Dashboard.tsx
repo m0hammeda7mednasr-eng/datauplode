@@ -49,6 +49,7 @@ export default function Dashboard() {
       totalLinked,
       activeSync,
       pendingReview: Number(data?.stats?.pendingReview || 0),
+      sourceLinks24h: Number(data?.stats?.sourceLinks24h?.success || 0),
       catalogSuccess24h: Number(data?.stats?.catalog24h?.success || 0),
       catalogFailed24h: Number(data?.stats?.catalog24h?.failed || 0),
     };
@@ -57,6 +58,9 @@ export default function Dashboard() {
   const recentLinked = linked.slice(0, 6);
   const recentCatalogUpdates = Array.isArray(data?.stats?.catalog24h?.recent)
     ? data.stats.catalog24h.recent
+    : [];
+  const recentSourceLinks = Array.isArray(data?.stats?.sourceLinks24h?.recent)
+    ? data.stats.sourceLinks24h.recent
     : [];
 
   return (
@@ -68,10 +72,11 @@ export default function Dashboard() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
         <StatCard icon={Link2} label="Linked Products" value={stats.totalLinked} tone="indigo" />
         <StatCard icon={TrendingUp} label="Active Sync" value={stats.activeSync} tone="emerald" />
         <StatCard icon={AlertCircle} label="Needs Review" value={stats.pendingReview} tone="amber" />
+        <StatCard icon={Link2} label="Source Links 24h" value={stats.sourceLinks24h} tone="indigo" />
         <StatCard icon={CheckCircle2} label="Catalog 24h" value={stats.catalogSuccess24h} tone="slate" />
       </div>
 
@@ -112,6 +117,31 @@ export default function Dashboard() {
                       Details
                     </Link>
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-card-border bg-white p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <h2 className="text-sm font-black uppercase tracking-widest text-slate-500">Source Links 24h</h2>
+              <span className="text-xs font-bold text-emerald-700">{stats.sourceLinks24h} linked</span>
+            </div>
+            <div className="space-y-2">
+              {!isLoading && recentSourceLinks.length === 0 && (
+                <p className="text-sm text-slate-500">No source links completed in the last 24 hours.</p>
+              )}
+              {recentSourceLinks.map((item: any) => (
+                <div key={item.id} className="flex items-center justify-between gap-4 rounded-lg border border-slate-100 p-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-900">{item.title}</p>
+                    <p className="text-[11px] font-medium text-slate-500">
+                      {item.supplier || "Supplier"} | {formatRelative(item.createdAt)} | {Math.round(Number(item.titleOverlap || 0) * 100)}% title match
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-emerald-700">
+                    Linked
+                  </span>
                 </div>
               ))}
             </div>
