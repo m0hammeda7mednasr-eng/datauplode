@@ -64,6 +64,7 @@ type SheetIndex = {
   byUrl: Map<string, CatalogSheetRow[]>;
   bySku: Map<string, CatalogSheetRow[]>;
   byPrefix: Map<string, CatalogSheetRow[]>;
+  bySourceIdentifier: Map<string, CatalogSheetRow[]>;
   errors: Array<{ spreadsheetName: string; sheetName: string; error: string }>;
 };
 
@@ -179,6 +180,57 @@ function possibleSkuPrefixes(sku: string) {
     out.push(`${parts.slice(0, end).join("-")}-`);
   }
   return out;
+}
+
+function compactIdentifier(value: unknown) {
+  return clean(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function sourceIdentifiersFromUrl(value: string) {
+  const identifiers = new Set<string>();
+  try {
+    const parsed = new URL(value);
+    const pathMatches = [
+      parsed.pathname.match(/\/style\/[^/]+\/([^/?#]+)/i)?.[1],
+      parsed.pathname.match(/productpage[.\/-]?(\d{7,15})/i)?.[1],
+      parsed.pathname.match(/-p-(\d+)\.html/i)?.[1],
+      parsed.pathname.match(/\/p\/([^/?#]+)/i)?.[1],
+    ];
+    const queryMatches = [
+      parsed.searchParams.get("v1"),
+      parsed.searchParams.get("pid"),
+      parsed.searchParams.get("productId"),
+      parsed.searchParams.get("product_id"),
+    ];
+    for (const candidate of [...pathMatches, ...queryMatches]) {
+      const identifier = compactIdentifier(candidate);
+      if (identifier.length >= 5 && identifier.length <= 64 && /\d/.test(identifier)) {
+        identifiers.add(identifier);
+      }
+    }
+  } catch {}
+  return [...identifiers];
+}
+
+function sourceIdentifiersFromSku(value: unknown, vendor: unknown) {
+  const raw = clean(value).toUpperCase();
+  const compact = compactIdentifier(raw.replace(/-OPTION.*$/i, ""));
+  const normalizedVendor = compactIdentifier(vendor);
+  const identifiers = new Set<string>();
+  if (compact.length >= 5 && compact.length <= 64 && /\d/.test(compact)) identifiers.add(compact);
+  if (normalizedVendor === "NEXT") {
+    const next = compact.match(/^([A-Z]\d{5})/)?.[1];
+    if (next) identifiers.add(next);
+  }
+  if (normalizedVendor === "HM") {
+    const hm = compact.match(/^(\d{10})/)?.[1];
+    if (hm) identifiers.add(hm);
+  }
+  if (normalizedVendor === "MOTHERCARE") {
+    const mothercare = compactIdentifier(raw.replace(/^M[-_]?/i, "")).match(/^([A-Z]{2}\d{3})/)?.[1];
+    if (mothercare) identifiers.add(mothercare);
+  }
+  return [...identifiers];
 }
 
 function extractUrls(value: string) {
@@ -308,6 +360,7 @@ async function loadSheetIndex(force = false): Promise<SheetIndex> {
   const byUrl = new Map<string, CatalogSheetRow[]>();
   const bySku = new Map<string, CatalogSheetRow[]>();
   const byPrefix = new Map<string, CatalogSheetRow[]>();
+  const bySourceIdentifier = new Map<string, CatalogSheetRow[]>();
   for (const row of rows) {
     const urlRows = byUrl.get(row.canonicalUrl) || [];
     urlRows.push(row);
@@ -323,8 +376,13 @@ async function loadSheetIndex(force = false): Promise<SheetIndex> {
       prefixRows.push(row);
       byPrefix.set(row.productSkuPrefix, prefixRows);
     }
+    for (const identifier of sourceIdentifiersFromUrl(row.url)) {
+      const identifierRows = bySourceIdentifier.get(identifier) || [];
+      identifierRows.push(row);
+      bySourceIdentifier.set(identifier, identifierRows);
+    }
   }
-  const value = { rows, byUrl, bySku, byPrefix, errors };
+  const value = { rows, byUrl, bySku, byPrefix, bySourceIdentifier, errors };
   sheetIndexCache = { expiresAt: Date.now() + SHEET_INDEX_TTL_MS, value };
   return value;
 }
@@ -339,6 +397,11 @@ function resolveCandidate(product: ShopifyCatalogProduct, index: SheetIndex): Ca
     for (const row of index.bySku.get(sku) || []) evidence.push({ method: "exact_sku", row });
     for (const prefix of possibleSkuPrefixes(sku)) {
       for (const row of index.byPrefix.get(prefix) || []) evidence.push({ method: "dab_product_prefix", row });
+    }
+    for (const identifier of sourceIdentifiersFromSku(sku, product.vendor)) {
+      for (const row of index.bySourceIdentifier.get(identifier) || []) {
+        evidence.push({ method: "source_product_identifier", row });
+      }
     }
   }
   const byCanonical = new Map<string, CatalogSheetRow[]>();
@@ -360,7 +423,13 @@ function resolveCandidate(product: ShopifyCatalogProduct, index: SheetIndex): Ca
       status: "matched",
       row,
       matchingRows: rows,
-      matchMethod: methods.includes("source_url") ? "source_url" : methods.includes("exact_sku") ? "exact_sku" : "dab_product_prefix",
+      matchMethod: methods.includes("source_url")
+        ? "source_url"
+        : methods.includes("exact_sku")
+          ? "exact_sku"
+          : methods.includes("dab_product_prefix")
+            ? "dab_product_prefix"
+            : "source_product_identifier",
       reason: null,
       evidence: methods,
     };
