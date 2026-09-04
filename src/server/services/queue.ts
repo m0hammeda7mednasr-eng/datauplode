@@ -19,6 +19,7 @@ const FULL_CATALOG_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_FULL_CATALOG_
 const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 5);
 const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
+const FULL_CATALOG_DEFAULT_VARIANTS_ONLY = process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY === 'true';
 const FULL_CATALOG_TARGET_DOMAINS = String(
   process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "centrepointstores.com,next.ae",
 )
@@ -2021,6 +2022,11 @@ export class QueueService {
               none: { action: 'SYNC_PRODUCT_CATALOG_FAILED', createdAt: { gte: failureCutoff } },
             },
           },
+          ...(FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? [{
+            auditLogs: {
+              none: { action: 'SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT', createdAt: { gte: successCutoff } },
+            },
+          }] : []),
         ],
       };
     const reviewCandidates = await prisma.sourceProduct.findMany({
@@ -2028,9 +2034,16 @@ export class QueueService {
         ...candidateWhere,
         manualReviews: { some: { status: 'pending' } },
       },
-      select: { id: true, title: true, url: true, updatedAt: true, lastScrapedAt: true },
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        updatedAt: true,
+        lastScrapedAt: true,
+        variants: { select: { size: true }, take: 2 },
+      },
       orderBy: { lastScrapedAt: 'asc' },
-      take,
+      take: FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? Math.min(250, take * 50) : take,
     });
     const remaining = take - reviewCandidates.length;
     const otherCandidates = remaining > 0
@@ -2039,15 +2052,28 @@ export class QueueService {
             ...candidateWhere,
             id: { notIn: reviewCandidates.map((candidate) => candidate.id) },
           },
-          select: { id: true, title: true, url: true, updatedAt: true, lastScrapedAt: true },
+          select: {
+            id: true,
+            title: true,
+            url: true,
+            updatedAt: true,
+            lastScrapedAt: true,
+            variants: { select: { size: true }, take: 2 },
+          },
           orderBy: { lastScrapedAt: 'asc' },
-          take: remaining,
+          take: FULL_CATALOG_DEFAULT_VARIANTS_ONLY ? Math.min(250, remaining * 50) : remaining,
         })
       : [];
-    const candidates = [...reviewCandidates, ...otherCandidates].filter((candidate) => {
-      const url = cleanOptionText(candidate.url).toLowerCase();
-      return FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain));
-    });
+    const candidates = [...reviewCandidates, ...otherCandidates]
+      .filter((candidate) => {
+        const url = cleanOptionText(candidate.url).toLowerCase();
+        if (!FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain))) return false;
+        if (!FULL_CATALOG_DEFAULT_VARIANTS_ONLY) return true;
+        if (candidate.variants.length > 1) return false;
+        const size = cleanOptionText(candidate.variants[0]?.size).toLowerCase();
+        return !size || ['default title', 'default 1', 'title'].includes(size);
+      })
+      .slice(0, take);
     if (candidates.length === 0) {
       return { selected: 0, completed: 0, failed: 0, readbackVerified: 0 };
     }
@@ -2063,7 +2089,22 @@ export class QueueService {
           sourceProductId: candidate.id,
           client,
           location,
+          requireVariantExpansion: FULL_CATALOG_DEFAULT_VARIANTS_ONLY,
         }));
+        const result = results.at(-1);
+        if (result?.skipped === true) {
+          await prisma.auditLog.create({
+            data: {
+              sourceProductId: candidate.id,
+              action: 'SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT',
+              details: JSON.stringify({
+                reason: result.reason,
+                sourceVariants: result.sourceVariants,
+                shopifyVariants: result.shopifyVariants,
+              }),
+            },
+          });
+        }
       } catch (error: any) {
         failed += 1;
         const message = cleanOptionText(error?.message || error).slice(0, 2000);
@@ -2071,17 +2112,21 @@ export class QueueService {
           data: {
             sourceProductId: candidate.id,
             action: 'SYNC_PRODUCT_CATALOG_FAILED',
-            details: JSON.stringify({ message, shopifyWriteMayHaveStarted: message.includes('could not be verified') }),
+            details: JSON.stringify({
+              message,
+              shopifyWriteMayHaveStarted: message.includes('Catalog write could not be verified'),
+            }),
           },
         });
         results.push({ success: false, sourceProductId: candidate.id, title: candidate.title, error: message });
-        if (message.includes('could not be verified')) break;
+        if (message.includes('Catalog write could not be verified')) break;
       }
     }
 
     return {
       selected: candidates.length,
-      completed: results.filter((result) => result.success).length,
+      completed: results.filter((result) => result.success && result.skipped !== true).length,
+      skipped: results.filter((result) => result.skipped === true).length,
       failed,
       readbackVerified: results.filter((result) => result.readbackVerified).length,
       results,

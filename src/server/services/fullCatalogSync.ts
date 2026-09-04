@@ -91,6 +91,7 @@ export interface FullCatalogSyncOptions {
   sourceProductId: string;
   client?: ShopifyGraphqlClient;
   location?: { id: string };
+  requireVariantExpansion?: boolean;
 }
 
 export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
@@ -124,6 +125,26 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   const before = await ShopifyService.getProductCatalogSnapshot(client, shopifyProductId);
   if (!before || before.id !== shopifyProductId) {
     throw new Error("Linked Shopify product could not be read before mutation");
+  }
+  const beforeIsDefault = before.variants.length === 1 && (
+    /^(?:default(?: title| 1)?|title)$/i.test(clean(before.variants[0]?.title)) ||
+    (before.variants[0]?.selectedOptions || []).some((option: any) =>
+      /^(?:default(?: title| 1)?|title)$/i.test(clean(option?.value)),
+    )
+  );
+  if (options.requireVariantExpansion && (!beforeIsDefault || fresh.variants.length <= 1)) {
+    return {
+      success: true,
+      skipped: true,
+      sourceProductId,
+      shopifyProductId,
+      reason: beforeIsDefault
+        ? "Source is a genuine single-variant product"
+        : "Shopify product is no longer a default-variant candidate",
+      sourceVariants: fresh.variants.length,
+      shopifyVariants: before.variants.length,
+      readbackVerified: true,
+    };
   }
   const existingBySku = new Map(
     before.variants.map((variant: any) => [clean(variant.sku).toLowerCase(), variant]),

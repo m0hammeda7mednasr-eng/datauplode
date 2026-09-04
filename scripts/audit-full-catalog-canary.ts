@@ -28,10 +28,13 @@ const sourceProductId = clean(process.env.SOURCE_PRODUCT_ID);
 const candidate = await prisma.sourceProduct.findFirst({
   where: {
     ...(sourceProductId ? { id: sourceProductId } : {}),
-    url: { contains: "centrepointstores.com", mode: "insensitive" },
+    OR: [
+      { url: { contains: "centrepointstores.com", mode: "insensitive" } },
+      { url: { contains: "next.ae", mode: "insensitive" } },
+    ],
     shopifyProduct: { is: { syncEnabled: true } },
     raw: { contains: "sheetPriceMultiplier" },
-    createdAt: { lt: new Date("2026-09-01T00:00:00.000Z") },
+    ...(!sourceProductId ? { createdAt: { lt: new Date("2026-09-01T00:00:00.000Z") } } : {}),
   },
   orderBy: { updatedAt: "asc" },
   include: {
@@ -42,7 +45,7 @@ const candidate = await prisma.sourceProduct.findFirst({
 });
 
 if (!candidate?.shopifyProduct) {
-  throw new Error("No linked pre-existing Centrepoint canary with sheet metadata was found");
+  throw new Error("No linked pre-existing Centrepoint/Next canary with sheet metadata was found");
 }
 
 const raw = parseRaw(candidate.raw);
