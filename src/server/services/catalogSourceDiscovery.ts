@@ -19,13 +19,20 @@ type VendorSearch = { domains: string[]; queryLabel: string };
 const SEARCH_BY_VENDOR: Record<string, VendorSearch> = {
   zara: { domains: ["zara.com"], queryLabel: "Zara" },
   hm: { domains: ["hm.com"], queryLabel: "H&M" },
+  handm: { domains: ["hm.com"], queryLabel: "H&M" },
   next: { domains: ["next.ae", "nextdirect.com"], queryLabel: "Next" },
   mothercare: { domains: ["mothercarestores.com", "mothercare.com"], queryLabel: "Mothercare" },
   ms: { domains: ["marksandspencerme.com", "marksandspencer.com"], queryLabel: "Marks Spencer" },
+  mands: { domains: ["marksandspencerme.com", "marksandspencer.com"], queryLabel: "Marks Spencer" },
   marksandspencer: { domains: ["marksandspencerme.com", "marksandspencer.com"], queryLabel: "Marks Spencer" },
   gap: { domains: ["gap.ae", "gap.com"], queryLabel: "Gap" },
   lefties: { domains: ["lefties.com"], queryLabel: "Lefties" },
   adidas: { domains: ["adidas.ae", "adidas.com"], queryLabel: "Adidas" },
+  nike: { domains: ["nike.ae", "nike.com"], queryLabel: "Nike" },
+  carters: { domains: ["carters.com"], queryLabel: "Carters" },
+  cathkidston: { domains: ["cathkidston.com"], queryLabel: "Cath Kidston" },
+  jojomamanbebe: { domains: ["jojomamanbebe.co.uk"], queryLabel: "JoJo Maman Bebe" },
+  riverisland: { domains: ["riverisland.com"], queryLabel: "River Island" },
   max: { domains: ["maxfashion.com"], queryLabel: "Max Fashion" },
   juniors: { domains: ["centrepointstores.com"], queryLabel: "Juniors Centrepoint" },
   giggles: { domains: ["centrepointstores.com"], queryLabel: "Giggles Centrepoint" },
@@ -121,15 +128,29 @@ function preferredUrl(urls: string[], identity: string, search: VendorSearch) {
 
 async function discoverSource(row: DiscoveryRow, search: VendorSearch) {
   const siteQuery = search.domains.map((domain) => `site:${domain}`).join(" OR ");
-  const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(`(${siteQuery}) "${row.title}" ${search.queryLabel}`)}`;
-  const html = await fetchHtmlViaManagedBypass(googleUrl, {
-    providerOrder: ["scraperapi"],
-    jsRender: false,
-    premium: false,
-    ultraPremium: false,
-    deviceType: "none",
-  });
-  const links = extractSupplierLinks(html, search.domains);
+  const compactTitle = clean(row.title)
+    .replace(/\s+-\s+size\s+.+$/i, "")
+    .replace(/\s+\|\s+size\s+.+$/i, "");
+  const queries = [
+    `(${siteQuery}) "${row.title}" ${search.queryLabel}`,
+    ...(compactTitle !== clean(row.title) ? [`(${siteQuery}) "${compactTitle}" ${search.queryLabel}`] : []),
+    `(${siteQuery}) ${compactTitle} ${search.queryLabel}`,
+  ];
+  let links: string[] = [];
+  let searchAttempts = 0;
+  for (const query of [...new Set(queries)]) {
+    searchAttempts += 1;
+    const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    const html = await fetchHtmlViaManagedBypass(googleUrl, {
+      providerOrder: ["scraperapi"],
+      jsRender: false,
+      premium: false,
+      ultraPremium: false,
+      deviceType: "none",
+    });
+    links = extractSupplierLinks(html, search.domains);
+    if (links.length > 0) break;
+  }
   const byIdentity = new Map<string, string[]>();
   for (const link of links) {
     const identity = productIdentity(link);
@@ -146,11 +167,11 @@ async function discoverSource(row: DiscoveryRow, search: VendorSearch) {
   if (!(product.price > 0) || !product.images.length || !product.variants.length) {
     throw new Error("Scraped product failed price/image/variant validation");
   }
-  return { identity, url, product, overlap, searchResultCount: identityLinks.length };
+  return { identity, url, product, overlap, searchResultCount: identityLinks.length, searchAttempts };
 }
 
 async function persistLink(row: DiscoveryRow, result: Awaited<ReturnType<typeof discoverSource>>) {
-  const { product, url, identity, overlap, searchResultCount } = result;
+  const { product, url, identity, overlap, searchResultCount, searchAttempts } = result;
   await prisma.$transaction(async (tx) => {
     const existingShopify = await tx.shopifyProduct.findUnique({ where: { shopifyId: row.shopifyId } });
     if (existingShopify) return;
@@ -174,6 +195,7 @@ async function persistLink(row: DiscoveryRow, result: Awaited<ReturnType<typeof 
         sourceProductIdentity: identity,
         titleOverlap: overlap,
         searchResultCount,
+        searchAttempts,
         sheetPriceMultiplier: DEFAULT_MULTIPLIER,
         linkedAt: new Date().toISOString(),
       },
@@ -236,7 +258,7 @@ async function persistLink(row: DiscoveryRow, result: Awaited<ReturnType<typeof 
       data: {
         sourceProductId: source.id,
         action: "CATALOG_SOURCE_DISCOVERY_LINKED",
-        details: JSON.stringify({ shopifyId: row.shopifyId, url, identity, overlap, searchResultCount }),
+        details: JSON.stringify({ shopifyId: row.shopifyId, url, identity, overlap, searchResultCount, searchAttempts }),
       },
     });
     await tx.$executeRawUnsafe(`
@@ -250,17 +272,23 @@ async function persistLink(row: DiscoveryRow, result: Awaited<ReturnType<typeof 
 }
 
 export async function runCatalogSourceDiscoveryBatch() {
-  const batchSize = Math.max(1, Math.min(20, Number(process.env.CATALOG_SOURCE_DISCOVERY_BATCH_SIZE || 5)));
+  const batchSize = Math.max(1, Math.min(50, Number(process.env.CATALOG_SOURCE_DISCOVERY_BATCH_SIZE || 5)));
   const rows = await prisma.$queryRawUnsafe<DiscoveryRow[]>(`
     SELECT "shopifyId", "title", "vendor", "handle", "price"
     FROM "${CACHE_TABLE}"
-    WHERE UPPER(COALESCE("status",''))='ACTIVE' AND "matchStatus"='needs_link'
+    WHERE UPPER(COALESCE("status",''))='ACTIVE'
+      AND "matchStatus"='needs_link'
+      AND (
+        "reason" IS NULL
+        OR "reason" NOT LIKE 'Source discovery:%'
+        OR "updatedAt" < NOW() - INTERVAL '24 hours'
+      )
     ORDER BY "updatedAt" ASC
   `);
   const candidates = rows.filter((row) => SEARCH_BY_VENDOR[vendorKey(row.vendor)]).slice(0, batchSize);
   const job = await prisma.syncJob.create({ data: { type: JOB_TYPE, status: "running", startedAt: new Date(), payload: JSON.stringify({ batchSize }) } });
   const result = { selected: candidates.length, linked: 0, failed: 0, issues: [] as Array<Record<string, unknown>> };
-  const concurrency = Math.max(1, Math.min(3, Number(process.env.CATALOG_SOURCE_DISCOVERY_CONCURRENCY || 2)));
+  const concurrency = Math.max(1, Math.min(5, Number(process.env.CATALOG_SOURCE_DISCOVERY_CONCURRENCY || 2)));
   for (let offset = 0; offset < candidates.length; offset += concurrency) {
     await Promise.all(candidates.slice(offset, offset + concurrency).map(async (row) => {
       try {
@@ -270,7 +298,7 @@ export async function runCatalogSourceDiscoveryBatch() {
       } catch (error: any) {
         result.failed += 1;
         const message = clean(error?.message || error).slice(0, 500);
-        result.issues.push({ shopifyId: row.shopifyId, title: row.title, error: message });
+        result.issues.push({ shopifyId: row.shopifyId, title: row.title, vendor: row.vendor, error: message });
         await prisma.$executeRawUnsafe(`
           UPDATE "${CACHE_TABLE}"
           SET "reason"=$2, "updatedAt"=NOW()

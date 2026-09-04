@@ -39,6 +39,16 @@ const assertions: Array<[string, boolean]> = [
     !/setProductCatalog|productSet|productCreate|productUpdate|productDelete/.test(catalogSourceDiscovery),
   ],
   [
+    "catalog source discovery recognizes normalized ampersand vendors",
+    /handm:\s*\{\s*domains:\s*\["hm\.com"\]/.test(catalogSourceDiscovery) &&
+      /mands:\s*\{\s*domains:\s*\["marksandspencerme\.com"/.test(catalogSourceDiscovery),
+  ],
+  [
+    "catalog source discovery cools failed rows before retry",
+    /"reason" NOT LIKE 'Source discovery:%'/.test(catalogSourceDiscovery) &&
+      /"updatedAt" < NOW\(\) - INTERVAL '24 hours'/.test(catalogSourceDiscovery),
+  ],
+  [
     "full-catalog autostart requires runtime write gate and exact revision",
     /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
       /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
