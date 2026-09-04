@@ -1,18 +1,18 @@
+import { prisma } from "./db.js";
 import { ShopifyGraphqlClient } from "./services/shopify.js";
 
 const originalRequest = ShopifyGraphqlClient.prototype.request;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isCatalogLinkQuery(query: string) {
-  return query.includes("query SyncEngineCatalogLink");
+  return query.includes("query SyncEngineCatalogLink") || query.includes("query SyncEngineCatalogIndex");
 }
 
 function makeCatalogLinkQuerySafe(query: string) {
   if (!isCatalogLinkQuery(query)) return query;
 
-  // Keep 50 products per page so the existing 300-page guard can cover the
-  // full ~15k-product catalog. Reduce only the nested variant connection so
-  // Shopify does not receive the original 50 x 250 nested query cost.
+  // Keep the outer Shopify product page size unchanged so the full catalog can
+  // still be traversed. Only cap legacy oversized nested variant connections.
   return query.replace(/variants\(first:\s*250\)/g, "variants(first: 15)");
 }
 
@@ -59,4 +59,34 @@ ShopifyGraphqlClient.prototype.request = (async function patchedShopifyRequest<T
   throw new Error("Shopify request exhausted automatic retries");
 }) as typeof ShopifyGraphqlClient.prototype.request;
 
-console.log("[shopify-hotfix] full-catalog scan + bounded variant query + retry patch active");
+// The catalog route stores SyncJob.result as JSON, but its read path converts
+// that JSON into an object before running the stale-job check. The stale helper
+// then cannot see result.lastPageAt and falls back to startedAt, which used to
+// make every healthy long scan look stale after five minutes. Keep startedAt as
+// a durable heartbeat whenever a catalog page writes a fresh lastPageAt. This
+// fixes the production worker without changing catalog ownership or Shopify data.
+const syncJobDelegate = prisma.syncJob as any;
+const originalSyncJobUpdate = syncJobDelegate.update.bind(syncJobDelegate);
+syncJobDelegate.update = async function patchedSyncJobUpdate(args: any) {
+  let nextArgs = args;
+  const data = args?.data;
+  if (data && data.status == null && typeof data.result === "string") {
+    try {
+      const parsed = JSON.parse(data.result);
+      if (parsed && typeof parsed === "object" && parsed.lastPageAt) {
+        nextArgs = {
+          ...args,
+          data: {
+            ...data,
+            startedAt: new Date(),
+          },
+        };
+      }
+    } catch {
+      // Preserve the original Prisma call if result is not valid JSON.
+    }
+  }
+  return originalSyncJobUpdate(nextArgs);
+};
+
+console.log("[shopify-hotfix] catalog retry + durable heartbeat patch active");
