@@ -65,6 +65,12 @@ const assertions: Array<[string, boolean]> = [
       /result\.deferred \+= 1/.test(catalogSourceDiscovery),
   ],
   [
+    "catalog source discovery pauses retries after provider budget exhaustion",
+    /providerPausedUntil/.test(catalogSourceDiscovery) &&
+      /daily operational budget reached/.test(catalogSourceDiscovery) &&
+      /nextUtcDay/.test(catalogSourceDiscovery),
+  ],
+  [
     "catalog source discovery only admits unresolved explicit source reviews",
     /"matchStatus"='needs_review' AND "matchMethod"='source_url_not_in_sheets'/.test(catalogSourceDiscovery),
   ],

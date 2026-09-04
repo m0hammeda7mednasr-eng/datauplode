@@ -375,14 +375,38 @@ export async function runCatalogSourceDiscoveryBatch() {
 
 let monitorStarted = false;
 let running = false;
+let providerPausedUntil = 0;
+
+function nextUtcDay() {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+}
+
+function pauseProvider(message: string) {
+  providerPausedUntil = /daily operational budget reached/i.test(message)
+    ? nextUtcDay()
+    : Date.now() + 30 * 60 * 1000;
+  return new Date(providerPausedUntil).toISOString();
+}
 
 export function startCatalogSourceDiscoveryMonitor() {
   if (monitorStarted || process.env.CATALOG_SOURCE_DISCOVERY_AUTOSTART !== "true") return;
   const intervalMinutes = Math.max(5, Number(process.env.CATALOG_SOURCE_DISCOVERY_INTERVAL_MINUTES || 5));
   const run = async () => {
     if (running) return;
+    if (Date.now() < providerPausedUntil) return;
     running = true;
-    try { await runCatalogSourceDiscoveryBatch(); }
+    try {
+      const result = await runCatalogSourceDiscoveryBatch();
+      const providerIssue = "issues" in result
+        ? result.issues.find((issue) => issue.deferred && typeof issue.error === "string")
+        : undefined;
+      const providerError = typeof providerIssue?.error === "string" ? providerIssue.error : "";
+      if (providerError) {
+        const pausedUntil = pauseProvider(providerError);
+        console.warn(`Catalog source discovery paused until ${pausedUntil}: ${providerError}`);
+      }
+    }
     catch (error: any) { console.error("Catalog source discovery batch failed:", clean(error?.message || error)); }
     finally { running = false; }
   };

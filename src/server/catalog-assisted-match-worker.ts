@@ -386,15 +386,25 @@ async function persistProductLevelLink(cache: CacheRow, candidate: Candidate, li
   return { linked: true, alreadyLinked: false };
 }
 
-async function runWorker() {
+let workerRunning = false;
+
+export async function runCatalogAssistedMatchWorker() {
+  if (workerRunning) return;
+  workerRunning = true;
   const recent = await prisma.syncJob.findFirst({
     where: { type: JOB_TYPE, status: 'running', createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) } },
     orderBy: { createdAt: 'desc' },
   });
   if (recent) {
     console.log(`[assisted-match] existing worker ${recent.id} is already running`);
+    workerRunning = false;
     return;
   }
+
+  await prisma.syncJob.updateMany({
+    where: { type: JOB_TYPE, status: 'running', createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } },
+    data: { status: 'failed', completedAt: new Date(), result: JSON.stringify({ stage: 'failed', error: 'Stale assisted matcher marker closed before retry' }) },
+  });
 
   const job = await prisma.syncJob.create({
     data: { type: JOB_TYPE, status: 'running', startedAt: new Date(), result: JSON.stringify({ stage: 'loading_sheets', linked: 0, failed: 0, skipped: 0 }) },
@@ -533,11 +543,19 @@ async function runWorker() {
   } catch (error: any) {
     await prisma.syncJob.update({ where: { id: job.id }, data: { status: 'failed', completedAt: new Date(), result: JSON.stringify({ stage: 'failed', processed, linked, failed, skipped, error: clean(error?.message || error), scraperApiCreditsUsed: 0 }) } }).catch(() => undefined);
     console.error('[assisted-match] failed', error);
+  } finally {
+    workerRunning = false;
   }
 }
 
 if (enabled('CATALOG_ASSISTED_MATCH_AUTOSTART', false)) {
-  setTimeout(() => void runWorker(), 3000);
+  const intervalMinutes = Math.max(15, Number(process.env.CATALOG_ASSISTED_MATCH_INTERVAL_MINUTES || 30));
+  const run = () => void runCatalogAssistedMatchWorker();
+  const initial = setTimeout(run, 3000);
+  initial.unref?.();
+  const timer = setInterval(run, intervalMinutes * 60 * 1000);
+  timer.unref?.();
+  console.log(`[assisted-match] enabled every ${intervalMinutes} minute(s)`);
 } else {
   console.log('[assisted-match] autostart disabled');
 }
