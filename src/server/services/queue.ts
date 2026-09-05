@@ -2066,7 +2066,7 @@ export class QueueService {
               SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
                 AND a."action"='SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT' AND a."createdAt">=$1
             )
-          GROUP BY s."id", s."lastScrapedAt"
+          GROUP BY s."id", s."lastScrapedAt", sp."syncEnabled"
           HAVING COUNT(sv."id") <= 1
           ORDER BY (s."syncStatus"='paused' OR sp."syncEnabled"=FALSE) DESC, EXISTS (
             SELECT 1 FROM "ManualReviewItem" mr

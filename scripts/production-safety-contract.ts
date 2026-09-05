@@ -124,7 +124,8 @@ const assertions: Array<[string, boolean]> = [
     "full-catalog may repair verified pending links only behind an explicit gate",
     /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING/.test(queue) &&
       /ASSISTED_PRODUCT_LEVEL_LINK/.test(queue) &&
-      /LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV/.test(queue) &&
+    /LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV/.test(queue) &&
+      /GROUP BY s\."id", s\."lastScrapedAt", sp\."syncEnabled"/.test(queue) &&
       /syncEnabled:\s*true[\s\S]*syncPrice:\s*true[\s\S]*syncInventory:\s*true/.test(fullCatalogSync) &&
       /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING=false/.test(envExample),
   ],
