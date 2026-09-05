@@ -17,6 +17,7 @@ const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
 const FULL_CATALOG_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_FULL_CATALOG_INTERVAL_MINUTES || 10);
 const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 5);
+const FULL_CATALOG_SELECTION_POOL_SIZE = Number(process.env.SYNC_FULL_CATALOG_SELECTION_POOL_SIZE || 50);
 const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
 const FULL_CATALOG_DEFAULT_VARIANTS_ONLY = process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY === 'true';
@@ -24,6 +25,12 @@ const FULL_CATALOG_INCLUDE_VERIFIED_PENDING = process.env.SYNC_FULL_CATALOG_INCL
 const FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE = process.env.SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE;
 const FULL_CATALOG_TARGET_DOMAINS = String(
   process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "centrepointstores.com,next.ae",
+)
+  .split(",")
+  .map((value) => value.trim().toLowerCase())
+  .filter((value) => /^[a-z0-9.-]+$/.test(value));
+const FULL_CATALOG_FAST_LANE_DOMAINS = String(
+  process.env.SYNC_FULL_CATALOG_FAST_LANE_DOMAINS || "centrepointstores.com,maxfashion.com,next.ae",
 )
   .split(",")
   .map((value) => value.trim().toLowerCase())
@@ -72,6 +79,19 @@ function priceStockSyncCutoffDate(): Date {
 
 function cleanOptionText(value: any): string {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function fullCatalogDomainRank(url: string): number {
+  const normalized = cleanOptionText(url).toLowerCase();
+  const rank = FULL_CATALOG_FAST_LANE_DOMAINS.findIndex((domain) => normalized.includes(domain));
+  return rank >= 0 ? rank : FULL_CATALOG_FAST_LANE_DOMAINS.length;
+}
+
+function boundedFullCatalogPoolSize(take: number): number {
+  const configured = Number.isFinite(FULL_CATALOG_SELECTION_POOL_SIZE) && FULL_CATALOG_SELECTION_POOL_SIZE > 0
+    ? Math.floor(FULL_CATALOG_SELECTION_POOL_SIZE)
+    : 50;
+  return Math.max(take, Math.min(200, configured));
 }
 
 function parseVariantRaw(raw: string | null | undefined): any {
@@ -1998,6 +2018,7 @@ export class QueueService {
     const take = Number.isFinite(FULL_CATALOG_SYNC_BATCH_SIZE) && FULL_CATALOG_SYNC_BATCH_SIZE > 0
       ? Math.min(5, Math.floor(FULL_CATALOG_SYNC_BATCH_SIZE))
       : 5;
+    const poolTake = boundedFullCatalogPoolSize(take);
     const minAgeDays = Number.isFinite(FULL_CATALOG_SYNC_MIN_AGE_DAYS) && FULL_CATALOG_SYNC_MIN_AGE_DAYS > 0
       ? FULL_CATALOG_SYNC_MIN_AGE_DAYS
       : 30;
@@ -2095,7 +2116,7 @@ export class QueueService {
             SELECT 1 FROM "ManualReviewItem" mr
             WHERE mr."sourceProductId"=s."id" AND mr."status"='pending'
           ) DESC, s."lastScrapedAt" ASC
-          LIMIT ${take}
+          LIMIT ${poolTake}
         `, successCutoff, failureCutoff, pendingFailureSince)
       : [];
     const singleVariantOrder = new Map(singleVariantIds.map((row, index) => [row.id, index]));
@@ -2129,9 +2150,9 @@ export class QueueService {
         shopifyProduct: { select: { syncEnabled: true } },
       },
       orderBy: { lastScrapedAt: 'asc' },
-      take,
+      take: poolTake,
     });
-    const remaining = take - reviewCandidates.length;
+    const remaining = poolTake - reviewCandidates.length;
     const otherCandidates = !FULL_CATALOG_DEFAULT_VARIANTS_ONLY && remaining > 0
       ? await prisma.sourceProduct.findMany({
           where: {
@@ -2152,8 +2173,38 @@ export class QueueService {
           take: remaining,
         })
       : [];
+    const candidatePool = [...reviewCandidates, ...otherCandidates];
+    const failureRows = candidatePool.length > 0
+      ? await prisma.auditLog.groupBy({
+          by: ['sourceProductId'],
+          where: {
+            sourceProductId: { in: candidatePool.map((candidate) => candidate.id) },
+            action: 'SYNC_PRODUCT_CATALOG_FAILED',
+          },
+          _count: { _all: true },
+          _max: { createdAt: true },
+        })
+      : [];
+    const failureCountBySource = new Map(failureRows.map((row) => [row.sourceProductId || '', row._count._all]));
+    const lastFailureBySource = new Map(
+      failureRows.map((row) => [row.sourceProductId || '', row._max.createdAt?.getTime() || 0]),
+    );
     const candidates = [...reviewCandidates, ...otherCandidates]
-      .sort((left, right) => (singleVariantOrder.get(left.id) ?? 0) - (singleVariantOrder.get(right.id) ?? 0))
+      .sort((left, right) => {
+        const leftFailures = failureCountBySource.get(left.id) || 0;
+        const rightFailures = failureCountBySource.get(right.id) || 0;
+        if (leftFailures !== rightFailures) return leftFailures - rightFailures;
+        const leftDomainRank = fullCatalogDomainRank(left.url);
+        const rightDomainRank = fullCatalogDomainRank(right.url);
+        if (leftDomainRank !== rightDomainRank) return leftDomainRank - rightDomainRank;
+        const leftOrder = singleVariantOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = singleVariantOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+        const leftFailureAt = lastFailureBySource.get(left.id) || 0;
+        const rightFailureAt = lastFailureBySource.get(right.id) || 0;
+        if (leftFailureAt !== rightFailureAt) return leftFailureAt - rightFailureAt;
+        return (left.lastScrapedAt?.getTime() || 0) - (right.lastScrapedAt?.getTime() || 0);
+      })
       .filter((candidate) => {
         const url = cleanOptionText(candidate.url).toLowerCase();
         if (!FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain))) return false;
@@ -2213,6 +2264,7 @@ export class QueueService {
 
     return {
       selected: candidates.length,
+      poolSelected: candidatePool.length,
       completed: results.filter((result) => result.success && result.skipped !== true).length,
       skipped: results.filter((result) => result.skipped === true).length,
       failed,
