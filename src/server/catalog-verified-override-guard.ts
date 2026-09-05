@@ -40,6 +40,11 @@ export async function installVerifiedOverrideGuard() {
         END IF;
 
         IF OLD."verifiedOverride" = TRUE
+           AND EXISTS (
+             SELECT 1
+             FROM "ShopifyProduct" sp
+             WHERE sp."shopifyId" = OLD."shopifyId"
+           )
            AND NEW."matchStatus" IN ('needs_link', 'needs_review', 'matched') THEN
           NEW."matchStatus" := OLD."matchStatus";
           NEW."matchMethod" := OLD."matchMethod";

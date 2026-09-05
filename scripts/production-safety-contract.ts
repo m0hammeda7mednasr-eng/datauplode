@@ -16,6 +16,7 @@ const fullCatalogSync = read("src/server/services/fullCatalogSync.ts");
 const shopifyService = read("src/server/services/shopify.ts");
 const queue = read("src/server/services/queue.ts");
 const shopifyCatalogLinkRoutes = read("src/server/routes/shopify-catalog-link.routes.ts");
+const catalogVerifiedOverrideGuard = read("src/server/catalog-verified-override-guard.ts");
 const catalogSourceDiscovery = read("src/server/services/catalogSourceDiscovery.ts");
 
 const assertions: Array<[string, boolean]> = [
@@ -86,6 +87,12 @@ const assertions: Array<[string, boolean]> = [
     /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
       /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
       /RAILWAY_GIT_COMMIT_SHA/.test(server),
+  ],
+  [
+    "verified cache overrides require a persisted Shopify product link",
+    /OLD\."verifiedOverride" = TRUE[\s\S]*EXISTS \([\s\S]*FROM "ShopifyProduct" sp[\s\S]*sp\."shopifyId" = OLD\."shopifyId"/.test(
+      catalogVerifiedOverrideGuard,
+    ),
   ],
   [
     "full-catalog writes use synchronous in-place productSet",
