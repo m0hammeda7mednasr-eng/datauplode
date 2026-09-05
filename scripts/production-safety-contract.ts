@@ -129,6 +129,7 @@ const assertions: Array<[string, boolean]> = [
       /GROUP BY s\."id", s\."lastScrapedAt", s\."syncStatus", sp\."syncEnabled"/.test(queue) &&
       queue.includes("THEN $3") &&
       queue.includes("ELSE $2") &&
+      /isVerifiedPendingCandidate[\s\S]*requireVariantExpansion:\s*FULL_CATALOG_DEFAULT_VARIANTS_ONLY\s*&&\s*!isVerifiedPendingCandidate/.test(queue) &&
       /syncEnabled:\s*true[\s\S]*syncPrice:\s*true[\s\S]*syncInventory:\s*true/.test(fullCatalogSync) &&
       /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING=false/.test(envExample) &&
       /SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE=/.test(envExample),
@@ -140,9 +141,10 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "full-catalog sync has an exact supplier allowlist",
-    /host === "www\.centrepointstores\.com"/.test(fullCatalogSync) &&
+    /host === "www\.maxfashion\.com"/.test(fullCatalogSync) &&
+      /host === "www\.centrepointstores\.com"/.test(fullCatalogSync) &&
       /host === "www\.next\.ae"/.test(fullCatalogSync) &&
-      /Only linked Centrepoint and Next UAE products/.test(fullCatalogSync),
+      /Only linked Max Fashion UAE, Centrepoint UAE, and Next UAE products/.test(fullCatalogSync),
   ],
   [
     "full-catalog rolling batch supports a configured domain subset",

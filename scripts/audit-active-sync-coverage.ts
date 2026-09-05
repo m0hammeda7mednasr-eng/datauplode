@@ -7,7 +7,11 @@ type CoverageRow = {
 };
 
 async function main() {
-  const [rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount] = await Promise.all([
+  const configuredRecoverySince = process.env.SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE;
+  const recoverySince = configuredRecoverySince && !Number.isNaN(new Date(configuredRecoverySince).getTime())
+    ? new Date(configuredRecoverySince)
+    : new Date(0);
+  const [rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount, verifiedPendingRecovery, verifiedPendingEligibility, verifiedPendingHosts] = await Promise.all([
     prisma.$queryRawUnsafe<CoverageRow[]>(`
     SELECT
       CASE
@@ -96,10 +100,89 @@ async function main() {
       GROUP BY 1
       ORDER BY count DESC, bucket
     `),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT
+        CASE
+          WHEN sp."syncEnabled" = TRUE AND s."syncStatus" = 'active' THEN 'recovered_active'
+          WHEN EXISTS (
+            SELECT 1 FROM "AuditLog" failed
+            WHERE failed."sourceProductId" = s."id"
+              AND failed."action" = 'SYNC_PRODUCT_CATALOG_FAILED'
+              AND failed."createdAt" >= $1
+          ) THEN 'attempted_failed_safely'
+          ELSE 'waiting_for_attempt'
+        END AS bucket,
+        COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND EXISTS (
+          SELECT 1 FROM "AuditLog" verified_link
+          WHERE verified_link."sourceProductId" = s."id"
+            AND verified_link."action" IN ('ASSISTED_PRODUCT_LEVEL_LINK', 'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV')
+        )
+        AND (
+          sp."syncEnabled" = FALSE
+          OR s."syncStatus" <> 'active'
+          OR EXISTS (
+            SELECT 1 FROM "AuditLog" recovered
+            WHERE recovered."sourceProductId" = s."id"
+              AND recovered."action" = 'SYNC_PRODUCT_CATALOG_SET'
+              AND recovered."createdAt" >= $1
+          )
+        )
+      GROUP BY 1
+      ORDER BY count DESC, bucket
+    `, recoverySince),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT
+        CASE
+          WHEN LOWER(s."url") NOT LIKE '%next.ae%' THEN 'unsupported_domain'
+          WHEN s."raw" NOT LIKE '%sheetPriceMultiplier%' THEN 'missing_sheet_multiplier'
+          WHEN EXISTS (
+            SELECT 1 FROM "AuditLog" failed
+            WHERE failed."sourceProductId" = s."id"
+              AND failed."action" = 'SYNC_PRODUCT_CATALOG_FAILED'
+              AND failed."createdAt" >= $1
+          ) THEN 'attempted_after_recovery'
+          ELSE 'eligible_now'
+        END AS bucket,
+        COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND (sp."syncEnabled" = FALSE OR s."syncStatus" <> 'active')
+        AND EXISTS (
+          SELECT 1 FROM "AuditLog" verified_link
+          WHERE verified_link."sourceProductId" = s."id"
+            AND verified_link."action" IN ('ASSISTED_PRODUCT_LEVEL_LINK', 'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV')
+        )
+      GROUP BY 1
+      ORDER BY count DESC, bucket
+    `, recoverySince),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT
+        SPLIT_PART(REGEXP_REPLACE(LOWER(s."url"), '^https?://', ''), '/', 1) AS bucket,
+        COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND (sp."syncEnabled" = FALSE OR s."syncStatus" <> 'active')
+        AND EXISTS (
+          SELECT 1 FROM "AuditLog" verified_link
+          WHERE verified_link."sourceProductId" = s."id"
+            AND verified_link."action" IN ('ASSISTED_PRODUCT_LEVEL_LINK', 'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV')
+        )
+      GROUP BY 1
+      ORDER BY count DESC, bucket
+    `),
   ]);
 
   const total = rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
-  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), total, coverage: rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount }, null, 2));
+  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), recoverySince, total, coverage: rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount, verifiedPendingRecovery, verifiedPendingEligibility, verifiedPendingHosts }, null, 2));
 }
 
 main()

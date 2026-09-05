@@ -27,7 +27,9 @@ function parseRaw(value: string | null | undefined) {
 function isSupportedCatalogSource(url: string) {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return host === "www.centrepointstores.com" ||
+    return host === "www.maxfashion.com" ||
+      host === "maxfashion.com" ||
+      host === "www.centrepointstores.com" ||
       host === "centrepointstores.com" ||
       host === "www.next.ae" ||
       host === "next.ae";
@@ -106,7 +108,7 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
     },
   });
   if (!product?.shopifyProduct || !isSupportedCatalogSource(product.url)) {
-    throw new Error("Only linked Centrepoint and Next UAE products are enabled for full catalog sync");
+    throw new Error("Only linked Max Fashion UAE, Centrepoint UAE, and Next UAE products are enabled for full catalog sync");
   }
 
   const oldRaw = parseRaw(product.raw);

@@ -29,12 +29,20 @@ const candidate = await prisma.sourceProduct.findFirst({
   where: {
     ...(sourceProductId ? { id: sourceProductId } : {}),
     OR: [
+      { url: { contains: "maxfashion.com", mode: "insensitive" } },
       { url: { contains: "centrepointstores.com", mode: "insensitive" } },
       { url: { contains: "next.ae", mode: "insensitive" } },
     ],
-    shopifyProduct: { is: { syncEnabled: true } },
+    shopifyProduct: { is: sourceProductId ? {} : { syncEnabled: false, status: "active" } },
     raw: { contains: "sheetPriceMultiplier" },
-    ...(!sourceProductId ? { createdAt: { lt: new Date("2026-09-01T00:00:00.000Z") } } : {}),
+    ...(!sourceProductId ? {
+      syncStatus: "paused",
+      auditLogs: {
+        some: {
+          action: { in: ["ASSISTED_PRODUCT_LEVEL_LINK", "LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV"] },
+        },
+      },
+    } : {}),
   },
   orderBy: { updatedAt: "asc" },
   include: {
@@ -45,7 +53,7 @@ const candidate = await prisma.sourceProduct.findFirst({
 });
 
 if (!candidate?.shopifyProduct) {
-  throw new Error("No linked pre-existing Centrepoint/Next canary with sheet metadata was found");
+  throw new Error("No linked verified pending catalog canary with sheet metadata was found");
 }
 
 const raw = parseRaw(candidate.raw);

@@ -2106,9 +2106,11 @@ export class QueueService {
             id: true,
             title: true,
             url: true,
+            syncStatus: true,
             updatedAt: true,
             lastScrapedAt: true,
             variants: { select: { size: true }, take: 2 },
+            shopifyProduct: { select: { syncEnabled: true } },
           },
         })
       : await prisma.sourceProduct.findMany({
@@ -2120,9 +2122,11 @@ export class QueueService {
         id: true,
         title: true,
         url: true,
+        syncStatus: true,
         updatedAt: true,
         lastScrapedAt: true,
         variants: { select: { size: true }, take: 2 },
+        shopifyProduct: { select: { syncEnabled: true } },
       },
       orderBy: { lastScrapedAt: 'asc' },
       take,
@@ -2138,9 +2142,11 @@ export class QueueService {
             id: true,
             title: true,
             url: true,
+            syncStatus: true,
             updatedAt: true,
             lastScrapedAt: true,
             variants: { select: { size: true }, take: 2 },
+            shopifyProduct: { select: { syncEnabled: true } },
           },
           orderBy: { lastScrapedAt: 'asc' },
           take: remaining,
@@ -2164,12 +2170,14 @@ export class QueueService {
     let failed = 0;
     for (const candidate of candidates) {
       try {
+        const isVerifiedPendingCandidate = FULL_CATALOG_INCLUDE_VERIFIED_PENDING &&
+          (candidate.syncStatus === 'paused' || candidate.shopifyProduct?.syncEnabled === false);
         results.push(await syncFullProductCatalog({
           prisma,
           sourceProductId: candidate.id,
           client,
           location,
-          requireVariantExpansion: FULL_CATALOG_DEFAULT_VARIANTS_ONLY,
+          requireVariantExpansion: FULL_CATALOG_DEFAULT_VARIANTS_ONLY && !isVerifiedPendingCandidate,
         }));
         const result = results.at(-1);
         if (result?.skipped === true) {
