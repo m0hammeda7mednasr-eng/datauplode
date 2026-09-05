@@ -6,6 +6,7 @@ import { PricingEngine } from './pricing.js';
 import { ScraperService, type NormalizedProduct } from './scraper.js';
 import { applyDeterministicDabSkus } from './dabSku.js';
 import { syncFullProductCatalog } from './fullCatalogSync.js';
+import { getApprovedSheetMultiplier, isApprovedSheetMultiplier } from './sheetMultiplier.js';
 
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
@@ -679,6 +680,13 @@ function spreadsheetIdFromValue(value: any): string {
 
 function isPriceStockTargetProduct(product: any): boolean {
   const importMeta = getImportMeta(product);
+  const hasMultiplier = Boolean(getApprovedSheetMultiplier(product));
+  const hasSku = (product?.variants || []).some((variant: any) =>
+    cleanOptionText(variant?.shopifyVariant?.sku || variant?.sku),
+  );
+
+  if (!hasMultiplier || !hasSku) return false;
+
   const explicitSheetIds = [
     importMeta.spreadsheetId,
     importMeta.sheetSpreadsheetId,
@@ -693,14 +701,10 @@ function isPriceStockTargetProduct(product: any): boolean {
   }
 
   // Older imports predate spreadsheet provenance. They are admitted only when
-  // all three durable sheet markers exist: row number, multiplier, and SKU.
+  // all three durable sheet markers exist: row number, approved multiplier, and SKU.
   const rowNumber = Number(importMeta.excelRowNumber || importMeta.sheetRowNumber);
   const hasSheetRow = Number.isSafeInteger(rowNumber) && rowNumber > 0;
-  const hasMultiplier = Boolean(toPositiveNumber(importMeta.sheetPriceMultiplier));
-  const hasSku = (product?.variants || []).some((variant: any) =>
-    cleanOptionText(variant?.shopifyVariant?.sku || variant?.sku),
-  );
-  return hasSheetRow && hasMultiplier && hasSku;
+  return hasSheetRow;
 }
 
 function cleanStringList(values: any): string[] {
@@ -934,8 +938,8 @@ function sourceVariantDataFromFresh(
 async function resolvePricingRule(product: any, options: CatalogSyncOptions) {
   const payloadMultiplier = toPositiveNumber(options.priceMultiplier);
   const importMeta = getImportMeta(product);
-  const storedMultiplier = toPositiveNumber(importMeta.sheetPriceMultiplier);
-  const multiplier = payloadMultiplier || storedMultiplier;
+  const storedMultiplier = getApprovedSheetMultiplier(product);
+  const multiplier = isApprovedSheetMultiplier(payloadMultiplier) ? payloadMultiplier : storedMultiplier;
   if (multiplier) {
     return {
       multiplier,
@@ -2123,17 +2127,18 @@ export class QueueService {
     const reviewCandidates = FULL_CATALOG_DEFAULT_VARIANTS_ONLY
       ? await prisma.sourceProduct.findMany({
           where: { id: { in: singleVariantIds.map((row) => row.id) } },
-          select: {
-            id: true,
-            title: true,
-            url: true,
-            syncStatus: true,
-            updatedAt: true,
-            lastScrapedAt: true,
-            variants: { select: { size: true }, take: 2 },
-            shopifyProduct: { select: { syncEnabled: true } },
-          },
-        })
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        raw: true,
+        syncStatus: true,
+        updatedAt: true,
+        lastScrapedAt: true,
+        variants: { select: { sku: true, size: true, shopifyVariant: { select: { sku: true } } }, take: 5 },
+        shopifyProduct: { select: { syncEnabled: true, variants: { select: { sku: true }, take: 5 } } },
+      },
+    })
       : await prisma.sourceProduct.findMany({
       where: {
         ...candidateWhere,
@@ -2143,11 +2148,12 @@ export class QueueService {
         id: true,
         title: true,
         url: true,
+        raw: true,
         syncStatus: true,
         updatedAt: true,
         lastScrapedAt: true,
-        variants: { select: { size: true }, take: 2 },
-        shopifyProduct: { select: { syncEnabled: true } },
+        variants: { select: { sku: true, size: true, shopifyVariant: { select: { sku: true } } }, take: 5 },
+        shopifyProduct: { select: { syncEnabled: true, variants: { select: { sku: true }, take: 5 } } },
       },
       orderBy: { lastScrapedAt: 'asc' },
       take: poolTake,
@@ -2163,11 +2169,12 @@ export class QueueService {
             id: true,
             title: true,
             url: true,
+            raw: true,
             syncStatus: true,
             updatedAt: true,
             lastScrapedAt: true,
-            variants: { select: { size: true }, take: 2 },
-            shopifyProduct: { select: { syncEnabled: true } },
+            variants: { select: { sku: true, size: true, shopifyVariant: { select: { sku: true } } }, take: 5 },
+            shopifyProduct: { select: { syncEnabled: true, variants: { select: { sku: true }, take: 5 } } },
           },
           orderBy: { lastScrapedAt: 'asc' },
           take: remaining,
@@ -2208,6 +2215,7 @@ export class QueueService {
       .filter((candidate) => {
         const url = cleanOptionText(candidate.url).toLowerCase();
         if (!FULL_CATALOG_TARGET_DOMAINS.some((domain) => url.includes(domain))) return false;
+        if (!getApprovedSheetMultiplier(candidate)) return false;
         return !FULL_CATALOG_DEFAULT_VARIANTS_ONLY || candidate.variants.length <= 1;
       })
       .slice(0, take);

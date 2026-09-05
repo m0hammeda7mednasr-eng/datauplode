@@ -7,6 +7,7 @@ import {
   type NormalizedProduct,
 } from "./scraper.js";
 import { ShopifyService, type ShopifyGraphqlClient } from "./shopify.js";
+import { getApprovedSheetMultiplier } from "./sheetMultiplier.js";
 
 function clean(value: unknown) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -112,7 +113,10 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   }
 
   const oldRaw = parseRaw(product.raw);
-  const multiplier = Number(oldRaw?.import?.sheetPriceMultiplier);
+  const multiplier = getApprovedSheetMultiplier(product);
+  if (!multiplier) {
+    throw new Error("Product has no approved sheet multiplier");
+  }
   const fresh = await withTimeout(
     new ScraperService().scrape(product.url),
     120_000,
