@@ -597,7 +597,19 @@ async function startServer() {
       console.warn("Safe full-catalog monitor autostart ENABLED");
       QueueService.startFullCatalogMonitor();
     } else {
-      console.log("Full-catalog monitor disabled by SYNC_FULL_CATALOG_AUTOSTART=false");
+      const expectedRevision = exactRevision(process.env.SYNC_FULL_CATALOG_REVISION);
+      const deployedRevision = exactRevision(
+        process.env.RAILWAY_GIT_COMMIT_SHA || process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA,
+      );
+      console.log("Full-catalog monitor disabled by runtime/revision gate", {
+        runtimeWritesEnabled: runtimeWritesEnabled(),
+        autostartEnabled: envFlag("SYNC_FULL_CATALOG_AUTOSTART"),
+        expectedRevisionOk: Boolean(expectedRevision),
+        deployedRevisionOk: Boolean(deployedRevision),
+        revisionMatches: Boolean(expectedRevision) && expectedRevision === deployedRevision,
+        expectedRevisionPrefix: expectedRevision.slice(0, 8) || null,
+        deployedRevisionPrefix: deployedRevision.slice(0, 8) || null,
+      });
     }
 
     if (sheetImportAutostartEnabled()) {
