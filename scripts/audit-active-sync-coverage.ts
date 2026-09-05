@@ -138,7 +138,10 @@ async function main() {
     prisma.$queryRawUnsafe<CoverageRow[]>(`
       SELECT
         CASE
-          WHEN LOWER(s."url") NOT LIKE '%next.ae%' THEN 'unsupported_domain'
+          WHEN LOWER(s."url") NOT LIKE '%next.ae%'
+            AND LOWER(s."url") NOT LIKE '%maxfashion.com%'
+            AND LOWER(s."url") NOT LIKE '%centrepointstores.com%'
+            THEN 'unsupported_domain'
           WHEN s."raw" NOT LIKE '%sheetPriceMultiplier%' THEN 'missing_sheet_multiplier'
           WHEN EXISTS (
             SELECT 1 FROM "AuditLog" failed
