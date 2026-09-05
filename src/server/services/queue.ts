@@ -21,6 +21,7 @@ const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
 const FULL_CATALOG_DEFAULT_VARIANTS_ONLY = process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY === 'true';
 const FULL_CATALOG_INCLUDE_VERIFIED_PENDING = process.env.SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING === 'true';
+const FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE = process.env.SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE;
 const FULL_CATALOG_TARGET_DOMAINS = String(
   process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "centrepointstores.com,next.ae",
 )
@@ -2005,6 +2006,12 @@ export class QueueService {
       : 60;
     const successCutoff = new Date(Date.now() - minAgeDays * 24 * 60 * 60 * 1000);
     const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
+    const configuredPendingFailureSince = FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE
+      ? new Date(FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE)
+      : failureCutoff;
+    const pendingFailureSince = Number.isNaN(configuredPendingFailureSince.getTime())
+      ? failureCutoff
+      : configuredPendingFailureSince;
     const candidateWhere: Prisma.SourceProductWhereInput = {
         syncStatus: { not: 'paused' },
         OR: FULL_CATALOG_TARGET_DOMAINS.map((domain) => ({
@@ -2060,20 +2067,36 @@ export class QueueService {
             )
             AND NOT EXISTS (
               SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
-                AND a."action"='SYNC_PRODUCT_CATALOG_FAILED' AND a."createdAt">=$2
+                AND a."action"='SYNC_PRODUCT_CATALOG_FAILED'
+                AND a."createdAt">=CASE
+                  WHEN (
+                    ${FULL_CATALOG_INCLUDE_VERIFIED_PENDING ? 'TRUE' : 'FALSE'}
+                    AND LOWER(sp."status")='active'
+                    AND (s."syncStatus"='paused' OR sp."syncEnabled"=FALSE)
+                    AND EXISTS (
+                      SELECT 1 FROM "AuditLog" verified_link
+                      WHERE verified_link."sourceProductId"=s."id"
+                        AND verified_link."action" IN (
+                          'ASSISTED_PRODUCT_LEVEL_LINK',
+                          'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV'
+                        )
+                    )
+                  ) THEN $3
+                  ELSE $2
+                END
             )
             AND NOT EXISTS (
               SELECT 1 FROM "AuditLog" a WHERE a."sourceProductId"=s."id"
                 AND a."action"='SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT' AND a."createdAt">=$1
             )
-          GROUP BY s."id", s."lastScrapedAt", sp."syncEnabled"
+          GROUP BY s."id", s."lastScrapedAt", s."syncStatus", sp."syncEnabled"
           HAVING COUNT(sv."id") <= 1
           ORDER BY (s."syncStatus"='paused' OR sp."syncEnabled"=FALSE) DESC, EXISTS (
             SELECT 1 FROM "ManualReviewItem" mr
             WHERE mr."sourceProductId"=s."id" AND mr."status"='pending'
           ) DESC, s."lastScrapedAt" ASC
           LIMIT ${take}
-        `, successCutoff, failureCutoff)
+        `, successCutoff, failureCutoff, pendingFailureSince)
       : [];
     const singleVariantOrder = new Map(singleVariantIds.map((row, index) => [row.id, index]));
     const reviewCandidates = FULL_CATALOG_DEFAULT_VARIANTS_ONLY

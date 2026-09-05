@@ -7,7 +7,7 @@ type CoverageRow = {
 };
 
 async function main() {
-  const [rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin] = await Promise.all([
+  const [rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount] = await Promise.all([
     prisma.$queryRawUnsafe<CoverageRow[]>(`
     SELECT
       CASE
@@ -70,10 +70,36 @@ async function main() {
       GROUP BY 1
       ORDER BY count DESC, bucket
     `),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT
+        CASE
+          WHEN variant_counts.count = 0 THEN '0_variants'
+          WHEN variant_counts.count = 1 THEN '1_variant'
+          ELSE 'multiple_variants'
+        END AS bucket,
+        COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS count
+        FROM "SourceVariant" sv
+        WHERE sv."sourceProductId" = s."id"
+      ) variant_counts ON TRUE
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND (sp."syncEnabled" = FALSE OR s."syncStatus" <> 'active')
+        AND EXISTS (
+          SELECT 1 FROM "AuditLog" a
+          WHERE a."sourceProductId" = s."id"
+            AND a."action" IN ('ASSISTED_PRODUCT_LEVEL_LINK', 'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV')
+        )
+      GROUP BY 1
+      ORDER BY count DESC, bucket
+    `),
   ]);
 
   const total = rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
-  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), total, coverage: rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin }, null, 2));
+  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), total, coverage: rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin, verifiedPendingByVariantCount }, null, 2));
 }
 
 main()

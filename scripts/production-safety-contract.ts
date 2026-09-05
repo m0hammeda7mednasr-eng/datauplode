@@ -122,12 +122,16 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "full-catalog may repair verified pending links only behind an explicit gate",
-    /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING/.test(queue) &&
+      /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING/.test(queue) &&
+      /SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE/.test(queue) &&
       /ASSISTED_PRODUCT_LEVEL_LINK/.test(queue) &&
-    /LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV/.test(queue) &&
-      /GROUP BY s\."id", s\."lastScrapedAt", sp\."syncEnabled"/.test(queue) &&
+      /LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV/.test(queue) &&
+      /GROUP BY s\."id", s\."lastScrapedAt", s\."syncStatus", sp\."syncEnabled"/.test(queue) &&
+      queue.includes("THEN $3") &&
+      queue.includes("ELSE $2") &&
       /syncEnabled:\s*true[\s\S]*syncPrice:\s*true[\s\S]*syncInventory:\s*true/.test(fullCatalogSync) &&
-      /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING=false/.test(envExample),
+      /SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING=false/.test(envExample) &&
+      /SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE=/.test(envExample),
   ],
   [
     "full-catalog sync rejects suspicious images and duplicate SKUs",
