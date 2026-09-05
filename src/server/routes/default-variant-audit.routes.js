@@ -264,7 +264,7 @@ async function buildRuntimeStatus() {
   for (const log of logs) {
     const details = parsedDetails(log.details);
     if (log.action === "SCRAPERAPI_CREDIT_RESERVED") {
-      if (log.createdAt >= startUtcDay) {
+      if (log.createdAt >= startUtcDay && Number(details.accountingVersion || 0) === 2) {
         creditsUsedToday += Math.max(0, Number(details.requestedCredits || details.credits || 0));
       }
       continue;
