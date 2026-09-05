@@ -177,5 +177,5 @@ export async function reserveScraperApiCredits(url: string, credits: number) {
         }),
       },
     });
-  });
+  }, { maxWait: 10_000, timeout: 30_000 });
 }
