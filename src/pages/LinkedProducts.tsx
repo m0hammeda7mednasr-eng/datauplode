@@ -58,7 +58,7 @@ type CatalogResponse = {
     elapsedSeconds: number;
     ratePerHour: number;
     estimatedHoursRemaining?: number | null;
-    scraperApi: { creditsUsed24h: number; estimatedProviderCredits24h?: number; dailyLimit: number };
+    scraperApi: { creditsUsed24h: number; estimatedProviderCredits24h?: number; providerCycleCreditsUsed?: number | null; providerCycleCreditLimit?: number | null; dailyLimit: number };
     latestWorker?: any;
     generatedAt: string;
   };
@@ -328,7 +328,7 @@ function CatalogCycle({ cycle }: { cycle: NonNullable<CatalogResponse['cycle']> 
         <span className="inline-flex items-center gap-1.5"><Clock3 className="h-4 w-4 text-slate-400" />{formatDuration(cycle.elapsedSeconds)} elapsed</span>
         <span>{cycle.ratePerHour.toLocaleString()} products/hour</span>
         <span>{cycle.estimatedHoursRemaining == null ? 'ETA calculating' : `${cycle.estimatedHoursRemaining.toLocaleString()}h ETA`}</span>
-        <span className="inline-flex items-center gap-1.5"><Coins className="h-4 w-4 text-amber-500" />~{(cycle.scraperApi.estimatedProviderCredits24h ?? cycle.scraperApi.creditsUsed24h).toLocaleString()} / {cycle.scraperApi.dailyLimit.toLocaleString()} estimated credits (24h)</span>
+        <span className="inline-flex items-center gap-1.5"><Coins className="h-4 w-4 text-amber-500" />{cycle.scraperApi.providerCycleCreditsUsed == null ? `~${(cycle.scraperApi.estimatedProviderCredits24h ?? cycle.scraperApi.creditsUsed24h).toLocaleString()} estimated` : `${cycle.scraperApi.providerCycleCreditsUsed.toLocaleString()} / ${(cycle.scraperApi.providerCycleCreditLimit || 0).toLocaleString()}`} provider cycle credits</span>
       </div>
     </div>
     <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.max(0, Math.min(100, cycle.completionPercent))}%` }} /></div>

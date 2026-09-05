@@ -3,6 +3,7 @@ import { prisma } from "../db.js";
 import { ShopifyService } from "../services/shopify.js";
 import { dabBrandCode, dabProductCode } from "../services/dabSku.js";
 import { loadGoogleSheetRows, type GoogleSheetRow } from "../api.js";
+import { getScraperApiAccountUsage } from "../services/scraperCreditBudget.js";
 
 const router = Router();
 
@@ -1087,6 +1088,7 @@ function productSyncState(entry: any) {
 }
 
 async function catalogCycleSummary(shopifyTotal: number, linked: number) {
+  const providerUsage = await getScraperApiAccountUsage();
   const cacheKey = `${shopifyTotal}:${linked}`;
   if (cycleSummaryCache && cycleSummaryCache.expiresAt > Date.now() && cycleSummaryCache.key === cacheKey) {
     return cycleSummaryCache.value;
@@ -1145,6 +1147,8 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     ratePerHour,
     estimatedHoursRemaining: ratePerHour > 0 ? Math.round((remaining / ratePerHour) * 10) / 10 : null,
     scraperApi: {
+      providerCycleCreditsUsed: providerUsage?.creditsUsed ?? null,
+      providerCycleCreditLimit: providerUsage?.creditLimit ?? null,
       estimatedProviderCredits24h,
       creditsUsed24h: estimatedProviderCredits24h,
       dailyLimit: Math.max(0, Number(process.env.SCRAPERAPI_DAILY_CREDIT_LIMIT || 0)),

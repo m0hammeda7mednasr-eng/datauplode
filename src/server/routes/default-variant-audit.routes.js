@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db.js";
 import { ShopifyService } from "../services/shopify.js";
+import { getScraperApiAccountUsage } from "../services/scraperCreditBudget.js";
 
 const router = Router();
 const CACHE_MS = 90_000;
@@ -230,6 +231,7 @@ function parsedDetails(value) {
 }
 
 async function buildRuntimeStatus() {
+  const providerUsage = await getScraperApiAccountUsage();
   const now = new Date();
   const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const startUtcDay = new Date(now);
@@ -303,6 +305,8 @@ async function buildRuntimeStatus() {
       failureRetryMinutes: Math.max(0, Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 0)),
     },
     credits: {
+      providerCycleUsed: providerUsage?.creditsUsed ?? null,
+      providerCycleLimit: providerUsage?.creditLimit ?? null,
       usedToday: creditsUsedToday,
       estimatedProviderUsedToday: creditsUsedToday,
       dailyLimit,
