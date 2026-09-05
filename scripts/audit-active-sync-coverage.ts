@@ -7,7 +7,7 @@ type CoverageRow = {
 };
 
 async function main() {
-  const [rows, cacheStatuses] = await Promise.all([
+  const [rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin] = await Promise.all([
     prisma.$queryRawUnsafe<CoverageRow[]>(`
     SELECT
       CASE
@@ -31,10 +31,49 @@ async function main() {
       GROUP BY "matchStatus"
       ORDER BY "matchStatus"
     `),
+    prisma.$queryRawUnsafe<Array<{ count: number; samples: string[] }>>(`
+      SELECT
+        COUNT(*)::int AS count,
+        COALESCE((ARRAY_AGG(c."shopifyId" ORDER BY c."shopifyId"))[1:5], ARRAY[]::text[]) AS samples
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" legacy
+        ON legacy."shopifyId" = REGEXP_REPLACE(c."shopifyId", '^.*/', '')
+      LEFT JOIN "ShopifyProduct" exact ON exact."shopifyId" = c."shopifyId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND exact."id" IS NULL
+    `),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT COALESCE(c."matchMethod", 'none') AS bucket, COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      LEFT JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND sp."id" IS NULL
+      GROUP BY COALESCE(c."matchMethod", 'none')
+      ORDER BY count DESC, bucket
+    `),
+    prisma.$queryRawUnsafe<CoverageRow[]>(`
+      SELECT
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM "AuditLog" a
+            WHERE a."sourceProductId" = s."id"
+              AND a."action" IN ('ASSISTED_PRODUCT_LEVEL_LINK', 'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV')
+          ) THEN 'verified_link_pending_catalog'
+          ELSE 'other_paused_or_disabled'
+        END AS bucket,
+        COUNT(*)::int AS count
+      FROM "ShopifyCatalogIndexV2" c
+      JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      WHERE UPPER(COALESCE(c."status", '')) = 'ACTIVE'
+        AND (sp."syncEnabled" = FALSE OR s."syncStatus" <> 'active')
+      GROUP BY 1
+      ORDER BY count DESC, bucket
+    `),
   ]);
 
   const total = rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
-  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), total, coverage: rows, cacheStatuses }, null, 2));
+  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), total, coverage: rows, cacheStatuses, legacyNumericLinks, missingByMethod, inactiveByOrigin }, null, 2));
 }
 
 main()

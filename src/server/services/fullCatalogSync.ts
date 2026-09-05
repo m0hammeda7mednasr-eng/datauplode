@@ -320,7 +320,14 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
 
     await tx.shopifyProduct.update({
       where: { id: product.shopifyProduct!.id },
-      data: { status: "active", handle: verified.handle, price: Number(variants[0].price) },
+      data: {
+        status: "active",
+        handle: verified.handle,
+        price: Number(variants[0].price),
+        syncEnabled: true,
+        syncPrice: true,
+        syncInventory: true,
+      },
     });
     await tx.manualReviewItem.updateMany({
       where: { sourceProductId, status: "pending" },

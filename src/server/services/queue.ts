@@ -20,6 +20,7 @@ const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_
 const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
 const FULL_CATALOG_DEFAULT_VARIANTS_ONLY = process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY === 'true';
+const FULL_CATALOG_INCLUDE_VERIFIED_PENDING = process.env.SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING === 'true';
 const FULL_CATALOG_TARGET_DOMAINS = String(
   process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "centrepointstores.com,next.ae",
 )
@@ -2035,8 +2036,22 @@ export class QueueService {
           FROM "SourceProduct" s
           JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
           LEFT JOIN "SourceVariant" sv ON sv."sourceProductId"=s."id"
-          WHERE s."syncStatus" <> 'paused'
-            AND sp."syncEnabled"=TRUE
+          WHERE (
+              (s."syncStatus" <> 'paused' AND sp."syncEnabled"=TRUE)
+              OR (
+                ${FULL_CATALOG_INCLUDE_VERIFIED_PENDING ? 'TRUE' : 'FALSE'}
+                AND LOWER(sp."status")='active'
+                AND (s."syncStatus"='paused' OR sp."syncEnabled"=FALSE)
+                AND EXISTS (
+                  SELECT 1 FROM "AuditLog" verified_link
+                  WHERE verified_link."sourceProductId"=s."id"
+                    AND verified_link."action" IN (
+                      'ASSISTED_PRODUCT_LEVEL_LINK',
+                      'LINK_EXISTING_SHOPIFY_CATALOG_REFERENCE_CSV'
+                    )
+                )
+              )
+            )
             AND s."raw" LIKE '%sheetPriceMultiplier%'
             AND (${FULL_CATALOG_TARGET_DOMAINS.map((domain) => `LOWER(s."url") LIKE '%${domain}%'`).join(' OR ')})
             AND NOT EXISTS (
@@ -2053,7 +2068,7 @@ export class QueueService {
             )
           GROUP BY s."id", s."lastScrapedAt"
           HAVING COUNT(sv."id") <= 1
-          ORDER BY EXISTS (
+          ORDER BY (s."syncStatus"='paused' OR sp."syncEnabled"=FALSE) DESC, EXISTS (
             SELECT 1 FROM "ManualReviewItem" mr
             WHERE mr."sourceProductId"=s."id" AND mr."status"='pending'
           ) DESC, s."lastScrapedAt" ASC
