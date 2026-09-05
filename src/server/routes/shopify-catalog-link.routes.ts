@@ -997,13 +997,12 @@ async function knownShopifyCatalogTotal(indexedTotal: number) {
     take: 25,
     select: { result: true },
   });
-  return jobs.reduce((known, job) => {
+  for (const job of jobs) {
     const result = jobResult(job);
-    return Math.max(
-      known,
-      Number(result.activeProductsExpected || 0),
-    );
-  }, indexedTotal);
+    const expected = Number(result.activeProductsExpected || 0);
+    if (expected > 0) return Math.max(indexedTotal, expected);
+  }
+  return indexedTotal;
 }
 
 async function dbCounts() {

@@ -25,6 +25,7 @@ metadata.json
 import-next-verify.png
 local-dev-screenshot.png
 log.txt
+reports/draft-unlinked-shopify-*.json
 
 # Local generated deployment notes (may contain real secrets)
 BACKEND-API-DEPLOYMENT.md
