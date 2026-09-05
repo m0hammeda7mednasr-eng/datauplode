@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
   ChevronLeft,
@@ -53,6 +54,32 @@ type AuditResponse = {
     issueType: Record<string, number>;
     difficulty: Record<string, number>;
     repairStatus: Record<string, number>;
+  };
+  operations?: {
+    worker: {
+      enabled: boolean;
+      defaultVariantsOnly: boolean;
+      targetDomains: string[];
+      batchSize: number;
+      intervalMinutes: number;
+      failureRetryMinutes: number;
+    };
+    credits: { usedToday: number; dailyLimit: number; remainingToday: number | null };
+    last24h: { verified: number; failed: number; skipped: number };
+    latestJob: null | {
+      id: string;
+      status: string;
+      createdAt: string;
+      completedAt: string | null;
+      runningSeconds: number;
+      stalled: boolean;
+      selected: number;
+      completed: number;
+      failed: number;
+      readbackVerified: number;
+    };
+    sources: Array<{ domain: string; verified: number; failed: number; skipped: number; successRate: number | null }>;
+    generatedAt: string;
   };
   vendors: string[];
   totalFiltered: number;
@@ -194,6 +221,15 @@ export default function DefaultVariants() {
     );
   }
 
+  const operations: NonNullable<AuditResponse['operations']> = data.operations || {
+    worker: { enabled: false, defaultVariantsOnly: false, targetDomains: [], batchSize: 0, intervalMinutes: 0, failureRetryMinutes: 0 },
+    credits: { usedToday: 0, dailyLimit: 0, remainingToday: null },
+    last24h: { verified: 0, failed: 0, skipped: 0 },
+    latestJob: null,
+    sources: [],
+    generatedAt: data.generatedAt,
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -225,6 +261,57 @@ export default function DefaultVariants() {
         <StatCard label="Failed" value={statusTotal.failed} hint="Retry / fallback required" tone="danger" />
         <StatCard label="Needs Source" value={statusTotal.noSource} hint="Link source before writing" />
       </div>
+
+      <section className="border-y border-slate-200 bg-white py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Activity className={cn('h-5 w-5', operations.worker.enabled ? 'text-emerald-600' : 'text-slate-400')} />
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Catalog repair runtime</div>
+              <div className="text-xs text-slate-500">
+                {operations.worker.targetDomains.join(', ') || 'No target'} · {operations.worker.batchSize} per {operations.worker.intervalMinutes} min
+              </div>
+            </div>
+          </div>
+          <StatusBadge value={operations.latestJob?.stalled ? 'stalled' : operations.latestJob?.status || (operations.worker.enabled ? 'queued' : 'disabled')} />
+        </div>
+
+        <div className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div>
+            <div className="text-[11px] font-semibold uppercase text-slate-500">Verified · 24h</div>
+            <div className="mt-1 text-xl font-bold text-emerald-700">{operations.last24h.verified.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-semibold uppercase text-slate-500">Failed safely · 24h</div>
+            <div className="mt-1 text-xl font-bold text-rose-700">{operations.last24h.failed.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-semibold uppercase text-slate-500">ScraperAPI today</div>
+            <div className="mt-1 text-xl font-bold text-slate-900">
+              {operations.credits.usedToday.toLocaleString()} / {operations.credits.dailyLimit.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] font-semibold uppercase text-slate-500">Latest read-back</div>
+            <div className="mt-1 text-xl font-bold text-slate-900">
+              {(operations.latestJob?.readbackVerified || 0).toLocaleString()} / {(operations.latestJob?.selected || 0).toLocaleString()}
+            </div>
+          </div>
+        </div>
+
+        {operations.sources.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {operations.sources.slice(0, 8).map((source) => (
+              <div key={source.domain} className="flex items-center gap-2 border-l-2 border-slate-200 px-2 py-1 text-xs">
+                <span className="font-semibold text-slate-700">{source.domain}</span>
+                <span className="text-emerald-700">{source.verified} verified</span>
+                <span className="text-rose-700">{source.failed} failed</span>
+                {source.successRate !== null && <span className="text-slate-400">{source.successRate}%</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="grid gap-3 lg:grid-cols-4">
         {(['easy', 'medium', 'hard', 'review'] as const).map((level) => (

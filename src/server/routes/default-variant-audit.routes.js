@@ -39,10 +39,10 @@ function classifyDifficulty(sourceUrl) {
   const domain = domainOf(sourceUrl);
   if (!domain) return { difficulty: "review", reason: "No linked source URL yet" };
   if (domain.includes("next.ae") || domain.includes("nextdirect.com")) {
-    return { difficulty: "easy", reason: "Known direct source with deterministic product pages" };
+    return { difficulty: "medium", reason: "Known source with managed fallback; some pages return HTTP 403" };
   }
   if (domain.includes("centrepointstores.com")) {
-    return { difficulty: "medium", reason: "Known source; refresh can require richer page data" };
+    return { difficulty: "hard", reason: "Protected source; refresh can be slow or require a richer snapshot" };
   }
   if (domain.includes("marksandspencer") || domain.includes("hm.com") || domain.includes("mothercare")) {
     return { difficulty: "medium", reason: "Dynamic retailer source; fresh verification required" };
@@ -221,10 +221,119 @@ async function getRows(force = false) {
   return refreshPromise;
 }
 
+function parsedDetails(value) {
+  try {
+    return JSON.parse(value || "{}");
+  } catch {
+    return {};
+  }
+}
+
+async function buildRuntimeStatus() {
+  const now = new Date();
+  const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const startUtcDay = new Date(now);
+  startUtcDay.setUTCHours(0, 0, 0, 0);
+  const actions = [...REPAIR_ACTIONS, "SCRAPERAPI_CREDIT_RESERVED"];
+  const [latestJob, logs] = await Promise.all([
+    prisma.syncJob.findFirst({
+      where: { type: "SYNC_FULL_CATALOG_BATCH" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, status: true, createdAt: true, startedAt: true, completedAt: true, result: true },
+    }),
+    prisma.auditLog.findMany({
+      where: { action: { in: actions }, createdAt: { gte: since24h } },
+      select: {
+        action: true,
+        details: true,
+        createdAt: true,
+        sourceProduct: { select: { url: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10_000,
+    }),
+  ]);
+
+  const sourceMap = new Map();
+  let creditsUsedToday = 0;
+  let verified = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const log of logs) {
+    const details = parsedDetails(log.details);
+    if (log.action === "SCRAPERAPI_CREDIT_RESERVED") {
+      if (log.createdAt >= startUtcDay) creditsUsedToday += Math.max(0, Number(details.credits || 0));
+      continue;
+    }
+    const domain = domainOf(log.sourceProduct?.url) || "unknown";
+    const source = sourceMap.get(domain) || { domain, verified: 0, failed: 0, skipped: 0 };
+    if (log.action === "SYNC_PRODUCT_CATALOG_SET" && details.readbackVerified === true) {
+      verified += 1;
+      source.verified += 1;
+    } else if (log.action === "SYNC_PRODUCT_CATALOG_FAILED") {
+      failed += 1;
+      source.failed += 1;
+    } else if (log.action === "SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT") {
+      skipped += 1;
+      source.skipped += 1;
+    }
+    sourceMap.set(domain, source);
+  }
+
+  const latestResult = parsedDetails(latestJob?.result);
+  const startedAt = latestJob?.startedAt || latestJob?.createdAt;
+  const runningSeconds = latestJob?.status === "running" && startedAt
+    ? Math.max(0, Math.round((now.getTime() - startedAt.getTime()) / 1000))
+    : 0;
+  const dailyLimit = Math.max(0, Number(process.env.SCRAPERAPI_DAILY_CREDIT_LIMIT || 0));
+  const targetDomains = String(process.env.SYNC_FULL_CATALOG_TARGET_DOMAINS || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  return {
+    worker: {
+      enabled: String(process.env.SYNC_FULL_CATALOG_AUTOSTART || "").toLowerCase() === "true",
+      defaultVariantsOnly: String(process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY || "").toLowerCase() === "true",
+      targetDomains,
+      batchSize: Math.max(0, Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 0)),
+      intervalMinutes: Math.max(0, Number(process.env.SYNC_FULL_CATALOG_INTERVAL_MINUTES || 0)),
+      failureRetryMinutes: Math.max(0, Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 0)),
+    },
+    credits: {
+      usedToday: creditsUsedToday,
+      dailyLimit,
+      remainingToday: dailyLimit ? Math.max(0, dailyLimit - creditsUsedToday) : null,
+    },
+    last24h: { verified, failed, skipped },
+    latestJob: latestJob ? {
+      id: latestJob.id,
+      status: latestJob.status,
+      createdAt: latestJob.createdAt,
+      completedAt: latestJob.completedAt,
+      runningSeconds,
+      stalled: latestJob.status === "running" && runningSeconds > 8 * 60,
+      selected: Number(latestResult.selected || 0),
+      completed: Number(latestResult.completed || 0),
+      failed: Number(latestResult.failed || 0),
+      readbackVerified: Number(latestResult.readbackVerified || 0),
+    } : null,
+    sources: [...sourceMap.values()]
+      .map((source) => ({
+        ...source,
+        successRate: source.verified + source.failed > 0
+          ? Math.round((source.verified / (source.verified + source.failed)) * 100)
+          : null,
+      }))
+      .sort((left, right) => (right.verified + right.failed) - (left.verified + left.failed)),
+    generatedAt: now.toISOString(),
+  };
+}
+
 router.get("/shopify-catalog/default-variant-audit", async (req, res) => {
   try {
     const force = clean(req.query.refresh).toLowerCase() === "true";
-    const allRows = await getRows(force);
+    const [allRows, operations] = await Promise.all([getRows(force), buildRuntimeStatus()]);
     const search = clean(req.query.search).toLowerCase();
     const issueType = clean(req.query.issueType);
     const difficulty = clean(req.query.difficulty);
@@ -259,6 +368,7 @@ router.get("/shopify-catalog/default-variant-audit", async (req, res) => {
         difficulty: counts("difficulty"),
         repairStatus: counts("repairStatus"),
       },
+      operations,
       vendors: Array.from(new Set(allRows.map((row) => row.vendor))).sort((a, b) => a.localeCompare(b)),
       totalFiltered: filtered.length,
       offset,
