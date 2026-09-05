@@ -2,32 +2,20 @@ import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } f
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { 
-  LayoutDashboard, 
-  PlusCircle, 
-  Link as LinkIcon, 
+  LayoutDashboard,
   Settings, 
   RefreshCw, 
-  AlertCircle,
-  AlertTriangle, 
-  History, 
   DollarSign,
   PackageSearch,
-  Sheet
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
 // Pages - to be created
-import Dashboard from './pages/Dashboard';
-import ImportProduct from './pages/ImportProduct';
 import LinkedProducts from './pages/LinkedProducts';
-import DefaultVariants from './pages/DefaultVariants';
 import PricingRules from './pages/PricingRules';
-import SyncJobs from './pages/SyncJobs';
-import ManualReview from './pages/ManualReview';
 import SettingsPage from './pages/Settings';
 import ProductDetail from './pages/ProductDetail';
 import SourcesPage from './pages/SourcesPage';
-import ExcelSheetPage from './pages/ExcelSheetPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -97,14 +85,8 @@ function Sidebar() {
       </div>
 
       <nav className="flex-1 mt-4">
-        <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={location.pathname === '/'} />
-        <SidebarItem to="/import" icon={PlusCircle} label="Import Product" active={location.pathname === '/import'} />
-        <SidebarItem to="/excel-sheet" icon={Sheet} label="Excel Sheet" active={location.pathname === '/excel-sheet'} />
-        <SidebarItem to="/products" icon={LinkIcon} label="Linked Products" active={location.pathname === '/products'} />
-        <SidebarItem to="/default-variants" icon={AlertTriangle} label="Default Variants" active={location.pathname === '/default-variants'} />
-        <SidebarItem to="/review" icon={AlertCircle} label="Manual Review" active={location.pathname === '/review'} badge="12" />
+        <SidebarItem to="/products" icon={LayoutDashboard} label="Catalog Sync" active={location.pathname === '/' || location.pathname.startsWith('/products')} />
         <SidebarItem to="/pricing" icon={DollarSign} label="Pricing Rules" active={location.pathname === '/pricing'} />
-        <SidebarItem to="/sync-jobs" icon={History} label="Sync Jobs" active={location.pathname === '/sync-jobs'} />
       </nav>
 
       <div className="mb-4">
@@ -123,17 +105,17 @@ export default function App() {
           <Sidebar />
           <div className="flex-1 flex flex-col min-w-0">
             <Routes>
-              <Route path="/" element={<><TopBar breadcrumb="Dashboard" /><main className="flex-1 p-8 overflow-y-auto"><Dashboard /></main></>} />
-              <Route path="/import" element={<><TopBar breadcrumb="Import Product" /><main className="flex-1 p-8 overflow-y-auto"><ImportProduct /></main></>} />
-              <Route path="/excel-sheet" element={<><TopBar breadcrumb="Excel Sheet" /><main className="flex-1 p-8 overflow-y-auto"><ExcelSheetPage /></main></>} />
-              <Route path="/products" element={<><TopBar breadcrumb="Linked Products" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
-              <Route path="/default-variants" element={<><TopBar breadcrumb="Default Variants" /><main className="flex-1 p-8 overflow-y-auto"><DefaultVariants /></main></>} />
+              <Route path="/" element={<Navigate to="/products" replace />} />
+              <Route path="/products" element={<><TopBar breadcrumb="Catalog Sync" /><main className="flex-1 p-8 overflow-y-auto"><LinkedProducts /></main></>} />
               <Route path="/products/:id" element={<><TopBar breadcrumb="Product Details" /><main className="flex-1 p-8 overflow-y-auto"><ProductDetail /></main></>} />
               <Route path="/pricing" element={<><TopBar breadcrumb="Pricing Rules" /><main className="flex-1 p-8 overflow-y-auto"><PricingRules /></main></>} />
-              <Route path="/sync-jobs" element={<><TopBar breadcrumb="Sync Jobs" /><main className="flex-1 p-8 overflow-y-auto"><SyncJobs /></main></>} />
-              <Route path="/review" element={<><TopBar breadcrumb="Manual Review" /><main className="flex-1 p-8 overflow-y-auto"><ManualReview /></main></>} />
               <Route path="/settings" element={<><TopBar breadcrumb="Settings" /><main className="flex-1 p-8 overflow-y-auto"><SettingsPage /></main></>} />
               <Route path="/sources" element={<><TopBar breadcrumb="Sources" /><main className="flex-1 p-8 overflow-y-auto"><SourcesPage /></main></>} />
+              <Route path="/import" element={<Navigate to="/products" replace />} />
+              <Route path="/excel-sheet" element={<Navigate to="/products" replace />} />
+              <Route path="/default-variants" element={<Navigate to="/products" replace />} />
+              <Route path="/sync-jobs" element={<Navigate to="/products" replace />} />
+              <Route path="/review" element={<Navigate to="/products" replace />} />
               <Route path="/scraper/*" element={<Navigate to="/" replace />} />
               <Route path="/products/review/*" element={<Navigate to="/" replace />} />
             </Routes>

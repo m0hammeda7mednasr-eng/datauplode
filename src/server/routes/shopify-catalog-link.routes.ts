@@ -1014,6 +1014,145 @@ async function dbCounts() {
   return { shopifyTotal: linked, linked, activeSync, matchedReady: 0, needsLink: 0, needsReview: 0, pausedOrLinked: linked - activeSync };
 }
 
+const PRODUCT_SYNC_ACTIONS = [
+  "LINK_EXISTING_SHOPIFY_CATALOG_INDEX_EXACT",
+  "SYNC_PRODUCT_CATALOG_SET",
+  "SYNC_PRODUCT_CATALOG_FAILED",
+  "SYNC_PRODUCT_CATALOG_SKIPPED_SINGLE_VARIANT",
+  "SYNC_PRICE_STOCK_ONLY",
+  "SYNC_PRICE_STOCK_FAILED",
+  "SCRAPERAPI_CREDIT_RESERVED",
+] as const;
+
+let cycleSummaryCache: { expiresAt: number; key: string; value: any } | null = null;
+
+function auditDetails(value: unknown) {
+  if (!value || typeof value !== "string") return {} as Record<string, any>;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {} as Record<string, any>;
+  }
+}
+
+function productSyncState(entry: any) {
+  const logs = Array.isArray(entry?.sourceProduct?.auditLogs) ? entry.sourceProduct.auditLogs : [];
+  const catalogSuccess = logs.find((log: any) => log.action === "SYNC_PRODUCT_CATALOG_SET" && auditDetails(log.details).readbackVerified === true);
+  const priceStockSuccess = logs.find((log: any) => log.action === "SYNC_PRICE_STOCK_ONLY" && auditDetails(log.details).readbackVerified === true);
+  const lastFailure = logs.find((log: any) => /FAILED$/.test(String(log.action || "")));
+  const catalogFailure = logs.find((log: any) => log.action === "SYNC_PRODUCT_CATALOG_FAILED");
+  const priceStockFailure = logs.find((log: any) => log.action === "SYNC_PRICE_STOCK_FAILED");
+  const lastSuccess = [catalogSuccess, priceStockSuccess]
+    .filter(Boolean)
+    .sort((left: any, right: any) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
+  const dbVariants = Array.isArray(entry?.variants) ? entry.variants : [];
+  const sourceVariants = Array.isArray(entry?.sourceProduct?.variants) ? entry.sourceProduct.variants : [];
+  const variantsCaptured = Math.max(dbVariants.length, sourceVariants.length);
+  const catalogFailedAfterSuccess = Boolean(catalogFailure && (!catalogSuccess || new Date(catalogFailure.createdAt) > new Date(catalogSuccess.createdAt)));
+  const latestPriceStockSuccess = [catalogSuccess, priceStockSuccess]
+    .filter(Boolean)
+    .sort((left: any, right: any) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
+  const priceStockFailedAfterSuccess = Boolean(priceStockFailure && (!latestPriceStockSuccess || new Date(priceStockFailure.createdAt) > new Date(latestPriceStockSuccess.createdAt)));
+  const variantStatus = catalogFailedAfterSuccess ? "failed" : catalogSuccess ? "verified" : "pending";
+  const priceStockStatus = priceStockFailedAfterSuccess ? "failed" : latestPriceStockSuccess ? "verified" : "pending";
+  const productLogs = logs.filter((log: any) => log.action !== "SCRAPERAPI_CREDIT_RESERVED");
+  const lastAttempt = productLogs[0] || null;
+  const details = auditDetails(lastSuccess?.details);
+  const creditsUsed = logs
+    .filter((log: any) => log.action === "SCRAPERAPI_CREDIT_RESERVED")
+    .reduce((sum: number, log: any) => sum + Math.max(0, Number(auditDetails(log.details).credits || 0)), 0);
+
+  return {
+    mapping: { status: "verified", checkedAt: entry.createdAt },
+    variants: {
+      status: variantStatus,
+      checkedAt: catalogSuccess?.createdAt || null,
+      count: variantsCaptured,
+    },
+    price: {
+      status: entry.syncPrice === false ? "disabled" : priceStockStatus,
+      checkedAt: lastSuccess?.createdAt || null,
+    },
+    stock: {
+      status: entry.syncInventory === false ? "disabled" : priceStockStatus,
+      checkedAt: lastSuccess?.createdAt || null,
+    },
+    fullyVerified: variantStatus === "verified" && (entry.syncPrice === false || priceStockStatus === "verified") && (entry.syncInventory === false || priceStockStatus === "verified"),
+    lastSuccessAt: lastSuccess?.createdAt || null,
+    lastAttemptAt: lastAttempt?.createdAt || entry.sourceProduct?.lastScrapedAt || null,
+    lastFailure: lastFailure ? clean(auditDetails(lastFailure.details).error || lastFailure.action) : null,
+    durationMs: Number(details.durationMs || 0) || null,
+    creditsUsed: creditsUsed || Number(details.scraperApiCreditsUsed || details.creditsUsed || 0) || 0,
+  };
+}
+
+async function catalogCycleSummary(shopifyTotal: number, linked: number) {
+  const cacheKey = `${shopifyTotal}:${linked}`;
+  if (cycleSummaryCache && cycleSummaryCache.expiresAt > Date.now() && cycleSummaryCache.key === cacheKey) {
+    return cycleSummaryCache.value;
+  }
+  const [coverageRows, latestWorker, creditLogs] = await Promise.all([
+    prisma.$queryRawUnsafe<any[]>(`
+      SELECT
+        COUNT(*) FILTER (WHERE progress."variantVerified")::int AS "variantVerified",
+        COUNT(*) FILTER (WHERE progress."priceStockVerified")::int AS "priceStockVerified",
+        COUNT(*) FILTER (WHERE progress."variantVerified" AND progress."priceStockVerified")::int AS "fullyVerified",
+        MIN(progress."firstSuccessAt") AS "startedAt"
+      FROM (
+        SELECT
+          a."sourceProductId",
+          BOOL_OR(a."action"='SYNC_PRODUCT_CATALOG_SET') AS "variantVerified",
+          BOOL_OR(a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockVerified",
+          MIN(a."createdAt") AS "firstSuccessAt"
+        FROM "AuditLog" a
+        INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=a."sourceProductId"
+        WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
+        GROUP BY a."sourceProductId"
+      ) progress
+    `),
+    prisma.syncJob.findFirst({
+      where: { type: { in: ["SYNC_FULL_CATALOG_BATCH", "SYNC_PRICE_STOCK_BATCH"] } },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, type: true, status: true, createdAt: true, startedAt: true, completedAt: true, result: true },
+    }),
+    prisma.auditLog.findMany({
+      where: { action: "SCRAPERAPI_CREDIT_RESERVED", createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      select: { details: true, createdAt: true },
+      take: 20_000,
+    }),
+  ]);
+  const coverage = coverageRows[0] || {};
+  const credits24h = creditLogs.reduce((sum, log) => sum + Math.max(0, Number(auditDetails(log.details).credits || 0)), 0);
+  const verified = Math.min(linked, Number(coverage.fullyVerified || 0));
+  const startedAt = coverage.startedAt ? new Date(coverage.startedAt) : null;
+  const elapsedMs = startedAt ? Math.max(0, Date.now() - startedAt.getTime()) : 0;
+  const ratePerHour = elapsedMs > 0 ? Math.round((verified / elapsedMs) * 3_600_000 * 10) / 10 : 0;
+  const remaining = Math.max(0, shopifyTotal - verified);
+  const value = {
+    total: shopifyTotal,
+    linked,
+    unlinked: Math.max(0, shopifyTotal - linked),
+    variantsVerified: Math.min(linked, Number(coverage.variantVerified || 0)),
+    priceStockVerified: Math.min(linked, Number(coverage.priceStockVerified || 0)),
+    fullyVerified: verified,
+    remaining,
+    completionPercent: shopifyTotal ? Math.round((verified / shopifyTotal) * 1000) / 10 : 0,
+    startedAt,
+    elapsedSeconds: Math.round(elapsedMs / 1000),
+    ratePerHour,
+    estimatedHoursRemaining: ratePerHour > 0 ? Math.round((remaining / ratePerHour) * 10) / 10 : null,
+    scraperApi: {
+      creditsUsed24h: credits24h,
+      dailyLimit: Math.max(0, Number(process.env.SCRAPERAPI_DAILY_CREDIT_LIMIT || 0)),
+    },
+    latestWorker: latestWorker ? { ...latestWorker, result: auditDetails(latestWorker.result) } : null,
+    generatedAt: new Date().toISOString(),
+  };
+  cycleSummaryCache = { key: cacheKey, value, expiresAt: Date.now() + 30_000 };
+  return value;
+}
+
 async function dbOnlyResponse(search: string, status: string, offset: number, limit: number) {
   const activeFilter = status === "active" ? { syncEnabled: true, sourceProduct: { syncStatus: "active" } } : {};
   const searchFilter = search ? {
@@ -1048,8 +1187,15 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
       take: limit,
       orderBy: { updatedAt: "desc" },
       include: {
-        sourceProduct: { include: { supplier: true, images: { orderBy: { position: "asc" }, take: 1 }, variants: { take: 20 } } },
-        variants: { take: 20 },
+        sourceProduct: {
+          include: {
+            supplier: true,
+            images: { orderBy: { position: "asc" }, take: 1 },
+            variants: { orderBy: { createdAt: "asc" }, take: 100, include: { shopifyVariant: true } },
+            auditLogs: { where: { action: { in: [...PRODUCT_SYNC_ACTIONS] } }, orderBy: { createdAt: "desc" }, take: 25 },
+          },
+        },
+        variants: { orderBy: { createdAt: "asc" }, take: 100 },
       },
     }),
     prisma.shopifyConnection.findFirst({ where: { isConnected: true }, select: { shopDomain: true } }),
@@ -1058,6 +1204,7 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
     const raw = parseJson(entry.sourceProduct.raw);
     const meta = raw.import && typeof raw.import === "object" ? raw.import : {};
     const active = entry.syncEnabled && entry.sourceProduct.syncStatus === "active";
+    const syncChecks = productSyncState(entry);
     return {
       key: entry.shopifyId,
       sourceProductId: entry.sourceProduct.id,
@@ -1091,20 +1238,31 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
       },
       reason: null,
       evidence: ["database"],
+      syncChecks,
+      variants: entry.sourceProduct.variants.map((variant) => ({
+        sku: variant.sku,
+        color: variant.color,
+        size: variant.size,
+        available: variant.available,
+        stockStatus: variant.stockStatus,
+        price: variant.shopifyVariant?.price ?? variant.price,
+      })),
     };
   });
+  const counts = await dbCounts();
   return {
     success: true,
     sourceOfTruth: "shopify_database_connection",
     degraded: true,
     shopDomain: connection?.shopDomain || undefined,
-    counts: await dbCounts(),
+    counts,
     filteredTotal: total,
     offset,
     limit,
     hasMore: offset + items.length < total,
     items,
     latestJob: await latestCatalogJob(),
+    cycle: await catalogCycleSummary(counts.shopifyTotal, counts.linked),
     scan: { mode: "database_first", message: "Shopify indexing continues in the background; existing mappings are served directly from the database." },
   };
 }
@@ -1148,8 +1306,15 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
     const linked = ids.length ? await prisma.shopifyProduct.findMany({
       where: { shopifyId: { in: ids } },
       include: {
-        sourceProduct: { include: { supplier: true, images: { orderBy: { position: "asc" }, take: 1 }, variants: { take: 20 } } },
-        variants: { take: 20 },
+        sourceProduct: {
+          include: {
+            supplier: true,
+            images: { orderBy: { position: "asc" }, take: 1 },
+            variants: { orderBy: { createdAt: "asc" }, take: 100, include: { shopifyVariant: true } },
+            auditLogs: { where: { action: { in: [...PRODUCT_SYNC_ACTIONS] } }, orderBy: { createdAt: "desc" }, take: 25 },
+          },
+        },
+        variants: { orderBy: { createdAt: "asc" }, take: 100 },
       },
     }) : [];
     const linkedById = new Map(linked.map((entry) => [entry.shopifyId, entry]));
@@ -1159,6 +1324,7 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
         const raw = parseJson(dbLink.sourceProduct.raw);
         const meta = raw.import && typeof raw.import === "object" ? raw.import : {};
         const active = dbLink.syncEnabled && dbLink.sourceProduct.syncStatus === "active";
+        const syncChecks = productSyncState(dbLink);
         return {
           key: row.shopifyId,
           sourceProductId: dbLink.sourceProduct.id,
@@ -1192,6 +1358,15 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
           },
           reason: null,
           evidence: ["database"],
+          syncChecks,
+          variants: dbLink.sourceProduct.variants.map((variant) => ({
+            sku: variant.sku,
+            color: variant.color,
+            size: variant.size,
+            available: variant.available,
+            stockStatus: variant.stockStatus,
+            price: variant.shopifyVariant?.price ?? variant.price,
+          })),
         };
       }
       return {
@@ -1227,6 +1402,19 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
         } : null,
         reason: row.reason || null,
         evidence: parseJson(row.evidence),
+        syncChecks: {
+          mapping: { status: row.matchStatus === "matched" ? "ready" : "pending", checkedAt: row.updatedAt || null },
+          variants: { status: "blocked", checkedAt: null, count: 0 },
+          price: { status: "blocked", checkedAt: null },
+          stock: { status: "blocked", checkedAt: null },
+          fullyVerified: false,
+          lastSuccessAt: null,
+          lastAttemptAt: row.updatedAt || null,
+          lastFailure: row.reason || null,
+          durationMs: null,
+          creditsUsed: 0,
+        },
+        variants: [],
       };
     });
     const grouped = await prisma.$queryRawUnsafe<any[]>(`SELECT "matchStatus", COUNT(*)::int AS count FROM "${CACHE_TABLE}" WHERE UPPER(COALESCE("status", '')) = 'ACTIVE' GROUP BY "matchStatus"`);
@@ -1273,6 +1461,7 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
         void startBackgroundJob(recoverExactLink).catch((error) => console.error("[shopify-catalog] automatic catalog job start failed:", error));
       }, 1000);
     }
+    const cycle = await catalogCycleSummary(counts.shopifyTotal, counts.linked);
     return res.json({
       success: true,
       sourceOfTruth: "shopify_database_connection",
@@ -1284,6 +1473,7 @@ router.get("/shopify-catalog/link-state", async (req, res) => {
       hasMore: offset + items.length < filteredTotal,
       items,
       latestJob,
+      cycle,
       scan: {
         mode: "database_first_background_shopify_index",
         shopifyProductsRead: Number(latestJob?.result?.shopifyProductsRead || counts.shopifyTotal),
