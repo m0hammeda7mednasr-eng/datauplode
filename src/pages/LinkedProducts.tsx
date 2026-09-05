@@ -58,7 +58,7 @@ type CatalogResponse = {
     elapsedSeconds: number;
     ratePerHour: number;
     estimatedHoursRemaining?: number | null;
-    scraperApi: { creditsUsed24h: number; dailyLimit: number };
+    scraperApi: { creditsUsed24h: number; estimatedProviderCredits24h?: number; dailyLimit: number };
     latestWorker?: any;
     generatedAt: string;
   };
@@ -316,18 +316,19 @@ function CatalogCycle({ cycle }: { cycle: NonNullable<CatalogResponse['cycle']> 
     { label: 'Fully verified', value: cycle.fullyVerified, icon: CheckCircle2, tone: 'text-teal-700 bg-teal-50 border-teal-200' },
   ];
   const worker = cycle.latestWorker;
-  const workerRunning = ['pending', 'running'].includes(String(worker?.status || ''));
+  const workerRunning = cycle.remaining > 0;
+  const workerLabel = cycle.remaining === 0 ? 'completed' : 'running 24/7';
   return <section className="border-y border-slate-200 bg-white py-5">
     <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
       <div>
-        <div className="flex items-center gap-2"><h2 className="text-base font-black text-slate-900">First catalog verification cycle</h2><span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black uppercase', workerRunning ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600')}>{workerRunning && <Loader2 className="h-3 w-3 animate-spin" />}{worker?.status || 'idle'}</span></div>
+        <div className="flex items-center gap-2"><h2 className="text-base font-black text-slate-900">First catalog verification cycle</h2><span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black uppercase', workerRunning ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600')}>{workerRunning && <Loader2 className="h-3 w-3 animate-spin" />}{workerLabel}</span></div>
         <p className="mt-1 text-xs font-semibold text-slate-500">{cycle.fullyVerified.toLocaleString()} verified end to end · {cycle.remaining.toLocaleString()} remaining from {cycle.total.toLocaleString()} active Shopify products</p>
       </div>
       <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs font-bold text-slate-600">
         <span className="inline-flex items-center gap-1.5"><Clock3 className="h-4 w-4 text-slate-400" />{formatDuration(cycle.elapsedSeconds)} elapsed</span>
         <span>{cycle.ratePerHour.toLocaleString()} products/hour</span>
         <span>{cycle.estimatedHoursRemaining == null ? 'ETA calculating' : `${cycle.estimatedHoursRemaining.toLocaleString()}h ETA`}</span>
-        <span className="inline-flex items-center gap-1.5"><Coins className="h-4 w-4 text-amber-500" />{cycle.scraperApi.creditsUsed24h.toLocaleString()} / {cycle.scraperApi.dailyLimit.toLocaleString()} credits (24h)</span>
+        <span className="inline-flex items-center gap-1.5"><Coins className="h-4 w-4 text-amber-500" />~{(cycle.scraperApi.estimatedProviderCredits24h ?? cycle.scraperApi.creditsUsed24h).toLocaleString()} / {cycle.scraperApi.dailyLimit.toLocaleString()} estimated credits (24h)</span>
       </div>
     </div>
     <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.max(0, Math.min(100, cycle.completionPercent))}%` }} /></div>

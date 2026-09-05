@@ -615,7 +615,13 @@ async function fetchHtmlViaScraperApi(
     return params;
   };
 
-  const requestHtml = async (apiKey: string, params: URLSearchParams) => {
+  const requestHtml = async (
+    apiKey: string,
+    params: URLSearchParams,
+    credits: number,
+  ) => {
+    await reserveScraperApiCredits(url, credits);
+    noteProviderUsage("scraperapi", credits);
     const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
       timeout: 90000,
       responseType: "text",
@@ -666,8 +672,15 @@ async function fetchHtmlViaScraperApi(
   for (let keyIndex = 0; keyIndex < apiKeys.length; keyIndex += 1) {
     const apiKey = apiKeys[keyIndex];
     for (const attempt of attempts) {
+      const credits = attempt.ultraPremium
+        ? (attempt.render ? 75 : 30)
+        : attempt.premium && attempt.render
+          ? 25
+          : attempt.premium || attempt.render
+            ? 10
+            : 1;
       try {
-        return await requestHtml(apiKey, buildParams(apiKey, attempt));
+        return await requestHtml(apiKey, buildParams(apiKey, attempt), credits);
       } catch (error: any) {
         errors.push(`key ${keyIndex + 1}: ${error?.message || String(error)}`);
       }
@@ -730,15 +743,6 @@ async function fetchHtmlViaManagedBypassProvider(
   options: ManagedBypassOptions,
 ): Promise<string> {
   if (provider === "scraperapi") {
-    const estimatedCredits = options.ultraPremium
-      ? (options.jsRender ? 75 : 30)
-      : options.premium && options.jsRender
-        ? 25
-        : options.premium || options.jsRender
-          ? 10
-          : 1;
-    await reserveScraperApiCredits(url, estimatedCredits);
-    noteProviderUsage(provider, estimatedCredits);
     return fetchHtmlViaScraperApi(url, options);
   }
   noteProviderUsage(provider);

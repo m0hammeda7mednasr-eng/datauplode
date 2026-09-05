@@ -262,7 +262,9 @@ async function buildRuntimeStatus() {
   for (const log of logs) {
     const details = parsedDetails(log.details);
     if (log.action === "SCRAPERAPI_CREDIT_RESERVED") {
-      if (log.createdAt >= startUtcDay) creditsUsedToday += Math.max(0, Number(details.credits || 0));
+      if (log.createdAt >= startUtcDay) {
+        creditsUsedToday += Math.max(0, Number(details.requestedCredits || details.credits || 0));
+      }
       continue;
     }
     const domain = domainOf(log.sourceProduct?.url) || "unknown";
@@ -302,6 +304,7 @@ async function buildRuntimeStatus() {
     },
     credits: {
       usedToday: creditsUsedToday,
+      estimatedProviderUsedToday: creditsUsedToday,
       dailyLimit,
       remainingToday: dailyLimit ? Math.max(0, dailyLimit - creditsUsedToday) : null,
     },

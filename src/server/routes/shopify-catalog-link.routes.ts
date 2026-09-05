@@ -1122,7 +1122,10 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     }),
   ]);
   const coverage = coverageRows[0] || {};
-  const credits24h = creditLogs.reduce((sum, log) => sum + Math.max(0, Number(auditDetails(log.details).credits || 0)), 0);
+  const estimatedProviderCredits24h = creditLogs.reduce((sum, log) => {
+    const details = auditDetails(log.details);
+    return sum + Math.max(0, Number(details.requestedCredits || details.credits || 0));
+  }, 0);
   const verified = Math.min(linked, Number(coverage.fullyVerified || 0));
   const startedAt = coverage.startedAt ? new Date(coverage.startedAt) : null;
   const elapsedMs = startedAt ? Math.max(0, Date.now() - startedAt.getTime()) : 0;
@@ -1142,7 +1145,8 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     ratePerHour,
     estimatedHoursRemaining: ratePerHour > 0 ? Math.round((remaining / ratePerHour) * 10) / 10 : null,
     scraperApi: {
-      creditsUsed24h: credits24h,
+      estimatedProviderCredits24h,
+      creditsUsed24h: estimatedProviderCredits24h,
       dailyLimit: Math.max(0, Number(process.env.SCRAPERAPI_DAILY_CREDIT_LIMIT || 0)),
     },
     latestWorker: latestWorker ? { ...latestWorker, result: auditDetails(latestWorker.result) } : null,

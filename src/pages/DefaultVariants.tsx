@@ -64,7 +64,7 @@ type AuditResponse = {
       intervalMinutes: number;
       failureRetryMinutes: number;
     };
-    credits: { usedToday: number; dailyLimit: number; remainingToday: number | null };
+    credits: { usedToday: number; estimatedProviderUsedToday?: number; dailyLimit: number; remainingToday: number | null };
     last24h: { verified: number; failed: number; skipped: number };
     latestJob: null | {
       id: string;
@@ -286,7 +286,7 @@ export default function DefaultVariants() {
             <div className="mt-1 text-xl font-bold text-rose-700">{operations.last24h.failed.toLocaleString()}</div>
           </div>
           <div>
-            <div className="text-[11px] font-semibold uppercase text-slate-500">ScraperAPI today</div>
+            <div className="text-[11px] font-semibold uppercase text-slate-500">Estimated provider usage today</div>
             <div className="mt-1 text-xl font-bold text-slate-900">
               {operations.credits.usedToday.toLocaleString()} / {operations.credits.dailyLimit.toLocaleString()}
             </div>

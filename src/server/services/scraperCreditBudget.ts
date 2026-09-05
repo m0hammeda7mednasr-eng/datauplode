@@ -5,12 +5,6 @@ const DEFAULT_MONTHLY_OPERATIONAL_LIMIT = 80_000;
 const DEFAULT_BILLING_CYCLE_DAY = 3;
 const ADVISORY_LOCK_ID = 739_184_221;
 
-function envFlag(name: string, defaultValue = false) {
-  const value = String(process.env[name] || "").trim().toLowerCase();
-  if (!value) return defaultValue;
-  return ["1", "true", "yes", "on"].includes(value);
-}
-
 function positiveLimit(name: string, fallback = 0) {
   const value = Number(process.env[name] || fallback);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
@@ -39,7 +33,8 @@ function startOfUtcDay(now = new Date()) {
 
 function creditsFromDetails(details: string | null) {
   try {
-    const value = Number(JSON.parse(details || "{}").credits);
+    const parsed = JSON.parse(details || "{}");
+    const value = Number(parsed.requestedCredits || parsed.credits);
     return Number.isFinite(value) && value > 0 ? value : 0;
   } catch {
     return 0;
@@ -68,40 +63,6 @@ async function usedSince(client: any, createdAt: Date) {
   return total;
 }
 
-function configuredScraperApiKeyCount() {
-  const pooled = String(process.env.SCRAPERAPI_KEYS || "")
-    .split(/[\s,;]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const legacy = String(process.env.SCRAPERAPI_KEY || "").trim();
-  return Math.max(1, new Set(legacy ? [...pooled, legacy] : pooled).size || 1);
-}
-
-function envRequestCost() {
-  const render = envFlag("SCRAPERAPI_RENDER", false);
-  const premium = envFlag("SCRAPERAPI_PREMIUM", false);
-  const ultraPremium = envFlag("SCRAPERAPI_ULTRA_PREMIUM", false);
-
-  if (ultraPremium) return render ? 75 : 30;
-  if (premium && render) return 25;
-  if (premium || render) return 10;
-  return 1;
-}
-
-function defensivelyAccountedCredits(requestedCredits: number) {
-  const requested = Math.max(1, Math.floor(requestedCredits));
-  const effectiveProfileCost = Math.max(requested, envRequestCost());
-
-  // fetchHtmlViaScraperApi can retry a paid rendered/premium profile with a
-  // plain profile when the first 200 response is an unusable blocked page.
-  // ScraperAPI charges successful 200/404 responses, so reserve the possible
-  // extra plain response as well. With a key pool, the same sequence can be
-  // attempted on more than one key; account for the worst case so the 80k
-  // operational slice cannot eat into the 20k reserve.
-  const perKeyWorstCase = effectiveProfileCost + (effectiveProfileCost > 1 ? 1 : 0);
-  return perKeyWorstCase * configuredScraperApiKeyCount();
-}
-
 function defaultDailyLimit(monthlyLimit: number, now = new Date()) {
   if (!monthlyLimit) return 0;
   const { start, end } = billingCycleBounds(now);
@@ -121,7 +82,7 @@ export async function reserveScraperApiCredits(url: string, credits: number) {
   );
   const openingCycleUsage = positiveLimit("SCRAPERAPI_CYCLE_OPENING_USED_CREDITS", 0);
   const requested = Math.max(1, Math.floor(credits));
-  const accounted = defensivelyAccountedCredits(requested);
+  const accounted = requested;
   const { start: cycleStart, end: cycleEnd } = billingCycleBounds(now);
   const dayStart = startOfUtcDay(now);
 
@@ -156,6 +117,7 @@ export async function reserveScraperApiCredits(url: string, credits: number) {
         details: JSON.stringify({
           credits: accounted,
           requestedCredits: requested,
+          accountingVersion: 2,
           hostname,
           billingCycleStart: cycleStart.toISOString(),
           billingCycleEnd: cycleEnd.toISOString(),

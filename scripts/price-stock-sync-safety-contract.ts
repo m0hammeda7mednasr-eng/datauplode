@@ -28,7 +28,8 @@ requireContract(/^SYNC_PRICE_STOCK_MIN_AGE_MINUTES=1440$/m.test(railway), 'defau
 requireContract(queue.includes('isPriceStockTargetProduct(product)'), 'every product sync must enforce the two-sheet allowlist');
 requireContract(queue.includes('hasSheetRow && hasMultiplier && hasSku'), 'legacy sheet products must require row, multiplier, and SKU provenance');
 requireContract(queue.includes("action: 'SYNC_PRICE_STOCK_FAILED'"), 'failed supplier checks must be audited');
-requireContract(scraper.includes('reserveScraperApiCredits(url, estimatedCredits)'), 'ScraperAPI calls must reserve weighted credits');
+requireContract(scraper.includes('reserveScraperApiCredits(url, credits)'), 'each ScraperAPI attempt must reserve its actual profile credits');
+requireContract(scraper.includes('requestHtml(apiKey, buildParams(apiKey, attempt), credits)'), 'ScraperAPI retries must be accounted per attempted request');
 requireContract(budget.includes('SCRAPERAPI_MONTHLY_CREDIT_LIMIT'), 'ScraperAPI must support a durable monthly credit cap');
 requireContract(budget.includes('SCRAPERAPI_DAILY_CREDIT_LIMIT'), 'ScraperAPI must support a durable daily credit cap');
 requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked products must move behind the daily rolling queue');
