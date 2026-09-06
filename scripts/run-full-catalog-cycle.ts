@@ -6,6 +6,11 @@ import { syncFullProductCatalog } from "../src/server/services/fullCatalogSync.j
 import { getApprovedSheetMultiplier } from "../src/server/services/sheetMultiplier.js";
 
 function arg(name: string, fallback = "") {
+  const envName = `FULL_CATALOG_RUN_${name.replace(/-/g, "_").toUpperCase()}`;
+  if (process.env[envName]) return String(process.env[envName]);
+  const prefix = `--${name}=`;
+  const inline = process.argv.find((value) => value.startsWith(prefix));
+  if (inline) return inline.slice(prefix.length);
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 ? String(process.argv[index + 1] || "") : fallback;
 }
