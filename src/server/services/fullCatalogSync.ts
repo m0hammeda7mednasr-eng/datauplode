@@ -63,6 +63,50 @@ function filenameFor(url: string, index: number) {
   }
 }
 
+function optionValueForVariant(variant: NormalizedProduct["variants"][number], optionName: string) {
+  return clean(
+    variant.optionValues?.[optionName] ||
+    variant.optionValues?.[optionName.toLowerCase()] ||
+    (/colou?r/i.test(optionName) ? variant.color : variant.size) ||
+    "Default",
+  ).toLowerCase();
+}
+
+function dedupeVariantsByOptionValues(product: NormalizedProduct) {
+  const optionNames = product.options.map((option) => clean(option.name)).filter(Boolean);
+  if (optionNames.length === 0) return;
+
+  const seen = new Set<string>();
+  product.variants = product.variants.filter((variant) => {
+    const key = optionNames.map((optionName) => optionValueForVariant(variant, optionName)).join(" / ");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function optionValuesKey(optionValues: Array<{ optionName: string; name: string }>) {
+  return optionValues
+    .map((value) => `${clean(value.optionName).toLowerCase()}:${clean(value.name).toLowerCase()}`)
+    .join("|");
+}
+
+function selectedOptionsKey(selectedOptions: Array<{ name: string; value: string }>) {
+  return (selectedOptions || [])
+    .map((option) => `${clean(option.name).toLowerCase()}:${clean(option.value).toLowerCase()}`)
+    .join("|");
+}
+
+function uniqueOptionValues(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const normalized = clean(value).toLowerCase();
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
 function validateFreshProduct(product: NormalizedProduct, multiplier: number) {
   if (![22, 23, 24].includes(multiplier)) {
     throw new Error("Product has no approved sheet multiplier");
@@ -123,6 +167,7 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
     "Fresh source scrape timed out before Shopify mutation",
   );
   applyDeterministicDabSkus({ product: fresh, url: product.url, multiplier });
+  dedupeVariantsByOptionValues(fresh);
   validateFreshProduct(fresh, multiplier);
 
   const client = options.client || await ShopifyService.getClientFromDb(prisma);
@@ -153,13 +198,18 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   const productOptions = fresh.options.map((option, position) => ({
     name: clean(option.name),
     position: position + 1,
-    values: option.values.map((value) => ({ name: clean(value) })),
+    values: uniqueOptionValues(option.values).map((value) => ({ name: clean(value) })),
   }));
   if (
     productOptions.length === 0 ||
     productOptions.some((option) => !option.name || option.values.some((value) => !value.name))
   ) {
     throw new Error("Fresh source has invalid product options");
+  }
+  const existingByOptions = new Map<string, any>();
+  for (const variant of before.variants) {
+    const key = selectedOptionsKey(variant.selectedOptions || []);
+    if (key && !existingByOptions.has(key)) existingByOptions.set(key, variant);
   }
 
   const files = fresh.images.map((image, index) => ({
@@ -182,7 +232,7 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
       throw new Error(`Variant has an empty option value: ${variant.sku}`);
     }
     const sku = clean(variant.sku);
-    const existing: any = existingBySku.get(sku.toLowerCase());
+    const existing: any = existingBySku.get(sku.toLowerCase()) || existingByOptions.get(optionValuesKey(optionValues));
     const imageUrl = clean(variant.imageUrl || fresh.images[0]?.url);
     return {
       ...(existing?.id ? { id: existing.id } : {}),
