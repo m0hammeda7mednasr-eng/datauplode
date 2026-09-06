@@ -16,6 +16,15 @@ const PRICE_STOCK_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_PRICE_STOCK_IN
 const PRICE_STOCK_SYNC_BATCH_SIZE = Number(process.env.SYNC_PRICE_STOCK_BATCH_SIZE || 50);
 const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN_AGE_MINUTES || 1440);
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
+const PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS = Number(process.env.SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS || 120_000);
+const PRICE_STOCK_TARGET_DOMAINS = String(process.env.SYNC_PRICE_STOCK_TARGET_DOMAINS || '')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter((value) => /^[a-z0-9.-]+$/.test(value));
+const SYNC_JOB_WORKER_CONCURRENCY = Math.max(
+  1,
+  Math.min(10, Number(process.env.SYNC_JOB_WORKER_CONCURRENCY || 2) || 2),
+);
 const FULL_CATALOG_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_FULL_CATALOG_INTERVAL_MINUTES || 10);
 const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 5);
 const FULL_CATALOG_SELECTION_POOL_SIZE = Number(process.env.SYNC_FULL_CATALOG_SELECTION_POOL_SIZE || 50);
@@ -86,6 +95,13 @@ function fullCatalogDomainRank(url: string): number {
   const normalized = cleanOptionText(url).toLowerCase();
   const rank = FULL_CATALOG_FAST_LANE_DOMAINS.findIndex((domain) => normalized.includes(domain));
   return rank >= 0 ? rank : FULL_CATALOG_FAST_LANE_DOMAINS.length;
+}
+
+function priceStockDomainRank(url: string): number {
+  if (PRICE_STOCK_TARGET_DOMAINS.length === 0) return 0;
+  const normalized = cleanOptionText(url).toLowerCase();
+  const rank = PRICE_STOCK_TARGET_DOMAINS.findIndex((domain) => normalized.includes(domain));
+  return rank >= 0 ? rank : PRICE_STOCK_TARGET_DOMAINS.length;
 }
 
 function boundedFullCatalogPoolSize(take: number): number {
@@ -1002,8 +1018,23 @@ async function queueDbRetry<T>(
   throw lastError;
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export class QueueService {
-  private static queue = new PQueue({ concurrency: 2 });
+  private static queue = new PQueue({ concurrency: SYNC_JOB_WORKER_CONCURRENCY });
   private static inventoryMonitorStarted = false;
   private static inventoryMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private static priceStockMonitorStarted = false;
@@ -1767,11 +1798,20 @@ export class QueueService {
     // A successful full scrape is the proof that the supplier state is trustworthy.
     // Any network/parser failure aborts before Shopify is mutated.
     const freshProduct = normalizeFreshProductPrices(
-      await scraperService.scrape(product.url),
+      await withTimeout(
+        scraperService.scrape(product.url),
+        Number.isFinite(PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS) && PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS > 0
+          ? PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS
+          : 120_000,
+        'Price/stock source scrape timed out before Shopify mutation',
+      ),
       options,
     );
     if (!freshProduct.variants.length) {
       throw new Error('Supplier returned no variants; price/stock write was blocked');
+    }
+    if (freshProduct.raw?.nextSelectedSizeOnly && product.variants.length > 1) {
+      throw new Error('Next exposed only one selected size for a multi-variant product; price/stock write was blocked');
     }
 
     const client = await ShopifyService.getClientFromDb(prisma);
@@ -1959,6 +1999,11 @@ export class QueueService {
       where: {
         syncStatus: { not: 'paused' },
         lastScrapedAt: { lte: priceStockSyncCutoffDate() },
+        ...(PRICE_STOCK_TARGET_DOMAINS.length > 0 ? {
+          OR: PRICE_STOCK_TARGET_DOMAINS.map((domain) => ({
+            url: { contains: domain, mode: 'insensitive' as const },
+          })),
+        } : {}),
         shopifyProduct: {
           is: {
             syncEnabled: true,
@@ -1968,6 +2013,8 @@ export class QueueService {
       },
       select: {
         id: true,
+        url: true,
+        lastScrapedAt: true,
         raw: true,
         variants: { select: { sku: true, shopifyVariant: { select: { sku: true } } } },
       },
@@ -1999,6 +2046,11 @@ export class QueueService {
     const eligibleCandidates = candidates.filter(isPriceStockTargetProduct);
     const selected = eligibleCandidates
       .filter((product) => !recentlyAttempted.has(product.id))
+      .sort((left, right) => {
+        const domainDelta = priceStockDomainRank(left.url) - priceStockDomainRank(right.url);
+        if (domainDelta !== 0) return domainDelta;
+        return left.lastScrapedAt.getTime() - right.lastScrapedAt.getTime();
+      })
       .slice(0, take);
     let queued = 0;
     for (const product of selected) {

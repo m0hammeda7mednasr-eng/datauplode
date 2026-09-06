@@ -7849,16 +7849,14 @@ async function enrichNextProductWithReaderColorways(
     if (needsVariantRepair) {
       const inferredRepair = repairFlattenedNextVariantsFromTitle(product, url);
       if (inferredRepair) return inferredRepair;
-      throw new ScraperError(
-        "Next exposed only one selected size for a multi-size product. The product was stopped before Shopify sync because the complete regional size list could not be verified.",
-        {
-          code: "NEXT_VARIANT_STRUCTURE_UNSAFE",
-          status: 422,
-          supplier: "Next",
-          retryWithSnapshot: true,
-          details: [cleanText(error?.message || error)],
+      return normalizeProductOptionsAndVariants({
+        ...product,
+        raw: {
+          ...(product.raw || {}),
+          nextSelectedSizeOnly: true,
+          nextSelectedSizeOnlyReason: cleanText(error?.message || error),
         },
-      );
+      });
     }
     return product;
   }

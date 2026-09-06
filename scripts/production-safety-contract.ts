@@ -141,10 +141,19 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "full-catalog sync has an exact supplier allowlist",
-    /host === "www\.maxfashion\.com"/.test(fullCatalogSync) &&
-      /host === "www\.centrepointstores\.com"/.test(fullCatalogSync) &&
-      /host === "www\.next\.ae"/.test(fullCatalogSync) &&
-      /Only linked Max Fashion UAE, Centrepoint UAE, and Next UAE products/.test(fullCatalogSync),
+    /const supportedHosts = \[/.test(fullCatalogSync) &&
+      /"www\.maxfashion\.com"/.test(fullCatalogSync) &&
+      /"www\.centrepointstores\.com"/.test(fullCatalogSync) &&
+      /"www\.next\.ae"/.test(fullCatalogSync) &&
+      /"ae\.hm\.com"/.test(fullCatalogSync) &&
+      /"www\.mothercare\.ae"/.test(fullCatalogSync) &&
+      /"www\.lefties\.com"/.test(fullCatalogSync) &&
+      /"www\.marksandspencerme\.com"/.test(fullCatalogSync) &&
+      /"www\.marksandspencer\.ae"/.test(fullCatalogSync) &&
+      /"www\.zara\.com"/.test(fullCatalogSync) &&
+      /"www\.ae\.carters\.com"/.test(fullCatalogSync) &&
+      /"www\.adidas\.ae"/.test(fullCatalogSync) &&
+      /supportedHosts\.includes\(host\)/.test(fullCatalogSync),
   ],
   [
     "full-catalog rolling batch supports a configured domain subset",
@@ -161,7 +170,8 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "full-catalog batch has queue priority without increasing concurrency",
-    /new PQueue\(\{\s*concurrency:\s*2\s*\}\)/.test(queue) &&
+    /SYNC_JOB_WORKER_CONCURRENCY/.test(queue) &&
+      /Math\.min\(10,\s*Number\(process\.env\.SYNC_JOB_WORKER_CONCURRENCY/.test(queue) &&
       /typeHint\s*===\s*'SYNC_FULL_CATALOG_BATCH'\s*\?\s*100\s*:\s*0/.test(queue) &&
       /\{\s*priority\s*\}/.test(queue),
   ],

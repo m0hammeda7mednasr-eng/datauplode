@@ -142,6 +142,11 @@ function validateFreshProduct(product: NormalizedProduct, multiplier: number) {
   if (![22, 23, 24].includes(multiplier)) {
     throw new Error("Product has no approved sheet multiplier");
   }
+  if (product.raw?.nextSelectedSizeOnly) {
+    throw new Error(
+      "Next exposed only one selected size for a multi-size product. Full catalog sync was stopped before Shopify variant mutation.",
+    );
+  }
   if (
     product.currency !== "AED" ||
     product.price <= 1 ||
