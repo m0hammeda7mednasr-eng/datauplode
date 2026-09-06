@@ -107,6 +107,19 @@ function uniqueOptionValues(values: string[]) {
   });
 }
 
+function variantOptionValue(
+  variant: NormalizedProduct["variants"][number],
+  optionName: string,
+  fallbackValues: Array<{ name: string }> = [],
+) {
+  return clean(
+    variant.optionValues?.[optionName] ||
+    variant.optionValues?.[optionName.toLowerCase()] ||
+    (/colou?r/i.test(optionName) ? variant.color : variant.size) ||
+    (fallbackValues.length === 1 ? fallbackValues[0]?.name : ""),
+  );
+}
+
 function validateFreshProduct(product: NormalizedProduct, multiplier: number) {
   if (![22, 23, 24].includes(multiplier)) {
     throw new Error("Product has no approved sheet multiplier");
@@ -206,6 +219,12 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   ) {
     throw new Error("Fresh source has invalid product options");
   }
+  const completeFreshVariants = fresh.variants.filter((variant) =>
+    productOptions.every((option) => variantOptionValue(variant, option.name, option.values)),
+  );
+  if (completeFreshVariants.length === 0) {
+    throw new Error("Fresh source has no complete variants for its option set");
+  }
   const existingByOptions = new Map<string, any>();
   for (const variant of before.variants) {
     const key = selectedOptionsKey(variant.selectedOptions || []);
@@ -218,15 +237,10 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
     filename: filenameFor(image.url, index),
     contentType: "IMAGE",
   }));
-  const variants = fresh.variants.map((variant: any, index) => {
+  const variants = completeFreshVariants.map((variant: any, index) => {
     const optionValues = productOptions.map((option) => ({
       optionName: option.name,
-      name: clean(
-        variant.optionValues?.[option.name] ||
-        variant.optionValues?.[option.name.toLowerCase()] ||
-        (/colou?r/i.test(option.name) ? variant.color : variant.size) ||
-        option.values[0]?.name,
-      ),
+      name: variantOptionValue(variant, option.name, option.values),
     }));
     if (optionValues.some((value) => !value.name)) {
       throw new Error(`Variant has an empty option value: ${variant.sku}`);
@@ -342,7 +356,7 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
       },
     });
 
-    for (const [index, variant] of fresh.variants.entries()) {
+    for (const [index, variant] of completeFreshVariants.entries()) {
       const sku = clean(variant.sku);
       const live: any = verified.variants.find(
         (entry: any) => clean(entry.sku).toLowerCase() === sku.toLowerCase(),
