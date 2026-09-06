@@ -18,7 +18,7 @@ const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
 const PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS = Number(process.env.SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS || 120_000);
 const PRICE_STOCK_TARGET_DOMAINS = String(process.env.SYNC_PRICE_STOCK_TARGET_DOMAINS || '')
-  .split(',')
+  .split(/[,\s]+/)
   .map((value) => value.trim().toLowerCase())
   .filter((value) => /^[a-z0-9.-]+$/.test(value));
 const SYNC_JOB_WORKER_CONCURRENCY = Math.max(
