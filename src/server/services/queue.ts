@@ -1823,10 +1823,22 @@ export class QueueService {
       product.shopifyProduct.shopifyId,
     );
     const liveById = new Map(liveVariants.map((variant: any) => [variant.id, variant]));
+    const liveBySku = new Map<string, any[]>();
+    for (const variant of liveVariants) {
+      const sku = cleanOptionText(variant?.sku || variant?.inventoryItem?.sku);
+      if (!sku) continue;
+      liveBySku.set(sku, [...(liveBySku.get(sku) || []), variant]);
+    }
     const pricingRule = syncPrice ? await resolvePricingRule(product, options) : null;
     const priceUpdates: Array<{ id: string; price: string }> = [];
     const inventoryUpdates: Array<{ inventoryItemId: string; quantity: number }> = [];
     const expected = new Map<string, { price?: number; quantity?: number }>();
+    const variantIdRepairs: Array<{
+      shopifyVariantDbId: string;
+      previousShopifyId: string;
+      liveShopifyId: string;
+      sku: string;
+    }> = [];
     const dbVariantUpdates: Array<{
       sourceVariantId: string;
       shopifyVariantId: string;
@@ -1839,7 +1851,20 @@ export class QueueService {
     for (const sourceVariant of product.variants) {
       const shopifyVariant = sourceVariant.shopifyVariant;
       if (!shopifyVariant) continue;
-      const liveVariant: any = liveById.get(shopifyVariant.shopifyId);
+      let liveVariant: any = liveById.get(shopifyVariant.shopifyId);
+      const linkedSku = cleanOptionText(shopifyVariant.sku || sourceVariant.sku);
+      if (!liveVariant && linkedSku) {
+        const skuMatches = liveBySku.get(linkedSku) || [];
+        if (skuMatches.length === 1) {
+          liveVariant = skuMatches[0];
+          variantIdRepairs.push({
+            shopifyVariantDbId: shopifyVariant.id,
+            previousShopifyId: shopifyVariant.shopifyId,
+            liveShopifyId: liveVariant.id,
+            sku: linkedSku,
+          });
+        }
+      }
       if (!liveVariant) throw new Error(`Linked Shopify variant is missing: ${shopifyVariant.shopifyId}`);
 
       const freshVariant = findStrictFreshVariant(sourceVariant, freshProduct.variants);
@@ -1861,20 +1886,20 @@ export class QueueService {
       if (syncPrice && targetPrice) {
         expectation.price = targetPrice;
         if (!moneyClose(liveVariant.price, targetPrice)) {
-          priceUpdates.push({ id: shopifyVariant.shopifyId, price: formatShopifyPrice(targetPrice) });
+          priceUpdates.push({ id: liveVariant.id, price: formatShopifyPrice(targetPrice) });
         }
       }
 
       if (syncInventory) {
         const inventoryItemId = cleanOptionText(liveVariant.inventoryItem?.id);
-        if (!inventoryItemId) throw new Error(`Shopify inventory item is missing: ${shopifyVariant.shopifyId}`);
+        if (!inventoryItemId) throw new Error(`Shopify inventory item is missing: ${liveVariant.id}`);
         expectation.quantity = quantity;
         if (Number(liveVariant.inventoryQuantity) !== quantity) {
           inventoryUpdates.push({ inventoryItemId, quantity });
         }
       }
 
-      expected.set(shopifyVariant.shopifyId, expectation);
+      expected.set(liveVariant.id, expectation);
       dbVariantUpdates.push({
         sourceVariantId: sourceVariant.id,
         shopifyVariantId: shopifyVariant.id,
@@ -1886,6 +1911,32 @@ export class QueueService {
 
     if (expected.size === 0) {
       throw new Error('No supplier variants could be matched safely; Shopify was not changed');
+    }
+
+    if (variantIdRepairs.length) {
+      const liveIds = variantIdRepairs.map((repair) => repair.liveShopifyId);
+      if (new Set(liveIds).size !== liveIds.length) {
+        throw new Error('Linked Shopify variant repair matched duplicate live variants; Shopify was not changed');
+      }
+      const conflictingRows = await prisma.shopifyVariant.findMany({
+        where: {
+          shopifyId: { in: liveIds },
+          id: { notIn: variantIdRepairs.map((repair) => repair.shopifyVariantDbId) },
+        },
+        select: { id: true, shopifyId: true },
+      });
+      if (conflictingRows.length) {
+        throw new Error('Linked Shopify variant repair is ambiguous; Shopify was not changed');
+      }
+      await prisma.$transaction(variantIdRepairs.map((repair) =>
+        prisma.shopifyVariant.update({
+          where: { id: repair.shopifyVariantDbId },
+          data: {
+            shopifyId: repair.liveShopifyId,
+            sku: repair.sku,
+          },
+        }),
+      ));
     }
 
     if (priceUpdates.length) {
@@ -1950,6 +2001,7 @@ export class QueueService {
       unmatchedVariants,
       pricesUpdated: priceUpdates.length,
       inventoryUpdated: inventoryUpdates.length,
+      variantMappingsRepaired: variantIdRepairs.length,
       imagesTouched: 0,
       detailsTouched: 0,
       variantsRebuilt: 0,
