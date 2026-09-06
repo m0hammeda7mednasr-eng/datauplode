@@ -28,12 +28,30 @@ function parseRaw(value: string | null | undefined) {
 function isSupportedCatalogSource(url: string) {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return host === "www.maxfashion.com" ||
-      host === "maxfashion.com" ||
-      host === "www.centrepointstores.com" ||
-      host === "centrepointstores.com" ||
-      host === "www.next.ae" ||
-      host === "next.ae";
+    const supportedHosts = [
+      "www.maxfashion.com",
+      "maxfashion.com",
+      "www.centrepointstores.com",
+      "centrepointstores.com",
+      "www.next.ae",
+      "next.ae",
+      "ae.hm.com",
+      "www.mothercare.ae",
+      "mothercare.ae",
+      "www.lefties.com",
+      "lefties.com",
+      "www.marksandspencerme.com",
+      "marksandspencerme.com",
+      "www.marksandspencer.ae",
+      "marksandspencer.ae",
+      "www.zara.com",
+      "zara.com",
+      "www.ae.carters.com",
+      "ae.carters.com",
+      "www.adidas.ae",
+      "adidas.ae",
+    ];
+    return supportedHosts.includes(host);
   } catch {
     return false;
   }
