@@ -57,6 +57,10 @@ function isTransientBlock(message: string) {
   return /blocked automated server access|HTTP 403|access denied|forbidden|cloudflare|ScraperAPI returned a blocked page/i.test(message);
 }
 
+function isImportPlaceholderTitle(title: string) {
+  return /^(?:Excel Import Issue|Blocked Source Product)\b/i.test(clean(title));
+}
+
 async function countFullyVerified() {
   return prisma.sourceProduct.count({
     where: {
@@ -83,6 +87,7 @@ async function main() {
   const baseWhere: Prisma.SourceProductWhereInput = {
     syncStatus: { not: "paused" },
     OR: domains.map((domain) => ({ url: { contains: domain, mode: "insensitive" } })),
+    title: { not: { startsWith: "Excel Import Issue" } },
     raw: { contains: "sheetPriceMultiplier" },
     shopifyProduct: { is: { syncEnabled: true } },
     AND: [
@@ -108,7 +113,7 @@ async function main() {
   });
 
   const selected = candidates
-    .filter((candidate) => Boolean(getApprovedSheetMultiplier(candidate)))
+    .filter((candidate) => !isImportPlaceholderTitle(candidate.title) && Boolean(getApprovedSheetMultiplier(candidate)))
     .sort((left, right) =>
       domainRank(left.url, domains) - domainRank(right.url, domains) ||
       (left.lastScrapedAt?.getTime() || 0) - (right.lastScrapedAt?.getTime() || 0),
@@ -133,17 +138,21 @@ async function main() {
         results.push({ id: candidate.id, ok: true, title: candidate.title });
       } catch (error: any) {
         const message = clean(error?.message || error).slice(0, 2000);
-        await prisma.auditLog.create({
-          data: {
-            sourceProductId: candidate.id,
-            action: "SYNC_PRODUCT_CATALOG_FAILED",
-            details: JSON.stringify({
-              message,
-              runner: "run-full-catalog-cycle",
-              transientBlock: isTransientBlock(message),
-            }),
-          },
-        });
+        try {
+          await prisma.auditLog.create({
+            data: {
+              sourceProductId: candidate.id,
+              action: "SYNC_PRODUCT_CATALOG_FAILED",
+              details: JSON.stringify({
+                message,
+                runner: "run-full-catalog-cycle",
+                transientBlock: isTransientBlock(message),
+              }),
+            },
+          });
+        } catch (logError) {
+          console.error(JSON.stringify({ auditLogWriteFailed: clean((logError as Error)?.message || logError) }));
+        }
         results.push({ id: candidate.id, ok: false, title: candidate.title, error: message });
       }
       const done = results.length;
