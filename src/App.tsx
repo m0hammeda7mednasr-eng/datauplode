@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
@@ -128,7 +129,7 @@ function MobileNav() {
   );
 }
 
-function PageMain({ children }: { children: React.ReactNode }) {
+function PageMain({ children }: { children: ReactNode }) {
   return (
     <main className="flex-1 overflow-x-hidden overflow-y-auto p-3 pb-24 sm:p-4 sm:pb-24 md:p-8 md:pb-8">
       {children}
