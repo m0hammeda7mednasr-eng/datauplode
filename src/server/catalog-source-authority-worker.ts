@@ -319,25 +319,28 @@ async function deleteShopifyDraftBatch(client: any, productIds: string[]) {
 }
 
 async function purgeShopifyDrafts(client: any, summary: MaintenanceSummary) {
-  let emptyPasses = 0;
   let passes = 0;
   const maxPasses = positiveInteger('CATALOG_SOURCE_AUTHORITY_DRAFT_DELETE_MAX_PASSES', 250, 500);
 
   while (passes < maxPasses) {
     const draftIds = await readShopifyDraftIds(client);
-    if (!draftIds.length) {
-      emptyPasses += 1;
-      if (emptyPasses >= 1) break;
-      continue;
-    }
+    if (!draftIds.length) break;
     passes += 1;
-    emptyPasses = 0;
 
     const linked = await prisma.shopifyProduct.findMany({
       where: { shopifyId: { in: draftIds } },
-      select: { sourceProductId: true, shopifyId: true },
+      select: {
+        sourceProductId: true,
+        shopifyId: true,
+        sourceProduct: { select: { url: true } },
+      },
     });
-    const sourceByShopifyId = new Map(linked.map((entry) => [entry.shopifyId, entry.sourceProductId]));
+    const sourceByShopifyId = new Map(
+      linked.map((entry) => [entry.shopifyId, {
+        sourceProductId: entry.sourceProductId,
+        url: entry.sourceProduct.url,
+      }]),
+    );
 
     let passProgress = 0;
     for (const batch of chunks(draftIds, SHOPIFY_DELETE_BATCH_SIZE)) {
@@ -348,11 +351,20 @@ async function purgeShopifyDrafts(client: any, summary: MaintenanceSummary) {
       for (const failure of result.failed.slice(0, 10)) {
         summary.issues.push({ stage: 'shopify_draft_delete', ...failure });
       }
-      const linkedSourceIds = result.deleted
-        .map((id) => sourceByShopifyId.get(id))
-        .filter(Boolean) as string[];
-      if (linkedSourceIds.length) {
-        summary.localDraftLinksPurged += await purgeLocalSourceProducts(linkedSourceIds);
+
+      const linkedSources = result.deleted
+        .map((shopifyProductId) => ({ shopifyProductId, source: sourceByShopifyId.get(shopifyProductId) }))
+        .filter((entry): entry is { shopifyProductId: string; source: { sourceProductId: string; url: string } } => Boolean(entry.source));
+      for (const entry of linkedSources) {
+        await rememberPermanentFailure(entry.source.url, 'shopify_product_was_draft', {
+          sourceProductId: entry.source.sourceProductId,
+          shopifyProductId: entry.shopifyProductId,
+        });
+      }
+      if (linkedSources.length) {
+        summary.localDraftLinksPurged += await purgeLocalSourceProducts(
+          linkedSources.map((entry) => entry.source.sourceProductId),
+        );
       }
       await sleep(120);
     }
@@ -483,7 +495,7 @@ async function importNewRows(rows: CatalogRow[], summary: MaintenanceSummary) {
         for (const failure of result.failed || []) {
           const matching = batch.find((entry) => entry.row.rowNumber === failure.rowNumber);
           if (!matching) continue;
-          const reason = clean(failure.reason || failure.error || 'Source row failed to sync');
+          const reason = clean(failure.reason || 'Source row failed to sync');
           await rememberPermanentFailure(matching.row.url, reason, {
             sheet: matching.sheet.name,
             gid: matching.sheet.gid,
@@ -608,11 +620,25 @@ export async function runCatalogSourceAuthorityCycle() {
   }
 }
 
+function deployedRevisionMatches() {
+  const expected = clean(process.env.CATALOG_SOURCE_AUTHORITY_REVISION).toLowerCase();
+  const deployed = clean(process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA).toLowerCase();
+  return /^[a-f0-9]{40}$/.test(expected) && expected === deployed;
+}
+
 export function startCatalogSourceAuthorityWorker() {
   if (started) return;
   started = true;
   if (!enabled('CATALOG_SOURCE_AUTHORITY_AUTOSTART', false)) {
     console.log('[source-authority] autostart disabled');
+    return;
+  }
+  if (!enabled('SYNC_RUNTIME_WRITE_ENABLED', false)) {
+    console.log('[source-authority] blocked because global runtime writes are disabled');
+    return;
+  }
+  if (!deployedRevisionMatches()) {
+    console.log('[source-authority] blocked because exact deployed revision is not authorized');
     return;
   }
 
