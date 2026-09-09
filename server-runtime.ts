@@ -6,4 +6,5 @@ import './src/server/catalog-sibling-match-worker.js';
 import './src/server/catalog-url-title-match-worker.js';
 import './src/server/catalog-source-authority-worker.js';
 import './src/server/juniors-vendor-purge-worker.js';
+import './src/server/juniors-vendor-direct-purge-worker.js';
 await import('./server.js');
