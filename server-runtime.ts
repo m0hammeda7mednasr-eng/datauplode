@@ -4,4 +4,5 @@ import './src/server/catalog-assisted-match-worker.js';
 import './src/server/catalog-db-title-match-worker.js';
 import './src/server/catalog-sibling-match-worker.js';
 import './src/server/catalog-url-title-match-worker.js';
+import './src/server/catalog-source-authority-worker.js';
 await import('./server.js');
