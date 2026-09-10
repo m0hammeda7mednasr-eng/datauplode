@@ -4294,6 +4294,173 @@ router.post("/products/cleanup-integrity", async (req, res) => {
   }
 });
 
+router.post("/products/cleanup-draft-unsynced", async (req, res) => {
+  const CONFIRMATION = "DELETE_DRAFT_AND_UNSYNCED";
+  const dryRun = req.body?.dryRun !== false;
+  const confirmed = String(req.body?.confirm || "").trim() === CONFIRMATION;
+  const limitRaw = Number(req.body?.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.max(1, Math.min(500, Math.floor(limitRaw)))
+    : 100;
+
+  try {
+    const linkedCandidates = await prisma.$queryRawUnsafe<Array<{
+      sourceProductId: string;
+      shopifyId: string;
+      title: string;
+      shopifyStatus: string;
+      syncEnabled: boolean;
+      sourceSyncStatus: string;
+      reason: string;
+    }>>(`
+      SELECT
+        s."id" AS "sourceProductId",
+        sp."shopifyId",
+        s."title",
+        sp."status" AS "shopifyStatus",
+        sp."syncEnabled",
+        s."syncStatus" AS "sourceSyncStatus",
+        CASE
+          WHEN LOWER(COALESCE(sp."status", '')) = 'draft' THEN 'db_shopify_product_status_draft'
+          WHEN sp."syncEnabled" = FALSE THEN 'sync_disabled'
+          WHEN s."syncStatus" <> 'active' THEN 'source_not_active'
+          ELSE 'unknown'
+        END AS reason
+      FROM "ShopifyProduct" sp
+      JOIN "SourceProduct" s ON s."id" = sp."sourceProductId"
+      WHERE LOWER(COALESCE(sp."status", '')) = 'draft'
+         OR sp."syncEnabled" = FALSE
+         OR s."syncStatus" <> 'active'
+      ORDER BY
+        CASE WHEN LOWER(COALESCE(sp."status", '')) = 'draft' THEN 0 ELSE 1 END,
+        s."updatedAt" ASC,
+        s."id" ASC
+      LIMIT $1
+    `, limit);
+
+    const remaining = Math.max(0, limit - linkedCandidates.length);
+    const cacheOnlyCandidates = remaining > 0
+      ? await prisma.$queryRawUnsafe<Array<{
+          shopifyId: string;
+          title: string;
+          shopifyStatus: string;
+          reason: string;
+        }>>(`
+          SELECT
+            c."shopifyId",
+            c."title",
+            c."status" AS "shopifyStatus",
+            'catalog_index_without_db_link' AS reason
+          FROM "ShopifyCatalogIndexV2" c
+          LEFT JOIN "ShopifyProduct" sp ON sp."shopifyId" = c."shopifyId"
+          WHERE sp."id" IS NULL
+            AND (
+              UPPER(COALESCE(c."status", '')) = 'DRAFT'
+              OR c."matchStatus" IN ('linked', 'needs_review', 'needs_link')
+            )
+          ORDER BY c."updatedAt" ASC, c."shopifyId" ASC
+          LIMIT $1
+        `, remaining)
+      : [];
+
+    const result: any = {
+      success: true,
+      dryRun,
+      confirmationRequired: CONFIRMATION,
+      limit,
+      candidates: linkedCandidates.length + cacheOnlyCandidates.length,
+      linkedCandidates,
+      cacheOnlyCandidates,
+      deleted: [] as any[],
+      skipped: [] as any[],
+    };
+
+    if (dryRun || !confirmed || result.candidates === 0) {
+      return res.json(result);
+    }
+
+    const shopifyClient = await ShopifyService.getClientFromDb(prisma);
+    const deleteFromShopify = async (shopifyId: string) => {
+      try {
+        await ShopifyService.deleteProduct(shopifyClient, shopifyId);
+        return { ok: true, state: "deleted_from_shopify" };
+      } catch (error: any) {
+        const message = String(error?.message || error || "");
+        if (/404|not found|does not exist/i.test(message)) {
+          return { ok: true, state: "already_missing_from_shopify", message };
+        }
+        return { ok: false, state: "shopify_delete_failed", message };
+      }
+    };
+
+    for (const candidate of linkedCandidates) {
+      const shopifyDelete = await deleteFromShopify(candidate.shopifyId);
+      if (!shopifyDelete.ok) {
+        result.skipped.push({ ...candidate, shopifyDelete });
+        continue;
+      }
+
+      const deletion = await hardDeleteCatalogProduct({
+        sourceProductId: candidate.sourceProductId,
+        reason: candidate.reason,
+        deleteFromShopify: false,
+      });
+
+      await prisma.$executeRawUnsafe(`
+        UPDATE "ShopifyCatalogIndexV2"
+        SET "status" = 'DELETED',
+            "matchStatus" = 'deleted',
+            "reason" = $2,
+            "updatedAt" = NOW()
+        WHERE "shopifyId" = $1
+      `, candidate.shopifyId, candidate.reason);
+
+      result.deleted.push({ ...candidate, shopifyDelete, deletion });
+    }
+
+    for (const candidate of cacheOnlyCandidates) {
+      const shopifyDelete = await deleteFromShopify(candidate.shopifyId);
+      if (!shopifyDelete.ok) {
+        result.skipped.push({ ...candidate, shopifyDelete });
+        continue;
+      }
+      await prisma.$executeRawUnsafe(`
+        UPDATE "ShopifyCatalogIndexV2"
+        SET "status" = 'DELETED',
+            "matchStatus" = 'deleted',
+            "reason" = $2,
+            "updatedAt" = NOW()
+        WHERE "shopifyId" = $1
+      `, candidate.shopifyId, candidate.reason);
+      result.deleted.push({ ...candidate, shopifyDelete, deletion: { deleted: false, cacheOnly: true } });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        action: "CLEANUP_DRAFT_UNSYNCED_PRODUCTS",
+        details: JSON.stringify({
+          deleted: result.deleted.length,
+          skipped: result.skipped.length,
+          limit,
+          readbackMode: "shopify_delete_or_already_missing_then_db_cleanup",
+        }),
+        userId: "System",
+      },
+    });
+
+    return res.json({
+      ...result,
+      deletedCount: result.deleted.length,
+      skippedCount: result.skipped.length,
+    });
+  } catch (error: any) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to cleanup draft and unsynced products",
+    });
+  }
+});
+
 router.get("/products/:id", async (req, res) => {
   const product = await prisma.sourceProduct.findUnique({
     where: { id: req.params.id },
@@ -4701,6 +4868,9 @@ router.post("/imports/excel/process", async (req, res) => {
     : [];
   const createManualReview = req.body?.createManualReview !== false;
   const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
+  const reconcileExistingProducts = req.body?.reconcileExistingProducts === true;
+  const sourceSheetName = asOptionalString(req.body?.sheetName) || "file_upload";
+  const sourceSheetUrl = asOptionalString(req.body?.sheetUrl) || "local-file-upload";
   const maxRows = Math.max(1, envNumber("EXCEL_IMPORT_MAX_ROWS", 300));
 
   if (rows.length === 0) {
@@ -4727,8 +4897,9 @@ router.post("/imports/excel/process", async (req, res) => {
     const successful: Array<{
       rowNumber: number;
       url: string;
+      action?: "published" | "reconciled_existing";
       sourceProductId: string;
-      jobId: string;
+      jobId?: string;
       verification?: {
         shopifyId: string;
         variantsExpected?: number;
@@ -4753,6 +4924,17 @@ router.post("/imports/excel/process", async (req, res) => {
       manualReviewId?: string;
     }> = [];
     const processedUrls = new Set<string>();
+    const reconcileContext = reconcileExistingProducts
+      ? {
+          client: await ShopifyService.getClientFromDb(prisma),
+          location: null as any,
+        }
+      : null;
+    if (reconcileContext) {
+      reconcileContext.location = await ShopifyService.getInventoryLocation(
+        reconcileContext.client,
+      );
+    }
 
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index] || {};
@@ -4821,6 +5003,147 @@ router.post("/imports/excel/process", async (req, res) => {
           existingProductSku: String(row?.sku || ""),
         });
         setCachedAnalyzeProduct(normalizedUrl, analyzed);
+
+        if (reconcileContext?.location?.id) {
+          try {
+            const reconciliation = await reconcileExistingShopifyProductForImport({
+              client: reconcileContext.client,
+              locationId: reconcileContext.location.id,
+              url: normalizedUrl,
+              rowNumber,
+              multiplier: priceMultiplier,
+              collection: collections.join(","),
+              sheetId: 0,
+              sheetName: sourceSheetName,
+              existingSku: String(row?.sku || ""),
+              fresh: analyzed,
+            });
+
+            if (
+              reconciliation.status === "verified" &&
+              reconciliation.shopifyProductId
+            ) {
+              const persisted = await persistVerifiedExistingShopifyLink({
+                fresh: analyzed,
+                shopifyProductId: reconciliation.shopifyProductId,
+                shopifyHandle: reconciliation.shopifyHandle,
+                shopifyStatus: "active",
+                shopifyPrice: analyzed.price * priceMultiplier,
+                multiplier: priceMultiplier,
+                sheetUrl: sourceSheetUrl,
+                sheetName: sourceSheetName,
+                sheetId: 0,
+                rowNumber,
+                collection: collections.join(","),
+                variantLinks: reconciliation.variantLinks || [],
+              });
+
+              successful.push({
+                rowNumber,
+                url: normalizedUrl,
+                action: "reconciled_existing",
+                sourceProductId: persisted.sourceProductId,
+                verification: {
+                  shopifyId: reconciliation.shopifyProductId,
+                  variantsExpected: reconciliation.variantsChecked,
+                  variantsCreated: 0,
+                  variantsLinked: reconciliation.variantsChecked,
+                  variantImagesRequested: 0,
+                  variantImagesLinked: 0,
+                  salesChannelsPublished: 0,
+                },
+              });
+              continue;
+            }
+
+            if (
+              reconciliation.status === "rebuild_required" &&
+              reconciliation.shopifyProductId &&
+              reconciliation.shopifyHandle
+            ) {
+              const publishResult = await publishPreparedProductToQueue({
+                productData: analyzed,
+                pricingRuleId: selectedPricingRuleId,
+                collections,
+                priceMultiplier,
+                replaceShopifyProductId: reconciliation.shopifyProductId,
+                replaceShopifyHandle: reconciliation.shopifyHandle,
+              });
+
+              let verification:
+                | {
+                    shopifyId: string;
+                    variantsExpected?: number;
+                    variantsCreated?: number;
+                    variantsLinked?: number;
+                    variantImagesRequested?: number;
+                    variantImagesLinked?: number;
+                    salesChannelsPublished?: number;
+                  }
+                | undefined;
+              if (waitForPublishCompletion) {
+                const publishJob = await waitForSyncJobCompletion(
+                  publishResult.jobId,
+                );
+                if (publishJob.status === "failed") {
+                  const reason =
+                    String(publishJob.parsedResult?.error || "").trim() ||
+                    `Shopify rebuild job failed (${publishResult.jobId})`;
+                  throw new Error(reason);
+                }
+                verifyPublishJobResult(publishJob.parsedResult || {});
+                verification = {
+                  shopifyId: String(publishJob.parsedResult?.shopifyId || ""),
+                  variantsExpected: Number(
+                    publishJob.parsedResult?.variantsExpected,
+                  ),
+                  variantsCreated: Number(
+                    publishJob.parsedResult?.variantsCreated,
+                  ),
+                  variantsLinked: Number(
+                    publishJob.parsedResult?.variantsLinked,
+                  ),
+                  variantImagesRequested: Number(
+                    publishJob.parsedResult?.variantImagesRequested,
+                  ),
+                  variantImagesLinked: Number(
+                    publishJob.parsedResult?.variantImagesLinked,
+                  ),
+                  salesChannelsPublished: Number(
+                    publishJob.parsedResult?.salesChannelsPublished,
+                  ),
+                };
+              }
+
+              successful.push({
+                rowNumber,
+                url: normalizedUrl,
+                action: "reconciled_existing",
+                sourceProductId: publishResult.sourceProductId,
+                jobId: publishResult.jobId,
+                ...(verification ? { verification } : {}),
+              });
+              continue;
+            }
+
+            if (reconciliation.status !== "missing") {
+              throw new Error(
+                reconciliation.reason ||
+                  `Existing Shopify product reconciliation stopped with status ${reconciliation.status}`,
+              );
+            }
+          } catch (reconcileError: any) {
+            const reconcileMessage = String(reconcileError?.message || reconcileError || "");
+            if (
+              !/not found|missing|could not locate|no matching Shopify product/i.test(
+                reconcileMessage,
+              )
+            ) {
+              throw reconcileError;
+            }
+          }
+        }
+
         const publishResult = await publishPreparedProductToQueue({
           productData: analyzed,
           pricingRuleId: selectedPricingRuleId,
@@ -4866,9 +5189,10 @@ router.post("/imports/excel/process", async (req, res) => {
           };
         }
 
-          successful.push({
+        successful.push({
           rowNumber,
           url: normalizedUrl,
+          action: "published",
           sourceProductId: publishResult.sourceProductId,
           jobId: publishResult.jobId,
           ...(verification ? { verification } : {}),
@@ -4916,9 +5240,12 @@ router.post("/imports/excel/process", async (req, res) => {
       failed,
       metadata: {
         pricingRuleId: selectedPricingRuleId,
-        collections,
-      },
-    });
+      collections,
+      reconcileExistingProducts,
+      sourceSheetName,
+      sourceSheetUrl,
+    },
+  });
 
     return res.json({
       success: true,
