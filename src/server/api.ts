@@ -4866,6 +4866,9 @@ router.post("/imports/excel/process", async (req, res) => {
   const collections = Array.isArray(req.body?.collections)
     ? req.body.collections.map((value: any) => String(value || "").trim()).filter(Boolean)
     : [];
+  const collectionNames = Array.isArray(req.body?.collectionNames)
+    ? req.body.collectionNames.map((value: any) => String(value || "").trim()).filter(Boolean)
+    : [];
   const createManualReview = req.body?.createManualReview !== false;
   const waitForPublishCompletion = req.body?.waitForPublishCompletion !== false;
   const reconcileExistingProducts = req.body?.reconcileExistingProducts === true;
@@ -4924,9 +4927,35 @@ router.post("/imports/excel/process", async (req, res) => {
       manualReviewId?: string;
     }> = [];
     const processedUrls = new Set<string>();
+    const shopifyClient = await ShopifyService.getClientFromDb(prisma);
+    const shopifyCollections = await ShopifyService.getCollections(shopifyClient);
+    const collectionByName = new Map<string, string>(
+      shopifyCollections
+        .map((collection: any) => [normalizeLabel(collection.title), String(collection.id)] as const)
+        .filter((entry) => Boolean(entry[0] && entry[1])),
+    );
+    const resolveCollectionIds = async (names: string[]) => {
+      const ids: string[] = [];
+      for (const rawName of names) {
+        const name = String(rawName || "").trim();
+        if (!name) continue;
+        const key = normalizeLabel(name);
+        const existing = collectionByName.get(key);
+        if (existing) {
+          ids.push(existing);
+          continue;
+        }
+        const created = await ShopifyService.createCollection(shopifyClient, name);
+        if (created?.id) {
+          collectionByName.set(key, String(created.id));
+          ids.push(String(created.id));
+        }
+      }
+      return [...new Set(ids)];
+    };
     const reconcileContext = reconcileExistingProducts
       ? {
-          client: await ShopifyService.getClientFromDb(prisma),
+          client: shopifyClient,
           location: null as any,
         }
       : null;
@@ -4945,6 +4974,16 @@ router.post("/imports/excel/process", async (req, res) => {
       const rawUrl = String(row?.url || "").trim();
       const normalizedUrl = normalizeAnalyzeCacheUrl(rawUrl);
       const priceMultiplier = toPositiveSheetNumber(row?.priceMultiplier ?? row?.multiplier);
+      const rowCollectionNames = String(row?.collection || row?.category || "")
+        .split(/[|,]/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const selectedCollectionIds = [
+        ...new Set([
+          ...collections,
+          ...(await resolveCollectionIds([...collectionNames, ...rowCollectionNames])),
+        ]),
+      ];
 
       const registerFailure = async (reason: string) => {
         let review: { sourceProductId: string; manualReviewId: string } | null = null;
@@ -5012,7 +5051,7 @@ router.post("/imports/excel/process", async (req, res) => {
               url: normalizedUrl,
               rowNumber,
               multiplier: priceMultiplier,
-              collection: collections.join(","),
+              collection: selectedCollectionIds.join(","),
               sheetId: 0,
               sheetName: sourceSheetName,
               existingSku: String(row?.sku || ""),
@@ -5034,7 +5073,7 @@ router.post("/imports/excel/process", async (req, res) => {
                 sheetName: sourceSheetName,
                 sheetId: 0,
                 rowNumber,
-                collection: collections.join(","),
+                collection: selectedCollectionIds.join(","),
                 variantLinks: reconciliation.variantLinks || [],
               });
 
@@ -5064,7 +5103,7 @@ router.post("/imports/excel/process", async (req, res) => {
               const publishResult = await publishPreparedProductToQueue({
                 productData: analyzed,
                 pricingRuleId: selectedPricingRuleId,
-                collections,
+                collections: selectedCollectionIds,
                 priceMultiplier,
                 replaceShopifyProductId: reconciliation.shopifyProductId,
                 replaceShopifyHandle: reconciliation.shopifyHandle,
@@ -5147,7 +5186,7 @@ router.post("/imports/excel/process", async (req, res) => {
         const publishResult = await publishPreparedProductToQueue({
           productData: analyzed,
           pricingRuleId: selectedPricingRuleId,
-          collections,
+          collections: selectedCollectionIds,
           priceMultiplier,
         });
 
@@ -5241,6 +5280,7 @@ router.post("/imports/excel/process", async (req, res) => {
       metadata: {
         pricingRuleId: selectedPricingRuleId,
       collections,
+      collectionNames,
       reconcileExistingProducts,
       sourceSheetName,
       sourceSheetUrl,
