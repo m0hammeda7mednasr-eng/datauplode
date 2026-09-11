@@ -167,7 +167,9 @@ const assertions: Array<[string, boolean]> = [
   ],
   [
     "full-catalog source scraping is bounded before Shopify mutation",
-    /withTimeout\([\s\S]*new ScraperService\(\)\.scrape\(product\.url\)[\s\S]*120_000[\s\S]*before Shopify mutation/.test(fullCatalogSync),
+    /withTimeout\([\s\S]*new ScraperService\(\)\.scrape\(product\.url\)[\s\S]*sourceScrapeTimeoutMs\(\)[\s\S]*before Shopify mutation/.test(fullCatalogSync) &&
+      /Math\.min\(60_000, Math\.max\(15_000/.test(fullCatalogSync) &&
+      /SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS=45000/.test(envExample),
   ],
   [
     "full-catalog rolling batch remains capped at five",
