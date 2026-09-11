@@ -5303,7 +5303,7 @@ router.post("/imports/excel/process", async (req, res) => {
 });
 
 router.post("/imports/publish", async (req, res) => {
-  const { productData, pricingRuleId, collections } = req.body;
+  const { productData, pricingRuleId, collections, priceMultiplier } = req.body;
   if (!productData)
     return res.status(400).json({ error: "Product data is required" });
   if (!productData.source?.url)
@@ -5315,6 +5315,7 @@ router.post("/imports/publish", async (req, res) => {
       productData,
       pricingRuleId,
       collections,
+      priceMultiplier,
     });
 
     res.json({

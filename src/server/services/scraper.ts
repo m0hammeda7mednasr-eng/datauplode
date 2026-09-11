@@ -658,6 +658,15 @@ async function fetchHtmlViaScraperApi(
     },
   ];
 
+  if (countryCode || deviceType) {
+    attempts.push({
+      render: jsRender,
+      includeCountryAndDevice: false,
+      premium,
+      ultraPremium,
+    });
+  }
+
   if (jsRender || premium || ultraPremium) {
     // Fallback profile for domains where rendered/premium requests fail (common on Next).
     attempts.push({
