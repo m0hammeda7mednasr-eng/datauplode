@@ -1095,49 +1095,55 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
   }
   const [coverageRows, latestWorker, creditLogs] = await Promise.all([
     prisma.$queryRawUnsafe<any[]>(`
-      SELECT
-        COUNT(*) FILTER (WHERE progress."variantVerified")::int AS "variantVerified",
-        COUNT(*) FILTER (WHERE progress."priceStockVerified")::int AS "priceStockVerified",
-        COUNT(*) FILTER (WHERE progress."variantVerified" AND progress."priceStockVerified")::int AS "fullyVerified",
-        COUNT(*) FILTER (WHERE progress."latestFailureAt" IS NOT NULL AND progress."latestFailureAt" > COALESCE(progress."latestSuccessAt", 'epoch'::timestamp))::int AS "failedAfterSuccess",
-        MIN(progress."firstSuccessAt") AS "startedAt"
-      FROM (
+      WITH progress AS (
         SELECT
           s."id" AS "sourceProductId",
-          success."catalogSuccessAt" IS NOT NULL
-            AND (
-              failure."catalogFailureAt" IS NULL
-              OR failure."catalogFailureAt" <= success."catalogSuccessAt"
-            ) AS "variantVerified",
-          success."priceStockSuccessAt" IS NOT NULL
-            AND (
-              failure."priceStockFailureAt" IS NULL
-              OR failure."priceStockFailureAt" <= success."priceStockSuccessAt"
-            ) AS "priceStockVerified",
-          success."firstSuccessAt",
-          GREATEST(success."catalogSuccessAt", success."priceStockSuccessAt") AS "latestSuccessAt",
-          GREATEST(failure."catalogFailureAt", failure."priceStockFailureAt") AS "latestFailureAt"
+          MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_SET') AS "catalogSuccessAt",
+          MAX(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockSuccessAt",
+          MIN(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "firstSuccessAt",
+          MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
+          MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
         FROM "SourceProduct" s
         INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
-        LEFT JOIN LATERAL (
-          SELECT
-            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_SET') AS "catalogSuccessAt",
-            MAX(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockSuccessAt",
-            MIN(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "firstSuccessAt"
-          FROM "AuditLog" a
-          WHERE a."sourceProductId"=s."id"
-            AND a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
-        ) success ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT
-            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
-            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
-          FROM "AuditLog" a
-          WHERE a."sourceProductId"=s."id"
-            AND a."action" IN ('SYNC_PRODUCT_CATALOG_FAILED','SYNC_PRICE_STOCK_FAILED')
-        ) failure ON TRUE
+        LEFT JOIN "AuditLog" a ON a."sourceProductId"=s."id"
+          AND a."action" IN (
+            'SYNC_PRODUCT_CATALOG_SET',
+            'SYNC_PRICE_STOCK_ONLY',
+            'SYNC_PRODUCT_CATALOG_FAILED',
+            'SYNC_PRICE_STOCK_FAILED'
+          )
         WHERE LOWER(COALESCE(sp."status", '')) = 'active'
-      ) progress
+        GROUP BY s."id"
+      ), states AS (
+        SELECT
+          *,
+          "catalogSuccessAt" IS NOT NULL
+            AND (
+              "catalogFailureAt" IS NULL
+              OR "catalogFailureAt" <= "catalogSuccessAt"
+            ) AS "variantVerified",
+          "priceStockSuccessAt" IS NOT NULL
+            AND (
+              "priceStockFailureAt" IS NULL
+              OR "priceStockFailureAt" <= "priceStockSuccessAt"
+            ) AS "priceStockVerified",
+          GREATEST(
+            COALESCE("catalogSuccessAt", 'epoch'::timestamp),
+            COALESCE("priceStockSuccessAt", 'epoch'::timestamp)
+          ) AS "latestSuccessAt",
+          GREATEST(
+            COALESCE("catalogFailureAt", 'epoch'::timestamp),
+            COALESCE("priceStockFailureAt", 'epoch'::timestamp)
+          ) AS "latestFailureAt"
+        FROM progress
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE states."variantVerified")::int AS "variantVerified",
+        COUNT(*) FILTER (WHERE states."priceStockVerified")::int AS "priceStockVerified",
+        COUNT(*) FILTER (WHERE states."variantVerified" AND states."priceStockVerified")::int AS "fullyVerified",
+        COUNT(*) FILTER (WHERE states."latestFailureAt" > states."latestSuccessAt")::int AS "failedAfterSuccess",
+        MIN(states."firstSuccessAt") AS "startedAt"
+      FROM states
     `),
     prisma.syncJob.findFirst({
       where: { type: { in: ["SYNC_FULL_CATALOG_BATCH", "SYNC_PRICE_STOCK_BATCH"] } },
