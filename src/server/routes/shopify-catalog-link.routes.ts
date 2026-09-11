@@ -1089,7 +1089,7 @@ function productSyncState(entry: any) {
 
 async function catalogCycleSummary(shopifyTotal: number, linked: number) {
   const providerUsage = await getScraperApiAccountUsage();
-  const cacheKey = `${shopifyTotal}:${linked}`;
+  const cacheKey = `latest-product-state-v2:${shopifyTotal}:${linked}`;
   if (cycleSummaryCache && cycleSummaryCache.expiresAt > Date.now() && cycleSummaryCache.key === cacheKey) {
     return cycleSummaryCache.value;
   }
@@ -1100,15 +1100,15 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
           s."id" AS "sourceProductId",
           MAX(a."createdAt") FILTER (
             WHERE a."action"='SYNC_PRODUCT_CATALOG_SET'
-              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+              AND COALESCE(a."details", '') ~ '"readbackVerified"[[:space:]]*:[[:space:]]*true'
           ) AS "catalogSuccessAt",
           MAX(a."createdAt") FILTER (
             WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
-              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+              AND COALESCE(a."details", '') ~ '"readbackVerified"[[:space:]]*:[[:space:]]*true'
           ) AS "priceStockSuccessAt",
           MIN(a."createdAt") FILTER (
             WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
-              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+              AND COALESCE(a."details", '') ~ '"readbackVerified"[[:space:]]*:[[:space:]]*true'
           ) AS "firstSuccessAt",
           MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
           MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
@@ -1145,14 +1145,34 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
             COALESCE("priceStockFailureAt", 'epoch'::timestamp)
           ) AS "latestFailureAt"
         FROM progress
+      ), classified AS (
+        SELECT
+          *,
+          CASE
+            WHEN NOT "variantVerified" OR NOT "priceStockVerified" THEN
+              CASE
+                WHEN (
+                  "catalogFailureAt" IS NOT NULL
+                  AND ("catalogSuccessAt" IS NULL OR "catalogFailureAt" > "catalogSuccessAt")
+                ) OR (
+                  "priceStockFailureAt" IS NOT NULL
+                  AND ("priceStockSuccessAt" IS NULL OR "priceStockFailureAt" > "priceStockSuccessAt")
+                ) THEN 'failed'
+                ELSE 'pending'
+              END
+            ELSE 'verified'
+          END AS "cycleState"
+        FROM states
       )
       SELECT
-        COUNT(*) FILTER (WHERE states."variantVerified")::int AS "variantVerified",
-        COUNT(*) FILTER (WHERE states."priceStockVerified")::int AS "priceStockVerified",
-        COUNT(*) FILTER (WHERE states."variantVerified" AND states."priceStockVerified")::int AS "fullyVerified",
-        COUNT(*) FILTER (WHERE states."latestFailureAt" > states."latestSuccessAt")::int AS "failedAfterSuccess",
-        MIN(states."firstSuccessAt") AS "startedAt"
-      FROM states
+        COUNT(*)::int AS "stateTotal",
+        COUNT(*) FILTER (WHERE classified."variantVerified")::int AS "variantVerified",
+        COUNT(*) FILTER (WHERE classified."priceStockVerified")::int AS "priceStockVerified",
+        COUNT(*) FILTER (WHERE classified."cycleState"='verified')::int AS "fullyVerified",
+        COUNT(*) FILTER (WHERE classified."cycleState"='failed')::int AS "failed",
+        COUNT(*) FILTER (WHERE classified."cycleState"='pending')::int AS "pending",
+        MIN(classified."firstSuccessAt") AS "startedAt"
+      FROM classified
     `),
     prisma.syncJob.findFirst({
       where: { type: { in: ["SYNC_FULL_CATALOG_BATCH", "SYNC_PRICE_STOCK_BATCH"] } },
@@ -1170,7 +1190,9 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     const details = auditDetails(log.details);
     return sum + Math.max(0, Number(details.requestedCredits || details.credits || 0));
   }, 0);
-  const verified = Math.min(linked, Number(coverage.fullyVerified || 0));
+  const failed = Math.max(0, Number(coverage.failed || 0));
+  const pending = Math.max(0, Number(coverage.pending || 0));
+  const verified = Math.max(0, Math.min(linked, Number(coverage.fullyVerified || 0)));
   const startedAt = coverage.startedAt ? new Date(coverage.startedAt) : null;
   const elapsedMs = startedAt ? Math.max(0, Date.now() - startedAt.getTime()) : 0;
   const ratePerHour = elapsedMs > 0 ? Math.round((verified / elapsedMs) * 3_600_000 * 10) / 10 : 0;
@@ -1182,7 +1204,9 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     variantsVerified: Math.min(linked, Number(coverage.variantVerified || 0)),
     priceStockVerified: Math.min(linked, Number(coverage.priceStockVerified || 0)),
     fullyVerified: verified,
-    failedAfterSuccess: Number(coverage.failedAfterSuccess || 0),
+    failed,
+    pending,
+    failedAfterSuccess: failed,
     remaining,
     completionPercent: shopifyTotal ? Math.round((verified / shopifyTotal) * 1000) / 10 : 0,
     startedAt,
