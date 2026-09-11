@@ -62,5 +62,10 @@ requireContract(/^SYNC_SOURCE_GONE_ACTION=delete_product$/m.test(railway), 'Rail
 requireContract(queue.includes('deletionReadbackVerified'), 'confirmed Shopify deletion must be read back before database cleanup');
 requireContract(queue.includes('isShopifyProductAlreadyMissingError'), 'already-removed Shopify products must still receive verified database cleanup');
 requireContract(queue.includes('sourceGoneDeleted'), 'full-catalog batches must report confirmed source-gone deletions');
+requireContract(
+  (queue.match(/return this\.handleConfirmedSourceGone\(/g) || []).length >= 3 &&
+    queue.includes('const sourceGoneResult = await this.handleConfirmedSourceGone'),
+  'all sync entry points must remove confirmed source-gone products',
+);
 
 console.log(JSON.stringify({ ok: true, isolatedPriceStockWrites: true }, null, 2));

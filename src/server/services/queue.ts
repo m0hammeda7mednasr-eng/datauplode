@@ -1656,6 +1656,9 @@ export class QueueService {
         }
         summary.productDetailsUpdated = true;
       } catch (error: any) {
+        if (isConfirmedSourceGoneError(error)) {
+          return this.handleConfirmedSourceGone(product, jobId, error);
+        }
         if (summary.variantStructureChanged && REBUILD_ON_VARIANT_CHANGE) {
           throw error;
         }
@@ -1663,9 +1666,17 @@ export class QueueService {
       }
     }
 
-    const availabilitySnapshot = shouldSyncInventory
-      ? await scraperService.checkAvailability(product.url)
-      : { available: true, variants: [] };
+    let availabilitySnapshot: any = { available: true, variants: [] };
+    if (shouldSyncInventory) {
+      try {
+        availabilitySnapshot = await scraperService.checkAvailability(product.url);
+      } catch (error: any) {
+        if (isConfirmedSourceGoneError(error)) {
+          return this.handleConfirmedSourceGone(product, jobId, error);
+        }
+        throw error;
+      }
+    }
     const shopifyInventoryVariants = await ShopifyService.getProductInventoryVariants(
       client,
       product.shopifyProduct.shopifyId,
