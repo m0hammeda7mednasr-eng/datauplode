@@ -1114,6 +1114,9 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
           MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
         FROM "SourceProduct" s
         INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
+        INNER JOIN "${CACHE_TABLE}" catalog
+          ON catalog."shopifyId"=sp."shopifyId"
+          AND UPPER(COALESCE(catalog."status", ''))='ACTIVE'
         LEFT JOIN "AuditLog" a ON a."sourceProductId"=s."id"
           AND a."action" IN (
             'SYNC_PRODUCT_CATALOG_SET',
