@@ -82,9 +82,9 @@ function filenameFor(url: string, index: number) {
 }
 
 function sourceScrapeTimeoutMs() {
-  const configured = Number(process.env.SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS || 45_000);
-  if (!Number.isFinite(configured)) return 45_000;
-  return Math.min(60_000, Math.max(15_000, Math.floor(configured)));
+  const configured = Number(process.env.SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS || 120_000);
+  if (!Number.isFinite(configured)) return 120_000;
+  return Math.min(180_000, Math.max(30_000, Math.floor(configured)));
 }
 
 function optionValueForVariant(variant: NormalizedProduct["variants"][number], optionName: string) {
