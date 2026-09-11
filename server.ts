@@ -21,6 +21,7 @@ import { catalogAuditSafety } from "./src/server/middleware/catalogAuditSafety.j
 import { prisma } from "./src/server/db.js";
 import { QueueService } from "./src/server/services/queue.js";
 import { startCatalogSourceDiscoveryMonitor } from "./src/server/services/catalogSourceDiscovery.js";
+import { getFullCatalogRevisionGateState } from "./src/server/services/fullCatalogRuntimeGate.js";
 import { startOneTimeSheetImport } from "./src/server/oneTimeSheetImport.js";
 import { startOneTimeSheet1Reconcile } from "./src/server/oneTimeSheet1Reconcile.js";
 import { prepareSheet1ReconcileDeploymentTakeover } from "./src/server/sheet1ReconcileRecovery.js";
@@ -123,15 +124,11 @@ function exactRevision(value: unknown) {
 }
 
 function fullCatalogAutostartEnabled() {
-  const expected = exactRevision(process.env.SYNC_FULL_CATALOG_REVISION);
-  const deployed = exactRevision(
-    process.env.RAILWAY_GIT_COMMIT_SHA || process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA,
-  );
+  const revisionGate = getFullCatalogRevisionGateState();
   return (
     runtimeWritesEnabled() &&
     envFlag("SYNC_FULL_CATALOG_AUTOSTART") &&
-    Boolean(expected) &&
-    expected === deployed
+    revisionGate.authorized
   );
 }
 
@@ -597,18 +594,11 @@ async function startServer() {
       console.warn("Safe full-catalog monitor autostart ENABLED");
       QueueService.startFullCatalogMonitor();
     } else {
-      const expectedRevision = exactRevision(process.env.SYNC_FULL_CATALOG_REVISION);
-      const deployedRevision = exactRevision(
-        process.env.RAILWAY_GIT_COMMIT_SHA || process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA,
-      );
+      const revisionGate = getFullCatalogRevisionGateState();
       console.log("Full-catalog monitor disabled by runtime/revision gate", {
         runtimeWritesEnabled: runtimeWritesEnabled(),
         autostartEnabled: envFlag("SYNC_FULL_CATALOG_AUTOSTART"),
-        expectedRevisionOk: Boolean(expectedRevision),
-        deployedRevisionOk: Boolean(deployedRevision),
-        revisionMatches: Boolean(expectedRevision) && expectedRevision === deployedRevision,
-        expectedRevisionPrefix: expectedRevision.slice(0, 8) || null,
-        deployedRevisionPrefix: deployedRevision.slice(0, 8) || null,
+        ...revisionGate,
       });
     }
 

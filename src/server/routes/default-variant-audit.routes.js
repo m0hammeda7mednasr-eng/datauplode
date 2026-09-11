@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../db.js";
 import { ShopifyService } from "../services/shopify.js";
 import { getScraperApiAccountUsage } from "../services/scraperCreditBudget.js";
+import { getFullCatalogRevisionGateState } from "../services/fullCatalogRuntimeGate.js";
 
 const router = Router();
 const CACHE_MS = 90_000;
@@ -294,10 +295,15 @@ async function buildRuntimeStatus() {
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
+  const revisionGate = getFullCatalogRevisionGateState();
+  const runtimeWritesEnabled = String(process.env.SYNC_RUNTIME_WRITE_ENABLED || "").toLowerCase() === "true";
+  const autostartConfigured = String(process.env.SYNC_FULL_CATALOG_AUTOSTART || "").toLowerCase() === "true";
 
   return {
     worker: {
-      enabled: String(process.env.SYNC_FULL_CATALOG_AUTOSTART || "").toLowerCase() === "true",
+      enabled: runtimeWritesEnabled && autostartConfigured && revisionGate.authorized,
+      autostartConfigured,
+      revisionGate,
       defaultVariantsOnly: String(process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY || "").toLowerCase() === "true",
       targetDomains,
       batchSize: Math.max(0, Number(process.env.SYNC_FULL_CATALOG_BATCH_SIZE || 0)),

@@ -18,6 +18,7 @@ const queue = read("src/server/services/queue.ts");
 const shopifyCatalogLinkRoutes = read("src/server/routes/shopify-catalog-link.routes.ts");
 const catalogVerifiedOverrideGuard = read("src/server/catalog-verified-override-guard.ts");
 const catalogSourceDiscovery = read("src/server/services/catalogSourceDiscovery.ts");
+const fullCatalogRuntimeGate = read("src/server/services/fullCatalogRuntimeGate.ts");
 
 const assertions: Array<[string, boolean]> = [
   ["runtime writes default off", /SYNC_RUNTIME_WRITE_ENABLED=false/.test(envExample)],
@@ -83,10 +84,14 @@ const assertions: Array<[string, boolean]> = [
       /Direct source product failed price\/image\/variant validation/.test(catalogSourceDiscovery),
   ],
   [
-    "full-catalog autostart requires runtime write gate and exact revision",
-    /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*expected\s*===\s*deployed/.test(server) &&
+    "full-catalog autostart requires runtime write gate and an approved production revision lineage",
+    /runtimeWritesEnabled\(\)[\s\S]*envFlag\("SYNC_FULL_CATALOG_AUTOSTART"\)[\s\S]*revisionGate\.authorized/.test(server) &&
       /SYNC_FULL_CATALOG_REVISION=/.test(envExample) &&
-      /RAILWAY_GIT_COMMIT_SHA/.test(server),
+      /SYNC_FULL_CATALOG_FOLLOW_MAIN=true/.test(envExample) &&
+      /expectedRevision === deployedRevision/.test(fullCatalogRuntimeGate) &&
+      /runningOnRailway/.test(fullCatalogRuntimeGate) &&
+      /railwayEnvironment === "production"/.test(fullCatalogRuntimeGate) &&
+      /railwayBranch === "main"/.test(fullCatalogRuntimeGate),
   ],
   [
     "verified cache overrides require a persisted Shopify product link",
