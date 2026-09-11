@@ -7915,6 +7915,102 @@ function isBlockedNextHtml(html: string): boolean {
   );
 }
 
+function comparableNextProductCode(value: unknown): string {
+  return cleanText(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function extractNextEmbeddedProductData(
+  $: cheerio.CheerioAPI,
+  url: string,
+): any | null {
+  const payload = $("#__NEXT_DATA__").first().text();
+  if (!payload) return null;
+
+  try {
+    const parsed = JSON.parse(payload);
+    const queries = parsed?.props?.pageProps?.dehydratedState?.queries;
+    if (!Array.isArray(queries)) return null;
+
+    const candidates = queries
+      .map((query: any) => query?.state?.data)
+      .filter(
+        (data: any) =>
+          data &&
+          Array.isArray(data?.options?.options) &&
+          data.options.options.length > 0,
+      );
+    if (!candidates.length) return null;
+
+    const requestedCode = comparableNextProductCode(getProductIdFromUrl(url));
+    return (
+      candidates.find(
+        (data: any) =>
+          comparableNextProductCode(data.itemNumber) === requestedCode ||
+          comparableNextProductCode(data.productCode) === requestedCode,
+      ) || candidates[0]
+    );
+  } catch {
+    return null;
+  }
+}
+
+function variantsFromNextEmbeddedOptions(
+  embedded: any,
+  productCode: string | undefined,
+  color: string | undefined,
+  currency: string,
+  imageUrl?: string,
+): NormalizedProduct["variants"] {
+  const options = Array.isArray(embedded?.options?.options)
+    ? embedded.options.options
+    : [];
+  const priceByOption = new Map<string, number>(
+    (Array.isArray(embedded?.priceData?.priceOptions)
+      ? embedded.priceData.priceOptions
+      : []
+    )
+      .map(
+        (entry: any) =>
+          [cleanText(entry?.optionNumber), parsePrice(entry?.price)] as const,
+      )
+      .filter((entry: readonly [string, number]) => entry[0] && entry[1] > 0),
+  );
+
+  return options
+    .map((option: any, index: number) => {
+      const size = cleanProductOptionValue("Size", option?.name);
+      const optionNumber = cleanText(option?.value || option?.optionNumber);
+      const price =
+        parsePrice(option?.priceUnformatted) ||
+        parsePrice(option?.price) ||
+        priceByOption.get(optionNumber) ||
+        0;
+      const sourceStockStatus = cleanText(option?.stockStatus);
+      const available = !/(?:sold\s*out|out\s*(?:of\s*)?stock|unavailable)/i.test(
+        sourceStockStatus,
+      );
+      const variantIdentity =
+        optionNumber || slugOption(size || `option-${index + 1}`);
+
+      return {
+        sourceVariantId: `${productCode || "next"}-${variantIdentity}`,
+        sku: `${productCode || "NEXT"}-${variantIdentity}`,
+        color,
+        size,
+        price,
+        currency,
+        optionValues: buildVariantOptionValues(color, size),
+        available,
+        stockStatus: available
+          ? ("in_stock" as const)
+          : ("out_of_stock" as const),
+        imageUrl,
+        raw: { ...option, embeddedNextData: true },
+      };
+    })
+    .filter((variant: any) => variant.size && variant.price > 0);
+}
+
 function extractNextSizesFromHtml(
   $: cheerio.CheerioAPI,
   title: string,
@@ -7961,7 +8057,7 @@ function extractNextSizesFromHtml(
   return [];
 }
 
-function extractNextProductFromHtml(
+export function extractNextProductFromHtml(
   html: string,
   url: string,
   pageUrl = url,
@@ -7971,6 +8067,7 @@ function extractNextProductFromHtml(
   }
 
   const $ = cheerio.load(html);
+  const embeddedProduct = extractNextEmbeddedProductData($, pageUrl);
   let productData: any = null;
 
   $(
@@ -8003,14 +8100,16 @@ function extractNextProductFromHtml(
     ? productData.offers
     : [productData?.offers].filter(Boolean);
   const productCode = cleanText(
-    productData?.sku ||
+    embeddedProduct?.productCode ||
+      productData?.sku ||
       $('[data-testid="product-code"]').first().text() ||
       $('[data-testid="product-code"]').first().attr("content") ||
       getProductIdFromUrl(url) ||
       "",
   );
   const title = cleanText(
-    productData?.name ||
+    embeddedProduct?.title ||
+      productData?.name ||
       $('[data-testid="product-title"]').first().text() ||
       $('[data-testid="pdp-title"]').first().text() ||
       $("h1").first().text() ||
@@ -8025,9 +8124,19 @@ function extractNextProductFromHtml(
     throw new Error("Next HTML did not expose a product title");
   }
 
+  const embeddedDescription = embeddedProduct?.itemDescription;
+  const descriptionHtml = embeddedDescription
+    ? [
+        embeddedDescription.toneOfVoice,
+        embeddedDescription.washingInstructions,
+        embeddedDescription.composition,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : productData?.description;
   const description = cleanText(
-    productData?.description
-      ? cheerio.load(productData.description).text()
+    descriptionHtml
+      ? cheerio.load(descriptionHtml).text()
       : $('[data-testid="item-description"]').first().text() ||
           $('[data-testid="product-description"]').first().text() ||
           $('meta[name="description"]').attr("content"),
@@ -8035,7 +8144,9 @@ function extractNextProductFromHtml(
 
   const brandValue = productData?.brand;
   const brand = cleanText(
-    (typeof brandValue === "string" ? brandValue : brandValue?.name) || "Next",
+    embeddedProduct?.brand ||
+      (typeof brandValue === "string" ? brandValue : brandValue?.name) ||
+      "Next",
   );
   const itemNumber = (
     getProductIdFromUrl(pageUrl) ||
@@ -8056,7 +8167,8 @@ function extractNextProductFromHtml(
   }
 
   const priceText = cleanText(
-    $('[data-testid="product-now-price"]').first().text() ||
+    embeddedProduct?.price ||
+      $('[data-testid="product-now-price"]').first().text() ||
       $('[data-testid="product-price"]').first().text() ||
       productData?.offers?.price,
   );
@@ -8064,18 +8176,37 @@ function extractNextProductFromHtml(
     .flatMap((offer: any) => [offer?.price, offer?.lowPrice, offer?.highPrice])
     .map((value: any) => parsePrice(value))
     .filter((price: number) => price > 0);
+  const embeddedPriceValues = (
+    Array.isArray(embeddedProduct?.options?.options)
+      ? embeddedProduct.options.options
+      : []
+  )
+    .map(
+      (option: any) =>
+        parsePrice(option?.priceUnformatted) || parsePrice(option?.price),
+    )
+    .filter((price: number) => price > 0);
   const priceRangeFromDom = parsePriceRange(priceText);
   const fallbackPrice =
+    parsePrice(embeddedProduct?.priceData?.price?.minPrice) ||
     priceRangeFromDom.min ||
     parsePrice(
       productData?.offers?.lowPrice ||
         productData?.offers?.price ||
         priceText,
     );
-  const price = priceValues.length ? Math.min(...priceValues) : fallbackPrice;
-  const structuredMaxPrice = priceValues.length
-    ? Math.max(...priceValues)
-    : priceRangeFromDom.max || price;
+  const price = embeddedPriceValues.length
+    ? Math.min(...embeddedPriceValues)
+    : priceValues.length
+      ? Math.min(...priceValues)
+      : fallbackPrice;
+  const structuredMaxPrice = Math.max(
+    price,
+    embeddedPriceValues.length ? Math.max(...embeddedPriceValues) : 0,
+    priceValues.length ? Math.max(...priceValues) : 0,
+    parsePrice(embeddedProduct?.priceData?.price?.maxPrice),
+    priceRangeFromDom.max,
+  );
   const advertisedRange = advertisedCurrencyPriceRanges($("body").text()).find(
     (range) => Math.abs(range.min - price) < 0.01 && range.max >= price,
   );
@@ -8084,10 +8215,11 @@ function extractNextProductFromHtml(
     advertisedRange?.max || price,
   );
   const currency = detectCurrency(
-    offerList[0]?.priceCurrency || priceText,
+    embeddedProduct?.currencyCode || offerList[0]?.priceCurrency || priceText,
     defaultNextCurrencyForUrl(url) || offerList[0]?.priceCurrency || "USD",
   );
   const color =
+    cleanColorOptionValue(embeddedProduct?.colour) ||
     cleanColorOptionValue(
       $('[data-testid="selected-colour-label"]').first().text(),
     ) || parseNextColourFromHtml($, title);
@@ -8096,13 +8228,22 @@ function extractNextProductFromHtml(
       image.color ||= color;
     });
   }
+  const embeddedVariants = variantsFromNextEmbeddedOptions(
+    embeddedProduct,
+    productCode,
+    color,
+    currency,
+    images[0]?.url,
+  );
   const variantsFromOffers = variantsFromJsonLdOffers(
     productData?.offers,
     productCode,
     color,
   );
   const inferredSizes = extractNextSizesFromHtml($, title, description);
-  const variants = variantsFromOffers.length
+  const variants = embeddedVariants.length
+    ? embeddedVariants
+    : variantsFromOffers.length
     ? variantsFromOffers
     : buildInferredNextVariants(
         productCode,
@@ -8154,6 +8295,7 @@ function extractNextProductFromHtml(
       productCode,
       priceRange: { min: price, max: maxPrice },
       structuredOfferCount: offerList.length,
+      embeddedNextData: embeddedVariants.length > 0,
       extractedAt: new Date().toISOString(),
     },
   };
