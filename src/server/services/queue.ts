@@ -9,6 +9,7 @@ import { syncFullProductCatalog } from './fullCatalogSync.js';
 import { getApprovedSheetMultiplier, isApprovedSheetMultiplier } from './sheetMultiplier.js';
 
 const DEFAULT_IN_STOCK_QUANTITY = Number(process.env.SHOPIFY_DEFAULT_IN_STOCK_QUANTITY || 10);
+const QUEUE_PROCESS_STARTED_AT = new Date();
 const INVENTORY_SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INVENTORY_INTERVAL_MINUTES || 30);
 const INVENTORY_SYNC_BATCH_SIZE = Number(process.env.SYNC_INVENTORY_BATCH_SIZE || 25);
 const INVENTORY_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_INVENTORY_MIN_AGE_MINUTES || 30);
@@ -94,6 +95,15 @@ function priceStockSyncCutoffDate(): Date {
 
 function cleanOptionText(value: any): string {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function currentDeploymentRevision(): string {
+  const revision = cleanOptionText(
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+      process.env.VERCEL_GIT_COMMIT_SHA ||
+      process.env.GIT_COMMIT_SHA,
+  ).toLowerCase();
+  return /^[0-9a-f]{40}$/.test(revision) ? revision : '';
 }
 
 function getSourceGoneAction(): 'zero_inventory' | 'draft_product' | 'archive_product' | 'delete_product' {
@@ -1160,11 +1170,28 @@ export class QueueService {
         orderBy: { createdAt: 'desc' },
       });
       if (existingBatch && type === 'SYNC_FULL_CATALOG_BATCH') {
+        let existingDeploymentRevision = '';
+        try {
+          existingDeploymentRevision = cleanOptionText(
+            JSON.parse(existingBatch.payload || '{}')?.deploymentRevision,
+          ).toLowerCase();
+        } catch {}
+        const deployedRevision = currentDeploymentRevision();
+        const priorRevision = Boolean(
+          deployedRevision &&
+            existingDeploymentRevision &&
+            existingDeploymentRevision !== deployedRevision,
+        );
+        const legacyPriorProcess = Boolean(
+          !existingDeploymentRevision &&
+            existingBatch.createdAt.getTime() <
+              QUEUE_PROCESS_STARTED_AT.getTime() - 60_000,
+        );
         const staleCutoff = new Date(
           Date.now() - FULL_CATALOG_STALE_BATCH_MINUTES * 60 * 1000,
         );
         const batchStartedAt = existingBatch.startedAt || existingBatch.createdAt;
-        if (batchStartedAt < staleCutoff) {
+        if (priorRevision || legacyPriorProcess || batchStartedAt < staleCutoff) {
           const recovered = await prisma.syncJob.updateMany({
             where: {
               id: existingBatch.id,
@@ -1175,7 +1202,10 @@ export class QueueService {
               completedAt: new Date(),
               result: JSON.stringify({
                 staleBatchLockReleased: true,
-                reason: 'Full-catalog batch exceeded its bounded runtime; no replay was performed',
+                priorDeployment: priorRevision || legacyPriorProcess,
+                reason: priorRevision || legacyPriorProcess
+                  ? 'Full-catalog batch belonged to a replaced deployment; no replay was performed'
+                  : 'Full-catalog batch exceeded its bounded runtime; no replay was performed',
               }),
             },
           });
@@ -1372,7 +1402,10 @@ export class QueueService {
       : 10;
     const enqueue = async () => {
       try {
-        await this.addTask('SYNC_FULL_CATALOG_BATCH', { reason: 'scheduled_safe_catalog_set' });
+        await this.addTask('SYNC_FULL_CATALOG_BATCH', {
+          reason: 'scheduled_safe_catalog_set',
+          deploymentRevision: currentDeploymentRevision() || null,
+        });
       } catch (error: any) {
         console.error('Failed to queue scheduled full-catalog sync:', error.message);
       }

@@ -185,6 +185,9 @@ const assertions: Array<[string, boolean]> = [
     /FULL_CATALOG_STALE_BATCH_MINUTES/.test(queue) &&
       /type === 'SYNC_FULL_CATALOG_BATCH'/.test(queue) &&
       /staleBatchLockReleased: true/.test(queue) &&
+      /deploymentRevision: currentDeploymentRevision\(\)/.test(queue) &&
+      /existingDeploymentRevision !== deployedRevision/.test(queue) &&
+      /QUEUE_PROCESS_STARTED_AT/.test(queue) &&
       /no replay was performed/.test(queue) &&
       /SYNC_FULL_CATALOG_STALE_BATCH_MINUTES=12/.test(envExample),
   ],
