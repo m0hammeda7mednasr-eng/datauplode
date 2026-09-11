@@ -433,9 +433,10 @@ function isProviderCoolingDown(provider: ManagedBypassProvider): boolean {
 }
 
 function noteProviderFailure(provider: ManagedBypassProvider) {
-  // ScraperAPI pools manage failures per key. A URL-specific failure across
-  // several keys must never pause the entire provider for every other product.
-  if (provider === "scraperapi" && configuredScraperApiKeyCount() > 1) return;
+  // ScraperAPI failures are frequently URL/profile-specific. Account and key
+  // exhaustion already has its own status-aware cooldown, so one slow product
+  // must never pause the provider for the rest of the catalog.
+  if (provider === "scraperapi") return;
   const cooldownMinutes = Math.max(
     0,
     envNumber("SCRAPER_BYPASS_PROVIDER_COOLDOWN_MINUTES", 30),
@@ -8926,9 +8927,9 @@ export class NextScraper implements SupplierScraper {
                   ),
                   timeoutMs: boundedNextEnvNumber(
                     "NEXT_FAST_BYPASS_RACE_TIMEOUT_MS",
-                    12000,
+                    30000,
                     1000,
-                    12000,
+                    35000,
                   ),
                 })
               : await fetchHtmlViaManagedBypass(pageUrl, fastBypassOptions);

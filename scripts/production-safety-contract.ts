@@ -175,6 +175,8 @@ const assertions: Array<[string, boolean]> = [
     "Next uses the responsive unpinned premium provider profile",
     /preferUnpinnedPremiumRequest\s*=\s*isNextUrl\(url\)/.test(scraper) &&
       /providerOrder:\s*\["scraperapi"\][\s\S]*unpinned premium profile[\s\S]*premium:\s*true/.test(scraper) &&
+      /if \(provider === "scraperapi"\) return;/.test(scraper) &&
+      /NEXT_FAST_BYPASS_RACE_TIMEOUT_MS=30000/.test(envExample) &&
       /NEXT_FAST_BYPASS_PREMIUM=true/.test(envExample),
   ],
   [
