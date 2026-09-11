@@ -58,6 +58,9 @@ requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked 
 requireContract(railway.includes('1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w,13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI'), 'Railway must pin both authorized spreadsheets');
 requireContract(/^SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS=60000$/m.test(railway), 'Railway template must bound price/stock source scrape time');
 requireContract(/^SYNC_PRICE_STOCK_TARGET_DOMAINS=$/m.test(railway), 'Railway template must document the price/stock domain allowlist');
-requireContract(/^SYNC_SOURCE_GONE_ACTION=archive_product$/m.test(railway), 'Railway template must document the confirmed source-gone action');
+requireContract(/^SYNC_SOURCE_GONE_ACTION=delete_product$/m.test(railway), 'Railway template must delete only confirmed source-gone products');
+requireContract(queue.includes('deletionReadbackVerified'), 'confirmed Shopify deletion must be read back before database cleanup');
+requireContract(queue.includes('isShopifyProductAlreadyMissingError'), 'already-removed Shopify products must still receive verified database cleanup');
+requireContract(queue.includes('sourceGoneDeleted'), 'full-catalog batches must report confirmed source-gone deletions');
 
 console.log(JSON.stringify({ ok: true, isolatedPriceStockWrites: true }, null, 2));

@@ -93,10 +93,10 @@ function cleanOptionText(value: any): string {
 }
 
 function getSourceGoneAction(): 'zero_inventory' | 'draft_product' | 'archive_product' | 'delete_product' {
-  const configured = cleanOptionText(process.env.SYNC_SOURCE_GONE_ACTION || 'archive_product').toLowerCase();
+  const configured = cleanOptionText(process.env.SYNC_SOURCE_GONE_ACTION || 'delete_product').toLowerCase();
   return SOURCE_GONE_ACTIONS.has(configured)
     ? configured as 'zero_inventory' | 'draft_product' | 'archive_product' | 'delete_product'
-    : 'archive_product';
+    : 'delete_product';
 }
 
 function isConfirmedSourceGoneError(error: any): boolean {
@@ -124,6 +124,12 @@ function isConfirmedSourceGoneError(error: any): boolean {
   return /HTTP 404|returned HTTP 404|Target URL returned error 404|404\s*\|\s*Page Not Found|Title:\s*(?:404|Page Not Found)|Page Not Found|product (?:was )?(?:removed|deleted|not found)|not available anymore|Oops[,'’]?\s+something(?:'s|\s+has)?\s+gone\s+wrong/i.test(
     combined,
   );
+}
+
+function isShopifyProductAlreadyMissingError(error: any): boolean {
+  const status = Number(error?.status || error?.statusCode || error?.response?.status);
+  const message = cleanOptionText(error?.message || error);
+  return status === 404 || /Shopify REST delete failed with HTTP 404|Shopify API error: Product not found/i.test(message);
 }
 
 function sourceGoneRawPayload(product: any, action: string, error: any): string {
@@ -1869,7 +1875,25 @@ export class QueueService {
     };
 
     if (action === 'delete_product') {
-      await ShopifyService.deleteProduct(client, shopifyProductId);
+      let deletion: { deletedProductId: string; method: string };
+      try {
+        deletion = await ShopifyService.deleteProduct(client, shopifyProductId);
+      } catch (deleteError: any) {
+        if (!isShopifyProductAlreadyMissingError(deleteError)) throw deleteError;
+        deletion = { deletedProductId: shopifyProductId, method: 'already_absent' };
+      }
+      let deletionReadbackVerified = false;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const liveProduct = await ShopifyService.getProductBasic(client, shopifyProductId);
+        if (!liveProduct) {
+          deletionReadbackVerified = true;
+          break;
+        }
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+      if (!deletionReadbackVerified) {
+        throw new Error('Shopify source-gone deletion could not be verified; database cleanup was blocked');
+      }
       await markCatalogIndexSourceGone({
         shopifyId: shopifyProductId,
         status: 'DELETED',
@@ -1899,6 +1923,8 @@ export class QueueService {
               ...summary,
               deletedFromShopify: true,
               deletedFromDatabase: true,
+              deletionMethod: deletion.method,
+              deletionReadbackVerified,
             }),
             userId: 'System',
           },
@@ -1909,6 +1935,8 @@ export class QueueService {
         ...summary,
         deletedFromShopify: true,
         deletedFromDatabase: true,
+        deletionMethod: deletion.method,
+        deletionReadbackVerified,
       };
     }
 
@@ -2497,7 +2525,15 @@ export class QueueService {
         updatedAt: true,
         lastScrapedAt: true,
         variants: { select: { sku: true, size: true, shopifyVariant: { select: { sku: true } } }, take: 5 },
-        shopifyProduct: { select: { syncEnabled: true, variants: { select: { sku: true }, take: 5 } } },
+        shopifyProduct: {
+          select: {
+            id: true,
+            shopifyId: true,
+            status: true,
+            syncEnabled: true,
+            variants: { select: { sku: true }, take: 5 },
+          },
+        },
       },
     })
       : await prisma.sourceProduct.findMany({
@@ -2535,7 +2571,15 @@ export class QueueService {
             updatedAt: true,
             lastScrapedAt: true,
             variants: { select: { sku: true, size: true, shopifyVariant: { select: { sku: true } } }, take: 5 },
-            shopifyProduct: { select: { syncEnabled: true, variants: { select: { sku: true }, take: 5 } } },
+            shopifyProduct: {
+              select: {
+                id: true,
+                shopifyId: true,
+                status: true,
+                syncEnabled: true,
+                variants: { select: { sku: true }, take: 5 },
+              },
+            },
           },
           orderBy: { lastScrapedAt: 'asc' },
           take: remaining,
@@ -2588,6 +2632,7 @@ export class QueueService {
     const location = await ShopifyService.getInventoryLocation(client);
     const results: any[] = [];
     let failed = 0;
+    let sourceGoneDeleted = 0;
     for (const candidate of candidates) {
       try {
         const isVerifiedPendingCandidate = FULL_CATALOG_INCLUDE_VERIFIED_PENDING &&
@@ -2614,6 +2659,12 @@ export class QueueService {
           });
         }
       } catch (error: any) {
+        if (isConfirmedSourceGoneError(error)) {
+          const sourceGoneResult = await this.handleConfirmedSourceGone(candidate, `full-catalog:${candidate.id}`, error);
+          sourceGoneDeleted += sourceGoneResult.deletedFromShopify ? 1 : 0;
+          results.push({ success: true, ...sourceGoneResult });
+          continue;
+        }
         failed += 1;
         const message = cleanOptionText(error?.message || error).slice(0, 2000);
         await prisma.auditLog.create({
@@ -2637,6 +2688,7 @@ export class QueueService {
       completed: results.filter((result) => result.success && result.skipped !== true).length,
       skipped: results.filter((result) => result.skipped === true).length,
       failed,
+      sourceGoneDeleted,
       readbackVerified: results.filter((result) => result.readbackVerified).length,
       results,
     };
