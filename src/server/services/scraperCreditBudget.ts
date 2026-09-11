@@ -77,37 +77,24 @@ export async function getScraperApiAccountUsage() {
   return accountUsagePromise;
 }
 
-function creditsFromDetails(details: string | null) {
-  try {
-    const parsed = JSON.parse(details || "{}");
-    if (Number(parsed.accountingVersion || 0) !== 2) return 0;
-    const value = Number(parsed.requestedCredits || parsed.credits);
-    return Number.isFinite(value) && value > 0 ? value : 0;
-  } catch {
-    return 0;
-  }
-}
-
 async function usedSince(client: any, createdAt: Date) {
-  let total = 0;
-  let cursor: string | undefined;
-
-  while (true) {
-    const rows = await client.auditLog.findMany({
-      where: { action: ACTION, createdAt: { gte: createdAt } },
-      select: { id: true, details: true },
-      orderBy: { id: "asc" },
-      take: 1000,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
-
-    for (const row of rows) total += creditsFromDetails(row.details);
-    if (rows.length < 1000) break;
-    cursor = rows[rows.length - 1]?.id;
-    if (!cursor) break;
-  }
-
-  return total;
+  const rows = await client.$queryRawUnsafe(`
+    SELECT COALESCE(SUM(
+      CASE
+        WHEN ("details"::jsonb ->> 'accountingVersion') = '2'
+          THEN GREATEST(0, COALESCE(
+            NULLIF("details"::jsonb ->> 'requestedCredits', '')::numeric,
+            NULLIF("details"::jsonb ->> 'credits', '')::numeric,
+            0
+          ))
+        ELSE 0
+      END
+    ), 0)::text AS "total"
+    FROM "AuditLog"
+    WHERE "action" = $1 AND "createdAt" >= $2
+  `, ACTION, createdAt) as Array<{ total: string }>;
+  const total = Number(rows[0]?.total || 0);
+  return Number.isFinite(total) && total > 0 ? total : 0;
 }
 
 function defaultDailyLimit(monthlyLimit: number, now = new Date()) {
