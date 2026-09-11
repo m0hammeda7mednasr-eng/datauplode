@@ -1098,9 +1098,18 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
       WITH progress AS (
         SELECT
           s."id" AS "sourceProductId",
-          MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_SET') AS "catalogSuccessAt",
-          MAX(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockSuccessAt",
-          MIN(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "firstSuccessAt",
+          MAX(a."createdAt") FILTER (
+            WHERE a."action"='SYNC_PRODUCT_CATALOG_SET'
+              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+          ) AS "catalogSuccessAt",
+          MAX(a."createdAt") FILTER (
+            WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
+              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+          ) AS "priceStockSuccessAt",
+          MIN(a."createdAt") FILTER (
+            WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
+              AND COALESCE(a."details", '') LIKE '%"readbackVerified":true%'
+          ) AS "firstSuccessAt",
           MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
           MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
         FROM "SourceProduct" s
