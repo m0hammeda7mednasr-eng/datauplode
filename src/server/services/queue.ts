@@ -17,6 +17,7 @@ const PRICE_STOCK_SYNC_BATCH_SIZE = Number(process.env.SYNC_PRICE_STOCK_BATCH_SI
 const PRICE_STOCK_SYNC_MIN_AGE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_MIN_AGE_MINUTES || 1440);
 const PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES = Number(process.env.SYNC_PRICE_STOCK_RECENT_FAILURE_MINUTES || 30);
 const PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS = Number(process.env.SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS || 120_000);
+const SOURCE_GONE_ACTIONS = new Set(['zero_inventory', 'draft_product', 'archive_product', 'delete_product']);
 const PRICE_STOCK_TARGET_DOMAINS = String(process.env.SYNC_PRICE_STOCK_TARGET_DOMAINS || '')
   .split(/[,\s]+/)
   .map((value) => value.trim().toLowerCase())
@@ -89,6 +90,78 @@ function priceStockSyncCutoffDate(): Date {
 
 function cleanOptionText(value: any): string {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function getSourceGoneAction(): 'zero_inventory' | 'draft_product' | 'archive_product' | 'delete_product' {
+  const configured = cleanOptionText(process.env.SYNC_SOURCE_GONE_ACTION || 'archive_product').toLowerCase();
+  return SOURCE_GONE_ACTIONS.has(configured)
+    ? configured as 'zero_inventory' | 'draft_product' | 'archive_product' | 'delete_product'
+    : 'archive_product';
+}
+
+function isConfirmedSourceGoneError(error: any): boolean {
+  const code = cleanOptionText(error?.code);
+  if (/^SOURCE_(?:GONE|NOT_FOUND|REMOVED)$/i.test(code)) return true;
+  if (/SOURCE_BLOCKED/i.test(code)) return false;
+
+  const status = Number(error?.status || error?.statusCode || error?.response?.status);
+  const message = cleanOptionText(error?.message || error);
+  const details = Array.isArray(error?.details)
+    ? error.details.map(cleanOptionText).join('; ')
+    : cleanOptionText(error?.details);
+  const combined = `${message}; ${details}`;
+
+  if (
+    /HTTP 403|Access Denied|permission to access|Forbidden|Cloudflare|security verification|captcha|SOURCE_BLOCKED|blocked automated server access|ScraperAPI returned a blocked page|ZenRows returned a blocked page|timed out|timeout|ECONNRESET|ENOTFOUND/i.test(
+      combined,
+    )
+  ) {
+    return false;
+  }
+
+  if (status === 404) return true;
+
+  return /HTTP 404|returned HTTP 404|Target URL returned error 404|404\s*\|\s*Page Not Found|Title:\s*(?:404|Page Not Found)|Page Not Found|product (?:was )?(?:removed|deleted|not found)|not available anymore|Oops[,'’]?\s+something(?:'s|\s+has)?\s+gone\s+wrong/i.test(
+    combined,
+  );
+}
+
+function sourceGoneRawPayload(product: any, action: string, error: any): string {
+  const raw = parseProductRaw(product?.raw);
+  return JSON.stringify({
+    ...raw,
+    sourceGone: {
+      action,
+      confirmedAt: new Date().toISOString(),
+      error: cleanOptionText(error?.message || error).slice(0, 1000),
+    },
+  });
+}
+
+async function markCatalogIndexSourceGone(params: {
+  shopifyId: string;
+  status: string;
+  matchStatus: string;
+  reason: string;
+}) {
+  try {
+    await prisma.$executeRawUnsafe(
+      `
+        UPDATE "ShopifyCatalogIndexV2"
+        SET "status" = $2,
+            "matchStatus" = $3,
+            "reason" = $4,
+            "updatedAt" = NOW()
+        WHERE "shopifyId" = $1
+      `,
+      params.shopifyId,
+      params.status,
+      params.matchStatus,
+      params.reason,
+    );
+  } catch (error: any) {
+    console.warn('Failed to update catalog index for source-gone product:', error?.message || error);
+  }
 }
 
 function fullCatalogDomainRank(url: string): number {
@@ -1764,6 +1837,183 @@ export class QueueService {
     return summary;
   }
 
+  private static async handleConfirmedSourceGone(
+    product: any,
+    jobId: string,
+    error: any,
+  ) {
+    if (!product.shopifyProduct?.shopifyId) {
+      throw new Error('Source product is gone, but no linked Shopify product was found');
+    }
+
+    const action = getSourceGoneAction();
+    const shopifyProductId = product.shopifyProduct.shopifyId;
+    const shopifyProductDbId = product.shopifyProduct.id;
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const errorMessage = cleanOptionText(error?.message || error).slice(0, 2000);
+    const summary: any = {
+      mode: 'source_gone',
+      sourceGoneConfirmed: true,
+      sourceGoneAction: action,
+      sourceProductId: product.id,
+      shopifyProductId,
+      sourceUrl: product.url,
+      jobId,
+      error: errorMessage,
+      pricesUpdated: 0,
+      inventoryUpdated: 0,
+      imagesTouched: 0,
+      detailsTouched: 0,
+      variantsRebuilt: 0,
+      shopifyMutationsAssumed: false,
+    };
+
+    if (action === 'delete_product') {
+      await ShopifyService.deleteProduct(client, shopifyProductId);
+      await markCatalogIndexSourceGone({
+        shopifyId: shopifyProductId,
+        status: 'DELETED',
+        matchStatus: 'deleted',
+        reason: 'source_gone_confirmed_deleted_from_shopify',
+      });
+
+      await prisma.$transaction(async (tx) => {
+        await tx.shopifyVariant.deleteMany({
+          where: {
+            OR: [
+              { sourceVariant: { sourceProductId: product.id } },
+              ...(shopifyProductDbId ? [{ shopifyProductId: shopifyProductDbId }] : []),
+            ],
+          },
+        });
+        await tx.shopifyProduct.deleteMany({ where: { sourceProductId: product.id } });
+        await tx.manualReviewItem.deleteMany({ where: { sourceProductId: product.id } });
+        await tx.auditLog.deleteMany({ where: { sourceProductId: product.id } });
+        await tx.sourceImage.deleteMany({ where: { sourceProductId: product.id } });
+        await tx.sourceVariant.deleteMany({ where: { sourceProductId: product.id } });
+        await tx.sourceProduct.delete({ where: { id: product.id } });
+        await tx.auditLog.create({
+          data: {
+            action: 'SYNC_SOURCE_GONE_CONFIRMED',
+            details: JSON.stringify({
+              ...summary,
+              deletedFromShopify: true,
+              deletedFromDatabase: true,
+            }),
+            userId: 'System',
+          },
+        });
+      });
+
+      return {
+        ...summary,
+        deletedFromShopify: true,
+        deletedFromDatabase: true,
+      };
+    }
+
+    let variantsZeroed = 0;
+    if (action === 'zero_inventory') {
+      const inventoryLocation = await ShopifyService.getInventoryLocation(client);
+      const liveVariants = await ShopifyService.getProductInventoryVariants(client, shopifyProductId);
+      const quantities = liveVariants
+        .map((variant: any) => ({
+          inventoryItemId: cleanOptionText(variant?.inventoryItem?.id),
+          quantity: 0,
+        }))
+        .filter((quantity: any) => quantity.inventoryItemId);
+
+      if (quantities.length) {
+        const inventoryResponse = await ShopifyService.setInventoryQuantities(client, {
+          locationId: inventoryLocation.id,
+          quantities,
+          referenceDocumentUri: `gid://syncly/SourceGone/${jobId}`,
+        });
+        const inventoryErrors = inventoryResponse.inventorySetQuantities?.userErrors || [];
+        if (inventoryErrors.length > 0) {
+          throw new Error(`Shopify Source-Gone Inventory Error: ${inventoryErrors[0].message}`);
+        }
+        variantsZeroed = quantities.length;
+      }
+    } else {
+      const status = action === 'draft_product' ? 'DRAFT' : 'ARCHIVED';
+      const statusResponse = await ShopifyService.updateProductStatus(client, shopifyProductId, status);
+      const statusErrors = statusResponse.productUpdate?.userErrors || [];
+      if (statusErrors.length > 0) {
+        throw new Error(`Shopify Source-Gone Status Error: ${statusErrors[0].message}`);
+      }
+      await markCatalogIndexSourceGone({
+        shopifyId: shopifyProductId,
+        status,
+        matchStatus: 'deleted',
+        reason: `source_gone_confirmed_${action}`,
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.sourceVariant.updateMany({
+        where: { sourceProductId: product.id },
+        data: {
+          available: false,
+          stockStatus: 'out_of_stock',
+        },
+      }),
+      prisma.shopifyProduct.update({
+        where: { id: shopifyProductDbId },
+        data: {
+          status:
+            action === 'draft_product'
+              ? 'draft'
+              : action === 'archive_product'
+                ? 'archived'
+                : product.shopifyProduct.status,
+          syncEnabled: false,
+          syncInventory: false,
+          syncPrice: false,
+        },
+      }),
+      prisma.manualReviewItem.deleteMany({ where: { sourceProductId: product.id, status: 'pending' } }),
+      prisma.sourceProduct.update({
+        where: { id: product.id },
+        data: {
+          syncStatus: 'paused',
+          raw: sourceGoneRawPayload(product, action, error),
+          lastScrapedAt: new Date(),
+        },
+      }),
+      prisma.auditLog.create({
+        data: {
+          sourceProductId: product.id,
+          action: 'SYNC_SOURCE_GONE_CONFIRMED',
+          details: JSON.stringify({
+            ...summary,
+            variantsZeroed,
+            shopifyStatus:
+              action === 'draft_product'
+                ? 'draft'
+                : action === 'archive_product'
+                  ? 'archived'
+                  : product.shopifyProduct.status,
+            syncDisabled: true,
+          }),
+          userId: 'System',
+        },
+      }),
+    ]);
+
+    return {
+      ...summary,
+      variantsZeroed,
+      shopifyStatus:
+        action === 'draft_product'
+          ? 'draft'
+          : action === 'archive_product'
+            ? 'archived'
+            : product.shopifyProduct.status,
+      syncDisabled: true,
+    };
+  }
+
   private static async syncProductPriceStockOnly(
     sourceProductId: string,
     jobId: string,
@@ -1797,16 +2047,23 @@ export class QueueService {
 
     // A successful full scrape is the proof that the supplier state is trustworthy.
     // Any network/parser failure aborts before Shopify is mutated.
-    const freshProduct = normalizeFreshProductPrices(
-      await withTimeout(
+    let scrapedProduct: NormalizedProduct;
+    try {
+      scrapedProduct = await withTimeout(
         scraperService.scrape(product.url),
         Number.isFinite(PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS) && PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS > 0
           ? PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS
           : 120_000,
         'Price/stock source scrape timed out before Shopify mutation',
-      ),
-      options,
-    );
+      );
+    } catch (error: any) {
+      if (isConfirmedSourceGoneError(error)) {
+        return this.handleConfirmedSourceGone(product, jobId, error);
+      }
+      throw error;
+    }
+
+    const freshProduct = normalizeFreshProductPrices(scrapedProduct, options);
     if (!freshProduct.variants.length) {
       throw new Error('Supplier returned no variants; price/stock write was blocked');
     }

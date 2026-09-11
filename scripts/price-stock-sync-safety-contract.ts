@@ -29,6 +29,11 @@ requireContract(isolated.includes('imagesTouched: 0'), 'audit must prove images 
 requireContract(isolated.includes('detailsTouched: 0'), 'audit must prove details are untouched');
 requireContract(isolated.includes('variantsRebuilt: 0'), 'audit must prove variants are never rebuilt');
 requireContract(!/deleteProduct|updateProductDetails|updateVariantsBulkMedia|addProductToCollection|rebuildLinkedProduct/.test(isolated), 'isolated sync contains a forbidden catalog mutation');
+requireContract(isolated.includes('handleConfirmedSourceGone'), 'confirmed source-gone products must leave the rolling queue cleanly');
+requireContract(queue.includes('function isConfirmedSourceGoneError'), 'source-gone classification helper is required');
+requireContract(queue.includes('SYNC_SOURCE_GONE_ACTION'), 'source-gone action must be controlled by env');
+requireContract(queue.includes('SOURCE_BLOCKED') && queue.includes('HTTP 403'), 'blocked source errors must never be treated as removed products');
+requireContract(queue.includes("action: 'SYNC_SOURCE_GONE_CONFIRMED'"), 'confirmed source-gone handling must be audited');
 requireContract(/runtimeWritesEnabled\(\)\s*&&\s*envFlag\("SYNC_PRICE_STOCK_AUTOSTART"\)/.test(server), 'autostart must remain behind the global write gate');
 requireContract(/^SYNC_PRICE_STOCK_AUTOSTART=false$/m.test(railway), 'Railway template must fail closed');
 requireContract(/^SYNC_PRICE_STOCK_MIN_AGE_MINUTES=1440$/m.test(railway), 'default rolling refresh must be bounded to once per day');
@@ -53,5 +58,6 @@ requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked 
 requireContract(railway.includes('1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w,13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI'), 'Railway must pin both authorized spreadsheets');
 requireContract(/^SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS=60000$/m.test(railway), 'Railway template must bound price/stock source scrape time');
 requireContract(/^SYNC_PRICE_STOCK_TARGET_DOMAINS=$/m.test(railway), 'Railway template must document the price/stock domain allowlist');
+requireContract(/^SYNC_SOURCE_GONE_ACTION=archive_product$/m.test(railway), 'Railway template must document the confirmed source-gone action');
 
 console.log(JSON.stringify({ ok: true, isolatedPriceStockWrites: true }, null, 2));
