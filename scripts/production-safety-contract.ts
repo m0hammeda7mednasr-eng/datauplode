@@ -172,6 +172,10 @@ const assertions: Array<[string, boolean]> = [
       /SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS=180000/.test(envExample),
   ],
   [
+    "full-catalog verification excludes import placeholder rows",
+    /NOT:\s*\[[\s\S]*Excel Import Issue[\s\S]*Blocked Source Product[\s\S]*\]/.test(queue),
+  ],
+  [
     "Next uses the responsive unpinned premium provider profile",
     /preferUnpinnedPremiumRequest\s*=\s*isNextUrl\(url\)/.test(scraper) &&
       /providerOrder:\s*\["scraperapi"\][\s\S]*unpinned premium profile[\s\S]*premium:\s*true/.test(scraper) &&

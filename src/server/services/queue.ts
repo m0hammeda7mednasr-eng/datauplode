@@ -2499,6 +2499,10 @@ export class QueueService {
       : configuredPendingFailureSince;
     const candidateWhere: Prisma.SourceProductWhereInput = {
         syncStatus: { not: 'paused' },
+        NOT: [
+          { title: { startsWith: 'Excel Import Issue' } },
+          { title: { startsWith: 'Blocked Source Product' } },
+        ],
         OR: FULL_CATALOG_TARGET_DOMAINS.map((domain) => ({
           url: { contains: domain, mode: 'insensitive' as const },
         })),
