@@ -181,6 +181,14 @@ const assertions: Array<[string, boolean]> = [
       /\{\s*priority\s*\}/.test(queue),
   ],
   [
+    "stale full-catalog batch locks are released without replaying product jobs",
+    /FULL_CATALOG_STALE_BATCH_MINUTES/.test(queue) &&
+      /type === 'SYNC_FULL_CATALOG_BATCH'/.test(queue) &&
+      /staleBatchLockReleased: true/.test(queue) &&
+      /no replay was performed/.test(queue) &&
+      /SYNC_FULL_CATALOG_STALE_BATCH_MINUTES=12/.test(envExample),
+  ],
+  [
     "Shopify-first catalog scan is deduplicated and throttle-aware",
     /let refreshPromise: Promise<void> \| null = null/.test(shopifyCatalogLinkRoutes) &&
       /if \(currentPromise\) return \{ alreadyRunning: true/.test(shopifyCatalogLinkRoutes) &&

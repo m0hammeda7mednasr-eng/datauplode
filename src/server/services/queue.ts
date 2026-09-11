@@ -31,6 +31,10 @@ const FULL_CATALOG_SYNC_BATCH_SIZE = Number(process.env.SYNC_FULL_CATALOG_BATCH_
 const FULL_CATALOG_SELECTION_POOL_SIZE = Number(process.env.SYNC_FULL_CATALOG_SELECTION_POOL_SIZE || 50);
 const FULL_CATALOG_SYNC_MIN_AGE_DAYS = Number(process.env.SYNC_FULL_CATALOG_MIN_AGE_DAYS || 30);
 const FULL_CATALOG_SYNC_FAILURE_RETRY_MINUTES = Number(process.env.SYNC_FULL_CATALOG_FAILURE_RETRY_MINUTES || 60);
+const FULL_CATALOG_STALE_BATCH_MINUTES = Math.max(
+  10,
+  Number(process.env.SYNC_FULL_CATALOG_STALE_BATCH_MINUTES || 12) || 12,
+);
 const FULL_CATALOG_DEFAULT_VARIANTS_ONLY = process.env.SYNC_FULL_CATALOG_DEFAULT_VARIANTS_ONLY === 'true';
 const FULL_CATALOG_INCLUDE_VERIFIED_PENDING = process.env.SYNC_FULL_CATALOG_INCLUDE_VERIFIED_PENDING === 'true';
 const FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE = process.env.SYNC_FULL_CATALOG_VERIFIED_PENDING_FAILURE_SINCE;
@@ -1147,7 +1151,7 @@ export class QueueService {
     }
 
     if (type === 'SYNC_PRICE_STOCK_BATCH' || type === 'SYNC_FULL_CATALOG_BATCH') {
-      const existingBatch = await prisma.syncJob.findFirst({
+      let existingBatch = await prisma.syncJob.findFirst({
         where: {
           type,
           status: { in: ['pending', 'running'] },
@@ -1155,6 +1159,29 @@ export class QueueService {
         },
         orderBy: { createdAt: 'desc' },
       });
+      if (existingBatch && type === 'SYNC_FULL_CATALOG_BATCH') {
+        const staleCutoff = new Date(
+          Date.now() - FULL_CATALOG_STALE_BATCH_MINUTES * 60 * 1000,
+        );
+        const batchStartedAt = existingBatch.startedAt || existingBatch.createdAt;
+        if (batchStartedAt < staleCutoff) {
+          const recovered = await prisma.syncJob.updateMany({
+            where: {
+              id: existingBatch.id,
+              status: { in: ['pending', 'running'] },
+            },
+            data: {
+              status: 'failed',
+              completedAt: new Date(),
+              result: JSON.stringify({
+                staleBatchLockReleased: true,
+                reason: 'Full-catalog batch exceeded its bounded runtime; no replay was performed',
+              }),
+            },
+          });
+          if (recovered.count === 1) existingBatch = null;
+        }
+      }
       if (existingBatch) return existingBatch;
     }
 

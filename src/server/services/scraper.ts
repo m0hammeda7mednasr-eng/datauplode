@@ -214,6 +214,15 @@ function nextSiteApiEnabled(): boolean {
   return envFlag("NEXT_SITE_API_ENABLED", true);
 }
 
+function boundedNextEnvNumber(
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return Math.min(maximum, Math.max(minimum, envNumber(name, fallback)));
+}
+
 function normalizeManagedBypassMode(value: string): ManagedBypassMode {
   const normalized = cleanText(value).toLowerCase();
   if (["always", "force", "on"].includes(normalized)) return "always";
@@ -1416,7 +1425,7 @@ async function fetchNextHtmlAttempt(
   const response = await axios.get(pageUrl, {
     headers,
     signal,
-    timeout: envNumber("NEXT_HTML_TIMEOUT_MS", 7000),
+    timeout: boundedNextEnvNumber("NEXT_HTML_TIMEOUT_MS", 7000, 1000, 8000),
     validateStatus: (status: number) => status < 500,
     ...buildScraperAxiosConfig(),
   });
@@ -1442,7 +1451,7 @@ async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
     { headers: buildNextBrowserHeaders(pageUrl), label: "desktop" },
   ];
 
-  const retryCount = Math.max(1, envNumber("NEXT_HTML_RETRIES", 1));
+  const retryCount = boundedNextEnvNumber("NEXT_HTML_RETRIES", 1, 1, 1);
   for (let retry = 0; retry < retryCount; retry += 1) {
     const controllers = attempts.map(() => new AbortController());
     try {
@@ -1465,7 +1474,7 @@ async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
       const html = await fetchHtmlWithCurl(
         pageUrl,
         buildNextMobileHeaders(pageUrl, mobileUserAgent),
-        envNumber("NEXT_CURL_TIMEOUT_MS", 5000),
+        boundedNextEnvNumber("NEXT_CURL_TIMEOUT_MS", 5000, 1000, 5000),
       );
       if (!isBlockedNextHtml(html) && isUsableNextProductHtml(html)) {
         return html;
@@ -7082,7 +7091,7 @@ async function fetchNextReaderMarkdown(
   url: string,
 ): Promise<{ markdown: string; readerUrl: string } | null> {
   const tried = new Set<string>();
-  const maxUrls = Math.max(1, envNumber("NEXT_READER_MAX_URLS", 1));
+  const maxUrls = boundedNextEnvNumber("NEXT_READER_MAX_URLS", 1, 1, 1);
 
   for (const readerUrl of buildNextReaderUrls(url).slice(0, maxUrls)) {
     const normalized = stripUrlHash(readerUrl);
@@ -7098,7 +7107,7 @@ async function fetchNextReaderMarkdown(
               "X-User-Agent": NEXT_MOBILE_USER_AGENTS[0],
             }
           : {},
-        envNumber("NEXT_READER_TIMEOUT_MS", 10000),
+        boundedNextEnvNumber("NEXT_READER_TIMEOUT_MS", 10000, 1000, 10000),
       );
       if (markdown.length < 400) {
         throw new Error("Reader fallback returned an unexpectedly short page");
@@ -8825,7 +8834,7 @@ export class NextScraper implements SupplierScraper {
                   referer: url,
                 },
                 signal: controllers[index].signal,
-                timeout: envNumber("NEXT_API_TIMEOUT_MS", 3000),
+                timeout: boundedNextEnvNumber("NEXT_API_TIMEOUT_MS", 3000, 1000, 5000),
                 validateStatus: (status: number) => status < 500,
                 ...buildScraperAxiosConfig(),
               });
@@ -8879,7 +8888,10 @@ export class NextScraper implements SupplierScraper {
       const htmlErrors: string[] = [];
       const pageUrls = [
         ...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)]),
-      ].slice(0, Math.max(1, envNumber("NEXT_FALLBACK_MAX_URLS", 1)));
+      ].slice(
+        0,
+        boundedNextEnvNumber("NEXT_FALLBACK_MAX_URLS", 1, 1, 1),
+      );
       const bypassErrors: string[] = [];
       const fastBypassTriedUrls = new Set<string>();
 
@@ -8889,7 +8901,7 @@ export class NextScraper implements SupplierScraper {
       ) {
         const fastBypassUrls = pageUrls.slice(
           0,
-          Math.max(1, envNumber("NEXT_FAST_BYPASS_URLS", 1)),
+          boundedNextEnvNumber("NEXT_FAST_BYPASS_URLS", 1, 1, 1),
         );
 
         for (const pageUrl of fastBypassUrls) {
@@ -8902,8 +8914,18 @@ export class NextScraper implements SupplierScraper {
             };
             const html = envFlag("NEXT_FAST_BYPASS_RACE", true)
               ? await fetchHtmlViaManagedBypassRace(pageUrl, fastBypassOptions, {
-                  maxProviders: envNumber("NEXT_FAST_BYPASS_RACE_MAX_PROVIDERS", 2),
-                  timeoutMs: envNumber("NEXT_FAST_BYPASS_RACE_TIMEOUT_MS", 12000),
+                  maxProviders: boundedNextEnvNumber(
+                    "NEXT_FAST_BYPASS_RACE_MAX_PROVIDERS",
+                    2,
+                    1,
+                    2,
+                  ),
+                  timeoutMs: boundedNextEnvNumber(
+                    "NEXT_FAST_BYPASS_RACE_TIMEOUT_MS",
+                    12000,
+                    1000,
+                    12000,
+                  ),
                 })
               : await fetchHtmlViaManagedBypass(pageUrl, fastBypassOptions);
             if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {
@@ -8979,10 +9001,13 @@ export class NextScraper implements SupplierScraper {
       }
 
       const playwrightErrors: string[] = [];
-      const playwrightUrls = envFlag("NEXT_PLAYWRIGHT_FALLBACK", false)
+      const playwrightUrls =
+        envFlag("NEXT_PLAYWRIGHT_FALLBACK", false) &&
+        (process.env.NODE_ENV !== "production" ||
+          envFlag("NEXT_PRODUCTION_PLAYWRIGHT_FALLBACK", false))
         ? pageUrls.slice(
             0,
-            Math.max(1, envNumber("NEXT_PLAYWRIGHT_MAX_URLS", 1)),
+            boundedNextEnvNumber("NEXT_PLAYWRIGHT_MAX_URLS", 1, 1, 1),
           )
         : [];
       for (const pageUrl of playwrightUrls) {
@@ -9044,8 +9069,18 @@ export class NextScraper implements SupplierScraper {
             };
             const html = envFlag("NEXT_BYPASS_RACE", true)
               ? await fetchHtmlViaManagedBypassRace(pageUrl, bypassOptions, {
-                  maxProviders: envNumber("NEXT_BYPASS_RACE_MAX_PROVIDERS", 2),
-                  timeoutMs: envNumber("NEXT_BYPASS_RACE_TIMEOUT_MS", 12000),
+                  maxProviders: boundedNextEnvNumber(
+                    "NEXT_BYPASS_RACE_MAX_PROVIDERS",
+                    2,
+                    1,
+                    2,
+                  ),
+                  timeoutMs: boundedNextEnvNumber(
+                    "NEXT_BYPASS_RACE_TIMEOUT_MS",
+                    12000,
+                    1000,
+                    12000,
+                  ),
                 })
               : await fetchHtmlViaManagedBypass(pageUrl, bypassOptions);
             if (isBlockedNextHtml(html) || !isUsableNextProductHtml(html)) {

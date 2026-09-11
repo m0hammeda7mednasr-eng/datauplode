@@ -65,6 +65,14 @@ requireContract(
     scraper.includes('NEXT_PLAYWRIGHT_FALLBACK'),
   'Next fallbacks must remain bounded so one blocked product cannot stall the rolling worker',
 );
+requireContract(
+  scraper.includes('function boundedNextEnvNumber') &&
+    scraper.includes('"NEXT_FALLBACK_MAX_URLS", 1, 1, 1') &&
+    scraper.includes('"NEXT_CURL_TIMEOUT_MS", 5000, 1000, 5000') &&
+    scraper.includes('"NEXT_READER_MAX_URLS", 1, 1, 1') &&
+    scraper.includes('NEXT_PRODUCTION_PLAYWRIGHT_FALLBACK'),
+  'Railway overrides must not expand the bounded Next rolling path',
+);
 requireContract(/^NEXT_FALLBACK_MAX_URLS=1$/m.test(railway), 'Railway must default Next to its requested regional URL');
 requireContract(/^NEXT_CURL_TIMEOUT_MS=5000$/m.test(railway), 'Railway must bound each Next curl fallback');
 requireContract(/^NEXT_PLAYWRIGHT_FALLBACK=false$/m.test(railway), 'Railway must skip browser startup in the rolling Next path');
