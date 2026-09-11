@@ -633,22 +633,22 @@ async function fetchHtmlViaScraperApi(
   ) => {
     await reserveScraperApiCredits(url, credits);
     noteProviderUsage("scraperapi", credits);
-    const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
-      timeout: 90000,
-      signal,
-      responseType: "text",
-      validateStatus: () => true,
-    });
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(90_000)])
+      : AbortSignal.timeout(90_000);
+    const response = await fetch(
+      `https://api.scraperapi.com?${params.toString()}`,
+      { signal: requestSignal, headers: { Accept: "text/html,*/*" } },
+    );
 
-    if (response.status !== 200) {
+    if (!response.ok) {
       if (scraperApiStatusExhaustsKey(response.status)) {
         coolDownScraperApiKey(apiKey, response.status);
       }
       throw new Error(`ScraperAPI HTTP ${response.status}`);
     }
 
-    const html =
-      typeof response.data === "string" ? response.data : String(response.data);
+    const html = await response.text();
     if (!html.trim()) throw new Error("ScraperAPI returned an empty response");
     if (looksLikeAccessDeniedHtml(html) && !isUsableNextProductHtml(html)) {
       throw new Error("ScraperAPI returned a blocked page");
