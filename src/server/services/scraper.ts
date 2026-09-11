@@ -655,6 +655,7 @@ async function fetchHtmlViaScraperApi(
     return html;
   };
 
+  const preferUnpinnedPremiumRequest = isNextUrl(url) && (premium || ultraPremium);
   const attempts: Array<{
     render: boolean;
     includeCountryAndDevice: boolean;
@@ -663,7 +664,7 @@ async function fetchHtmlViaScraperApi(
   }> = [
     {
       render: jsRender,
-      includeCountryAndDevice: true,
+      includeCountryAndDevice: !preferUnpinnedPremiumRequest,
       premium,
       ultraPremium,
     },
@@ -672,7 +673,7 @@ async function fetchHtmlViaScraperApi(
   if (countryCode || deviceType) {
     attempts.push({
       render: jsRender,
-      includeCountryAndDevice: false,
+      includeCountryAndDevice: preferUnpinnedPremiumRequest,
       premium,
       ultraPremium,
     });
@@ -8908,9 +8909,12 @@ export class NextScraper implements SupplierScraper {
           fastBypassTriedUrls.add(pageUrl);
           try {
             const fastBypassOptions: ManagedBypassOptions = {
+              providerOrder: ["scraperapi"],
               deviceType: envBypassDevice("NEXT_FAST_BYPASS_DEVICE", "mobile"),
               jsRender: envFlag("NEXT_FAST_BYPASS_RENDER", false),
-              premium: envFlag("NEXT_FAST_BYPASS_PREMIUM", false),
+              // Next's regional proxy profile routinely stalls, while the
+              // unpinned premium profile returns complete AED product HTML.
+              premium: true,
             };
             const html = envFlag("NEXT_FAST_BYPASS_RACE", true)
               ? await fetchHtmlViaManagedBypassRace(pageUrl, fastBypassOptions, {

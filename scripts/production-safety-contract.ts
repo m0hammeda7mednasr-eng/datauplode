@@ -172,6 +172,12 @@ const assertions: Array<[string, boolean]> = [
       /SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS=45000/.test(envExample),
   ],
   [
+    "Next uses the responsive unpinned premium provider profile",
+    /preferUnpinnedPremiumRequest\s*=\s*isNextUrl\(url\)/.test(scraper) &&
+      /providerOrder:\s*\["scraperapi"\][\s\S]*unpinned premium profile[\s\S]*premium:\s*true/.test(scraper) &&
+      /NEXT_FAST_BYPASS_PREMIUM=true/.test(envExample),
+  ],
+  [
     "full-catalog rolling batch remains capped at five",
     /Math\.min\(5,\s*Math\.floor\(FULL_CATALOG_SYNC_BATCH_SIZE\)\)/.test(queue),
   ],
