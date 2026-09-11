@@ -154,7 +154,7 @@ async function runCycle() {
       .filter((candidate) =>
         !isImportPlaceholder(candidate.title) &&
         Boolean(candidate.shopifyProduct?.shopifyId) &&
-        Boolean(getApprovedSheetMultiplier(candidate)),
+        Boolean(getApprovedSheetMultiplier(candidate as any)),
       )
       .sort((left, right) =>
         domainRank(left.url, domains) - domainRank(right.url, domains) ||
