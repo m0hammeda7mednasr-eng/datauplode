@@ -1099,17 +1099,44 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
         COUNT(*) FILTER (WHERE progress."variantVerified")::int AS "variantVerified",
         COUNT(*) FILTER (WHERE progress."priceStockVerified")::int AS "priceStockVerified",
         COUNT(*) FILTER (WHERE progress."variantVerified" AND progress."priceStockVerified")::int AS "fullyVerified",
+        COUNT(*) FILTER (WHERE progress."latestFailureAt" IS NOT NULL AND progress."latestFailureAt" > COALESCE(progress."latestSuccessAt", 'epoch'::timestamp))::int AS "failedAfterSuccess",
         MIN(progress."firstSuccessAt") AS "startedAt"
       FROM (
         SELECT
-          a."sourceProductId",
-          BOOL_OR(a."action"='SYNC_PRODUCT_CATALOG_SET') AS "variantVerified",
-          BOOL_OR(a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockVerified",
-          MIN(a."createdAt") AS "firstSuccessAt"
-        FROM "AuditLog" a
-        INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=a."sourceProductId"
-        WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
-        GROUP BY a."sourceProductId"
+          s."id" AS "sourceProductId",
+          success."catalogSuccessAt" IS NOT NULL
+            AND (
+              failure."catalogFailureAt" IS NULL
+              OR failure."catalogFailureAt" <= success."catalogSuccessAt"
+            ) AS "variantVerified",
+          success."priceStockSuccessAt" IS NOT NULL
+            AND (
+              failure."priceStockFailureAt" IS NULL
+              OR failure."priceStockFailureAt" <= success."priceStockSuccessAt"
+            ) AS "priceStockVerified",
+          success."firstSuccessAt",
+          GREATEST(success."catalogSuccessAt", success."priceStockSuccessAt") AS "latestSuccessAt",
+          GREATEST(failure."catalogFailureAt", failure."priceStockFailureAt") AS "latestFailureAt"
+        FROM "SourceProduct" s
+        INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
+        LEFT JOIN LATERAL (
+          SELECT
+            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_SET') AS "catalogSuccessAt",
+            MAX(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "priceStockSuccessAt",
+            MIN(a."createdAt") FILTER (WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')) AS "firstSuccessAt"
+          FROM "AuditLog" a
+          WHERE a."sourceProductId"=s."id"
+            AND a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
+        ) success ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
+            MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
+          FROM "AuditLog" a
+          WHERE a."sourceProductId"=s."id"
+            AND a."action" IN ('SYNC_PRODUCT_CATALOG_FAILED','SYNC_PRICE_STOCK_FAILED')
+        ) failure ON TRUE
+        WHERE LOWER(COALESCE(sp."status", '')) = 'active'
       ) progress
     `),
     prisma.syncJob.findFirst({
@@ -1140,6 +1167,7 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     variantsVerified: Math.min(linked, Number(coverage.variantVerified || 0)),
     priceStockVerified: Math.min(linked, Number(coverage.priceStockVerified || 0)),
     fullyVerified: verified,
+    failedAfterSuccess: Number(coverage.failedAfterSuccess || 0),
     remaining,
     completionPercent: shopifyTotal ? Math.round((verified / shopifyTotal) * 1000) / 10 : 0,
     startedAt,
