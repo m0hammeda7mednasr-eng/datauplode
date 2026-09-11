@@ -52,6 +52,23 @@ requireContract(
 requireContract(queue.includes("action: 'SYNC_PRICE_STOCK_FAILED'"), 'failed supplier checks must be audited');
 requireContract(scraper.includes('reserveScraperApiCredits(url, credits)'), 'each ScraperAPI attempt must reserve its actual profile credits');
 requireContract(scraper.includes('requestHtml(apiKey, buildParams(apiKey, attempt), credits)'), 'ScraperAPI retries must be accounted per attempted request');
+requireContract(
+  scraper.includes('controllers.forEach((controller) => controller.abort())') &&
+    scraper.includes('error?.code === "ERR_CANCELED" || axios.isCancel(error)'),
+  'managed bypass races must cancel losing requests without cooling down healthy providers',
+);
+requireContract(
+  scraper.includes('NEXT_FALLBACK_MAX_URLS') &&
+    scraper.includes('NEXT_CURL_TIMEOUT_MS') &&
+    scraper.includes('NEXT_READER_MAX_URLS') &&
+    scraper.includes('NEXT_READER_TIMEOUT_MS') &&
+    scraper.includes('NEXT_PLAYWRIGHT_FALLBACK'),
+  'Next fallbacks must remain bounded so one blocked product cannot stall the rolling worker',
+);
+requireContract(/^NEXT_FALLBACK_MAX_URLS=1$/m.test(railway), 'Railway must default Next to its requested regional URL');
+requireContract(/^NEXT_CURL_TIMEOUT_MS=5000$/m.test(railway), 'Railway must bound each Next curl fallback');
+requireContract(/^NEXT_PLAYWRIGHT_FALLBACK=false$/m.test(railway), 'Railway must skip browser startup in the rolling Next path');
+requireContract(/^NEXT_READER_MAX_URLS=1$/m.test(railway), 'Railway must bound Next reader fallbacks');
 requireContract(budget.includes('SCRAPERAPI_MONTHLY_CREDIT_LIMIT'), 'ScraperAPI must support a durable monthly credit cap');
 requireContract(budget.includes('SCRAPERAPI_DAILY_CREDIT_LIMIT'), 'ScraperAPI must support a durable daily credit cap');
 requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked products must move behind the daily rolling queue');

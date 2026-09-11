@@ -563,6 +563,7 @@ function looksLikeAccessDeniedHtml(html: string): boolean {
 async function fetchHtmlViaScraperApi(
   url: string,
   options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const configuredKeyCount = configuredScraperApiKeyCount();
   const apiKeys = orderedAvailableScraperApiKeys();
@@ -624,6 +625,7 @@ async function fetchHtmlViaScraperApi(
     noteProviderUsage("scraperapi", credits);
     const response = await axios.get(`https://api.scraperapi.com?${params.toString()}`, {
       timeout: 90000,
+      signal,
       responseType: "text",
       validateStatus: () => true,
     });
@@ -702,6 +704,7 @@ async function fetchHtmlViaScraperApi(
 async function fetchHtmlViaZenRows(
   url: string,
   options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const apiKey = cleanText(process.env.ZENROWS_API_KEY);
   if (!apiKey) throw new Error("ZENROWS_API_KEY is not configured");
@@ -727,6 +730,7 @@ async function fetchHtmlViaZenRows(
     `https://api.zenrows.com/v1/?${params.toString()}`,
     {
       timeout: 90000,
+      signal,
       responseType: "text",
       validateStatus: (status) => status < 500,
     },
@@ -750,22 +754,23 @@ async function fetchHtmlViaManagedBypassProvider(
   provider: ManagedBypassProvider,
   url: string,
   options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (provider === "scraperapi") {
-    return fetchHtmlViaScraperApi(url, options);
+    return fetchHtmlViaScraperApi(url, options, signal);
   }
   noteProviderUsage(provider);
   if (provider === "zenrows") {
-    return fetchHtmlViaZenRows(url, options);
+    return fetchHtmlViaZenRows(url, options, signal);
   }
   if (provider === "scrapingbee") {
-    return fetchHtmlViaScrapingBee(url, options);
+    return fetchHtmlViaScrapingBee(url, options, signal);
   }
   if (provider === "scrapingant") {
-    return fetchHtmlViaScrapingAnt(url, options);
+    return fetchHtmlViaScrapingAnt(url, options, signal);
   }
   if (provider === "scrapedo") {
-    return fetchHtmlViaScrapeDo(url, options);
+    return fetchHtmlViaScrapeDo(url, options, signal);
   }
   throw new Error(`Provider ${provider} is not implemented`);
 }
@@ -814,10 +819,6 @@ export async function fetchHtmlViaManagedBypassRace(
   );
   const providers = configuredProviders.slice(0, maxProviders);
 
-  if (providers.length <= 1) {
-    return fetchHtmlViaManagedBypass(url, options);
-  }
-
   const skippedReason = reserveManagedBypassAttempt(url, providers.length);
   if (skippedReason) {
     throw new Error(`Managed bypass race skipped (${skippedReason})`);
@@ -829,10 +830,19 @@ export async function fetchHtmlViaManagedBypassRace(
       envNumber("SCRAPER_BYPASS_RACE_TIMEOUT_MS", 12000),
   );
   const errors: string[] = [];
-  const attempts = providers.map((provider) =>
-    fetchHtmlViaManagedBypassProvider(provider, url, options)
+  const controllers = providers.map(() => new AbortController());
+  const attempts = providers.map((provider, index) =>
+    fetchHtmlViaManagedBypassProvider(
+      provider,
+      url,
+      options,
+      controllers[index].signal,
+    )
       .then((html) => ({ provider, html }))
       .catch((error: any) => {
+        if (error?.code === "ERR_CANCELED" || axios.isCancel(error)) {
+          throw error;
+        }
         noteProviderFailure(provider);
         const message = `${provider}: ${error?.message || error}`;
         errors.push(message);
@@ -840,8 +850,9 @@ export async function fetchHtmlViaManagedBypassRace(
       }),
   );
 
+  let timeoutHandle: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => {
+    timeoutHandle = setTimeout(() => {
       reject(
         new Error(
           `Managed bypass race timed out after ${timeoutMs}ms (${providers.join(", ")})`,
@@ -858,6 +869,9 @@ export async function fetchHtmlViaManagedBypassRace(
     noteManagedBypassFailure(url);
     const details = errors.length ? ` (${errors.join("; ")})` : "";
     throw new Error(`${error?.message || "Managed bypass race failed"}${details}`);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    controllers.forEach((controller) => controller.abort());
   }
 }
 
@@ -1451,6 +1465,7 @@ async function fetchNextPageHtml(pageUrl: string): Promise<string | null> {
       const html = await fetchHtmlWithCurl(
         pageUrl,
         buildNextMobileHeaders(pageUrl, mobileUserAgent),
+        envNumber("NEXT_CURL_TIMEOUT_MS", 5000),
       );
       if (!isBlockedNextHtml(html) && isUsableNextProductHtml(html)) {
         return html;
@@ -2424,6 +2439,7 @@ async function fetchHtml(
 async function fetchHtmlWithCurl(
   url: string,
   requestHeaders: Record<string, string> = {},
+  timeoutMs = 60000,
 ): Promise<string> {
   const curlExecutable = process.platform === "win32" ? "curl.exe" : "curl";
   const userAgent =
@@ -2446,7 +2462,7 @@ async function fetchHtmlWithCurl(
   let stdout: string | Buffer;
   try {
     ({ stdout } = await execFileAsync(curlExecutable, curlArgs, {
-      timeout: 60000,
+      timeout: Math.max(1000, timeoutMs),
       maxBuffer: 30 * 1024 * 1024,
     }));
   } catch (error: any) {
@@ -2468,6 +2484,7 @@ async function fetchHtmlWithCurl(
 async function fetchHtmlViaScrapingBee(
   url: string,
   options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const apiKey = cleanText(process.env.SCRAPINGBEE_API_KEY);
   if (!apiKey) throw new Error("SCRAPINGBEE_API_KEY is not configured");
@@ -2491,6 +2508,7 @@ async function fetchHtmlViaScrapingBee(
     `https://app.scrapingbee.com/api/v1?${params.toString()}`,
     {
       timeout: 90000,
+      signal,
       responseType: "text",
       validateStatus: (status) => status < 500,
     },
@@ -2513,6 +2531,7 @@ async function fetchHtmlViaScrapingBee(
 async function fetchHtmlViaScrapingAnt(
   url: string,
   _options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const apiKey = cleanText(process.env.SCRAPINGANT_API_KEY);
   if (!apiKey) throw new Error("SCRAPINGANT_API_KEY is not configured");
@@ -2524,6 +2543,7 @@ async function fetchHtmlViaScrapingAnt(
     `https://api.scrapingant.com/v1/general?${params.toString()}`,
     {
       timeout: 90000,
+      signal,
       responseType: "text",
       headers: {
         "x-api-key": apiKey,
@@ -2561,6 +2581,7 @@ async function fetchHtmlViaScrapingAnt(
 async function fetchHtmlViaScrapeDo(
   url: string,
   options: ManagedBypassOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const token = cleanText(process.env.SCRAPEDO_TOKEN);
   if (!token) throw new Error("SCRAPEDO_TOKEN is not configured");
@@ -2582,6 +2603,7 @@ async function fetchHtmlViaScrapeDo(
 
   const response = await axios.get(`https://api.scrape.do/?${params.toString()}`, {
     timeout: 90000,
+    signal,
     responseType: "text",
     validateStatus: (status) => status < 500,
   });
@@ -6983,6 +7005,7 @@ export class MaxFashionScraper implements SupplierScraper {
 async function fetchReaderMarkdown(
   url: string,
   extraHeaders: Record<string, string> = {},
+  timeoutMs = 30000,
 ): Promise<string> {
   if (!externalReaderEnabled()) {
     throw new Error(
@@ -6996,7 +7019,7 @@ async function fetchReaderMarkdown(
       "User-Agent": browserHeaders["User-Agent"],
       ...extraHeaders,
     },
-    timeout: 30000,
+    timeout: Math.max(1000, timeoutMs),
     responseType: "text",
     validateStatus: (status) => status < 500,
     ...buildScraperAxiosConfig(),
@@ -7059,8 +7082,9 @@ async function fetchNextReaderMarkdown(
   url: string,
 ): Promise<{ markdown: string; readerUrl: string } | null> {
   const tried = new Set<string>();
+  const maxUrls = Math.max(1, envNumber("NEXT_READER_MAX_URLS", 1));
 
-  for (const readerUrl of buildNextReaderUrls(url)) {
+  for (const readerUrl of buildNextReaderUrls(url).slice(0, maxUrls)) {
     const normalized = stripUrlHash(readerUrl);
     if (tried.has(normalized)) continue;
     tried.add(normalized);
@@ -7074,6 +7098,7 @@ async function fetchNextReaderMarkdown(
               "X-User-Agent": NEXT_MOBILE_USER_AGENTS[0],
             }
           : {},
+        envNumber("NEXT_READER_TIMEOUT_MS", 10000),
       );
       if (markdown.length < 400) {
         throw new Error("Reader fallback returned an unexpectedly short page");
@@ -8854,7 +8879,7 @@ export class NextScraper implements SupplierScraper {
       const htmlErrors: string[] = [];
       const pageUrls = [
         ...new Set([stripUrlHash(url), ...buildNextHtmlFallbackUrls(url)]),
-      ];
+      ].slice(0, Math.max(1, envNumber("NEXT_FALLBACK_MAX_URLS", 1)));
       const bypassErrors: string[] = [];
       const fastBypassTriedUrls = new Set<string>();
 
@@ -8954,7 +8979,13 @@ export class NextScraper implements SupplierScraper {
       }
 
       const playwrightErrors: string[] = [];
-      for (const pageUrl of pageUrls) {
+      const playwrightUrls = envFlag("NEXT_PLAYWRIGHT_FALLBACK", false)
+        ? pageUrls.slice(
+            0,
+            Math.max(1, envNumber("NEXT_PLAYWRIGHT_MAX_URLS", 1)),
+          )
+        : [];
+      for (const pageUrl of playwrightUrls) {
         try {
           const html = await fetchHtmlWithPlaywright(
             pageUrl,
