@@ -169,7 +169,7 @@ const assertions: Array<[string, boolean]> = [
     "full-catalog source scraping is bounded before Shopify mutation",
     /withTimeout\([\s\S]*new ScraperService\(\)\.scrape\(product\.url\)[\s\S]*sourceScrapeTimeoutMs\(\)[\s\S]*before Shopify mutation/.test(fullCatalogSync) &&
       /Math\.min\(180_000, Math\.max\(30_000/.test(fullCatalogSync) &&
-      /SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS=120000/.test(envExample),
+      /SYNC_FULL_CATALOG_SCRAPE_TIMEOUT_MS=180000/.test(envExample),
   ],
   [
     "Next uses the responsive unpinned premium provider profile",
