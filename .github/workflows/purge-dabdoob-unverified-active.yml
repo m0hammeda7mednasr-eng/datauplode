@@ -1,4 +1,4 @@
-name: Repair Dabdoob Next V47744 color
+name: Repair Dabdoob Next V47744 catalog
 
 on:
   workflow_dispatch:
@@ -53,9 +53,9 @@ jobs:
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
             --header "x-github-actions-oidc-token: ${oidc_token}" \
-            --header 'x-next-color-repair-confirm: REPAIR_NEXT_V47744_COLOR' \
-            --data '{"dryRun":true,"confirm":"REPAIR_NEXT_V47744_COLOR"}' \
-            "${RAILWAY_BASE_URL%/}/api/admin/repair-next-v47744-color")"
+            --header 'x-next-catalog-repair-confirm: REPAIR_NEXT_V47744_CATALOG' \
+            --data '{"dryRun":true,"confirm":"REPAIR_NEXT_V47744_CATALOG"}' \
+            "${RAILWAY_BASE_URL%/}/api/admin/repair-next-v47744-catalog")"
           cat dryrun.json
           HTTP_CODE="$code" node - <<'NODE'
           const fs = require('node:fs');
@@ -65,9 +65,11 @@ jobs:
           if (body?.summary?.productId !== 'gid://shopify/Product/8220083322933') throw new Error('wrong Shopify product');
           if (body?.summary?.sourceUrl !== 'https://www.next.ae/en/style/sv004113/v47744') throw new Error('wrong source URL');
           if (Number(body?.summary?.variants) !== 10) throw new Error('unexpected variant count');
+          if (Number(body?.summary?.multiplier) !== 23) throw new Error('unexpected multiplier');
+          if (Number(body?.summary?.inStock) !== 2 || Number(body?.summary?.soldOut) !== 8) throw new Error('unexpected stock scope');
           NODE
 
-      - name: Repair color and verify Shopify readback
+      - name: Repair catalog and verify Shopify readback
         shell: bash
         run: |
           set -euo pipefail
@@ -82,18 +84,20 @@ jobs:
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
             --header "x-github-actions-oidc-token: ${oidc_token}" \
-            --header 'x-next-color-repair-confirm: REPAIR_NEXT_V47744_COLOR' \
-            --data '{"confirm":"REPAIR_NEXT_V47744_COLOR"}' \
-            "${RAILWAY_BASE_URL%/}/api/admin/repair-next-v47744-color")"
+            --header 'x-next-catalog-repair-confirm: REPAIR_NEXT_V47744_CATALOG' \
+            --data '{"confirm":"REPAIR_NEXT_V47744_CATALOG"}' \
+            "${RAILWAY_BASE_URL%/}/api/admin/repair-next-v47744-catalog")"
           cat repair.json
           HTTP_CODE="$code" node - <<'NODE'
           const fs = require('node:fs');
           const body = JSON.parse(fs.readFileSync('repair.json', 'utf8'));
           const status = Number(process.env.HTTP_CODE);
           if (status < 200 || status >= 300 || body?.success !== true) throw new Error(`repair failed HTTP=${status} code=${body?.code || 'unknown'}`);
-          if (body?.alreadyRepaired !== true) {
-            if (body?.repaired !== true || Number(body?.variants) !== 10) throw new Error('repair was not read-back verified');
-            if (JSON.stringify(body?.afterColors) !== JSON.stringify(['Light Green'])) throw new Error(`wrong final color: ${JSON.stringify(body?.afterColors)}`);
-          }
-          console.log('FINAL_OK V47744 color=Light Green variants=10');
+          if (body?.repaired !== true || body?.readbackVerified !== true || Number(body?.variants) !== 10) throw new Error('repair was not read-back verified');
+          if (JSON.stringify(body?.afterColors) !== JSON.stringify(['Light Green'])) throw new Error(`wrong final color: ${JSON.stringify(body?.afterColors)}`);
+          if (Number(body?.multiplier) !== 23 || Number(body?.inStock) !== 2 || Number(body?.soldOut) !== 8) throw new Error('wrong final price/stock scope');
+          const rows = Array.isArray(body?.rows) ? body.rows : [];
+          if (rows.length !== 10 || rows.filter(row => Number(row.inventory) > 0).length !== 2) throw new Error('wrong final inventory readback');
+          if (!rows.some(row => Number(row.price) === 1748)) throw new Error('AED76 x23 price was not repaired');
+          console.log('FINAL_OK V47744 color=Light Green variants=10 inStock=2 soldOut=8 multiplier=23');
           NODE
