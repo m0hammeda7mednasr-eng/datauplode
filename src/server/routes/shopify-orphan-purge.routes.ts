@@ -132,6 +132,40 @@ async function firstDrafts(client: any, first: number) {
   return Array.isArray(data?.products?.nodes) ? data.products.nodes : [];
 }
 
+async function deleteDraftProduct(client: any, productId: string) {
+  try {
+    return await ShopifyService.deleteProduct(client, productId);
+  } catch (error: any) {
+    const message = clean(error?.message || error);
+    if (!/Shopify REST delete failed with HTTP 422/i.test(message)) throw error;
+
+    const data = await client.request(
+      `mutation DeleteOrphanDraft($id: ID!) {
+        productDelete(id: $id) {
+          deletedProductId
+          userErrors { field message }
+        }
+      }`,
+      { id: productId },
+    );
+    const userErrors = Array.isArray(data?.productDelete?.userErrors)
+      ? data.productDelete.userErrors
+      : [];
+    if (userErrors.length) {
+      throw new Error(
+        `Shopify GraphQL delete rejected product: ${userErrors
+          .map((entry: any) => clean(entry?.message))
+          .filter(Boolean)
+          .join('; ') || 'unknown user error'}`,
+      );
+    }
+    if (clean(data?.productDelete?.deletedProductId) !== productId) {
+      throw new Error('Shopify GraphQL delete did not confirm the requested product ID');
+    }
+    return { deletedProductId: productId, method: 'graphql_422_fallback' };
+  }
+}
+
 async function preconditions(client: any) {
   const state = await shopState(client);
   const domain = clean(state.shop?.myshopifyDomain).toLowerCase();
@@ -228,7 +262,7 @@ router.post('/admin/purge-shopify-orphans', async (req, res) => {
             continue;
           }
 
-          await ShopifyService.deleteProduct(client, id);
+          await deleteDraftProduct(client, id);
           let liveAfter: any = null;
           for (let attempt = 0; attempt < 4; attempt += 1) {
             liveAfter = await ShopifyService.getProductBasic(client, id).catch(() => null);
