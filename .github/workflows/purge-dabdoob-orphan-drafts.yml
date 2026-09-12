@@ -11,10 +11,10 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   RAILWAY_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL || 'https://datauplode-production.up.railway.app' }}
-  CATALOG_AUDIT_WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
   CONFIRM: PURGE_DABDOOB_ORPHAN_DRAFTS
 
 jobs:
@@ -22,15 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Fail closed unless production write token exists
+      - name: Request repository-bound OIDC token
         shell: bash
         run: |
           set -euo pipefail
           test -n "$RAILWAY_BASE_URL"
-          if [ -z "$CATALOG_AUDIT_WRITE_TOKEN" ]; then
-            echo 'CATALOG_AUDIT_WRITE_TOKEN is missing; refusing Shopify deletion.' >&2
-            exit 2
-          fi
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          token="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-orphan-purge" \
+            | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+          test -n "$token"
+          echo "::add-mask::$token"
+          echo "GITHUB_OIDC_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Wait for this exact commit to be live on Railway
         env:
@@ -64,7 +69,7 @@ jobs:
             --request POST \
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
-            --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+            --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
             --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
             --data '{"dryRun":true,"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
             "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
@@ -92,7 +97,7 @@ jobs:
               --request POST \
               --header 'accept: application/json' \
               --header 'content-type: application/json' \
-              --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+              --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
               --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
               --data '{"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
               "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
@@ -124,7 +129,7 @@ jobs:
             --request POST \
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
-            --header "x-catalog-audit-write-token: ${CATALOG_AUDIT_WRITE_TOKEN}" \
+            --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
             --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
             --data '{"dryRun":true,"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
             "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
