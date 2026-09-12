@@ -40,9 +40,10 @@ async function fetchAllShopifyProducts(client: any) {
 async function run() {
   try {
     const client = await ShopifyService.getClientFromDb(prisma);
-    const [linkedRows, shopify] = await Promise.all([
+    const [linkedRows, shopify, shopIdentity] = await Promise.all([
       prisma.shopifyProduct.findMany({ select: { shopifyId: true } }),
       fetchAllShopifyProducts(client),
+      client.request(`query ProductionShopIdentity { shop { id name myshopifyDomain } }`),
     ]);
     const linkedIds = new Set(linkedRows.map((row) => clean(row.shopifyId)).filter(Boolean));
     const orphans = shopify.products.filter((product) => !linkedIds.has(product.id));
@@ -53,15 +54,29 @@ async function run() {
       handle: product.handle,
       createdAt: product.createdAt,
     }));
+    const orphanStatusCounts = details.reduce<Record<string, number>>((acc, product) => {
+      const key = product.status || 'UNKNOWN';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const allStatusCounts = shopify.products.reduce<Record<string, number>>((acc, product) => {
+      const key = product.status || 'UNKNOWN';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const shop = shopIdentity?.shop || null;
 
     await prisma.auditLog.create({
       data: {
         action: 'SHOPIFY_ORPHAN_SCAN_ONCE',
         userId: 'System',
         details: JSON.stringify({
+          shop,
           scannedShopify: shopify.products.length,
           linkedLocal: linkedIds.size,
           orphanCount: details.length,
+          allStatusCounts,
+          orphanStatusCounts,
           pages: shopify.pages,
           orphans: details,
           scannedAt: new Date().toISOString(),
@@ -71,11 +86,14 @@ async function run() {
 
     console.log(JSON.stringify({
       worker: 'shopify-orphan-scan-once',
+      shop,
       scannedShopify: shopify.products.length,
       linkedLocal: linkedIds.size,
       orphanCount: details.length,
+      allStatusCounts,
+      orphanStatusCounts,
       pages: shopify.pages,
-      orphans: details,
+      sampleOrphans: details.slice(0, 20),
     }));
   } catch (error: any) {
     console.error('[shopify-orphan-scan-once] failed:', clean(error?.message || error));
