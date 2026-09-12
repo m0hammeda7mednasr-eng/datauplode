@@ -63,6 +63,7 @@ export function installInditexManagedApiHotfix() {
         deviceType: 'desktop',
         jsRender: false,
         premium: true,
+        ultraPremium: true,
       });
       const data = parseJsonBody(body);
       if (!hasProductColors(data)) {
