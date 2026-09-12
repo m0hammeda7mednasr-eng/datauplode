@@ -93,6 +93,17 @@ function priceStockSyncCutoffDate(): Date {
   return new Date(Date.now() - minutes * 60 * 1000);
 }
 
+function priceStockSourceScrapeTimeoutMs(url: string): number {
+  const configured = Number.isFinite(PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS) && PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS > 0
+    ? PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS
+    : 120_000;
+  // These adapters may try direct HTML, curl, then a managed provider. A
+  // 60-second outer timeout interrupts the provider before its own 90-second
+  // bound can finish, so protected Landmark pages need a larger envelope.
+  const protectedLandmarkSource = /(?:maxfashion|centrepointstores)\.com/i.test(url);
+  return protectedLandmarkSource ? Math.max(configured, 180_000) : configured;
+}
+
 function cleanOptionText(value: any): string {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -2144,15 +2155,61 @@ export class QueueService {
       return { skipped: true, reason: 'Price and inventory sync are disabled', sourceProductId };
     }
 
+    // Confirm the Shopify target before spending supplier-provider credits.
+    // A Shopify product always owns at least its default variant, so an empty
+    // Admin snapshot means this saved mapping no longer has a live target.
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const liveVariants = await ShopifyService.getProductInventoryVariants(
+      client,
+      product.shopifyProduct.shopifyId,
+    );
+    if (liveVariants.length === 0) {
+      const summary = {
+        mode: 'price_stock_only',
+        sourceProductId,
+        shopifyProductId: product.shopifyProduct.shopifyId,
+        shopifyMissing: true,
+        syncDisabled: true,
+        shopifyMutations: 0,
+        providerCreditsUsed: 0,
+      };
+      await prisma.$transaction([
+        prisma.shopifyProduct.update({
+          where: { id: product.shopifyProduct.id },
+          data: {
+            status: 'missing',
+            syncEnabled: false,
+            syncInventory: false,
+            syncPrice: false,
+          },
+        }),
+        prisma.sourceProduct.update({
+          where: { id: product.id },
+          data: { syncStatus: 'paused' },
+        }),
+        prisma.auditLog.create({
+          data: {
+            sourceProductId: product.id,
+            action: 'SYNC_SHOPIFY_PRODUCT_MISSING',
+            userId: 'System',
+            details: JSON.stringify({
+              ...summary,
+              jobId,
+              verifiedAt: new Date().toISOString(),
+            }),
+          },
+        }),
+      ]);
+      return summary;
+    }
+
     // A successful full scrape is the proof that the supplier state is trustworthy.
     // Any network/parser failure aborts before Shopify is mutated.
     let scrapedProduct: NormalizedProduct;
     try {
       scrapedProduct = await withTimeout(
         scraperService.scrape(product.url),
-        Number.isFinite(PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS) && PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS > 0
-          ? PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS
-          : 120_000,
+        priceStockSourceScrapeTimeoutMs(product.url),
         'Price/stock source scrape timed out before Shopify mutation',
       );
     } catch (error: any) {
@@ -2170,14 +2227,9 @@ export class QueueService {
       throw new Error('Next exposed only one selected size for a multi-variant product; price/stock write was blocked');
     }
 
-    const client = await ShopifyService.getClientFromDb(prisma);
     const inventoryLocation = syncInventory
       ? await ShopifyService.getInventoryLocation(client)
       : null;
-    const liveVariants = await ShopifyService.getProductInventoryVariants(
-      client,
-      product.shopifyProduct.shopifyId,
-    );
     const liveById = new Map(liveVariants.map((variant: any) => [variant.id, variant]));
     const liveBySku = new Map<string, any[]>();
     for (const variant of liveVariants) {
@@ -2410,6 +2462,10 @@ export class QueueService {
     const candidates = await prisma.sourceProduct.findMany({
       where: {
         syncStatus: { not: 'paused' },
+        NOT: [
+          { title: { startsWith: 'Excel Import Issue' } },
+          { title: { startsWith: 'Blocked Source Product' } },
+        ],
         ...(PRICE_STOCK_TARGET_DOMAINS.length > 0 ? {
           OR: PRICE_STOCK_TARGET_DOMAINS.map((domain) => ({
             url: { contains: domain, mode: 'insensitive' as const },

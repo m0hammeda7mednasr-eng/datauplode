@@ -23,6 +23,20 @@ requireContract(
   isolated.includes('Price/stock source scrape timed out before Shopify mutation'),
   'supplier refresh must be bounded before writes',
 );
+requireContract(
+  isolated.indexOf('getProductInventoryVariants') < isolated.indexOf('scraperService.scrape(product.url)'),
+  'Shopify target existence must be checked before supplier-provider credits are spent',
+);
+requireContract(
+  isolated.includes("action: 'SYNC_SHOPIFY_PRODUCT_MISSING'") &&
+    isolated.includes('shopifyMutations: 0') &&
+    isolated.includes('providerCreditsUsed: 0'),
+  'missing Shopify targets must be disabled locally without supplier or Shopify mutations',
+);
+requireContract(
+  queue.includes('protectedLandmarkSource ? Math.max(configured, 180_000) : configured'),
+  'protected Landmark supplier reads must not be cut off before the managed provider timeout',
+);
 requireContract(isolated.includes('readbackVerified: true'), 'Shopify read-back must be required');
 requireContract(isolated.includes('attempt <= 5'), 'Shopify read-back must tolerate bounded inventory propagation delay');
 requireContract(isolated.includes('imagesTouched: 0'), 'audit must prove images are untouched');
