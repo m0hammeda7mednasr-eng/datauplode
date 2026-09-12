@@ -46,7 +46,7 @@ jobs:
           try { body = JSON.parse(fs.readFileSync('ready.json', 'utf8')); } catch {}
           const expected = String(process.env.TARGET_SHA || '').toLowerCase();
           const actual = String(body?.deployment?.revision || '').toLowerCase();
-          process.stdout.write(code = body?.deployment?.revisionVerified === true && actual === expected ? 'ready' : `waiting:${actual || 'unknown'}`);
+          process.stdout.write(body?.deployment?.revisionVerified === true && actual === expected ? 'ready' : `waiting:${actual || 'unknown'}`);
           NODE
             )"
             echo "Railway ${attempt}: HTTP ${code} ${state}"
@@ -112,11 +112,9 @@ jobs:
           NODE
             )"
             echo "Batch ${batch}: ${result}"
-            if [ "$result" = complete ]; then exit 0; fi
+            if [ "$result" = complete ]; then break; fi
             sleep 1
           done
-          echo 'Purge batch ceiling reached before drafts became zero.' >&2
-          exit 2
 
       - name: Verify final Shopify state
         shell: bash
