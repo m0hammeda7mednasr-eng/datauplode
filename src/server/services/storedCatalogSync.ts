@@ -105,6 +105,8 @@ export async function syncTrustedStoredCatalog(options: {
   const beforeBySku = new Map(
     (before.variants || []).map((variant: any) => [clean(variant.sku).toLowerCase(), variant]),
   );
+  const storedInventoryFresh =
+    Date.now() - product.lastScrapedAt.getTime() <= 24 * 60 * 60 * 1000;
 
   const files = product.images.map((image, index) => ({
     originalSource: image.url,
@@ -127,6 +129,12 @@ export async function syncTrustedStoredCatalog(options: {
     const existing: any = beforeBySku.get(clean(variant.sku).toLowerCase());
     const sourcePrice = Number(variant.price || product.price);
     const imageUrl = clean(variant.imageUrl || product.images[0]?.url);
+    const storedStockKnown = variant.stockStatus !== 'unknown';
+    const quantity = existing
+      ? Number(existing.inventoryQuantity || 0)
+      : storedInventoryFresh && storedStockKnown
+        ? (variant.available === false || variant.stockStatus === 'out_of_stock' ? 0 : 10)
+        : 0;
     return {
       ...(existing?.id ? { id: existing.id } : {}),
       optionValues,
@@ -137,7 +145,7 @@ export async function syncTrustedStoredCatalog(options: {
       inventoryQuantities: [{
         locationId: location.id,
         name: 'available',
-        quantity: variant.available === false || variant.stockStatus === 'out_of_stock' ? 0 : 10,
+        quantity,
       }],
       ...(imageUrl ? {
         file: {
@@ -198,6 +206,7 @@ export async function syncTrustedStoredCatalog(options: {
         sourceMode: 'stored-fallback',
         freshSourceVerified: false,
         readbackVerified: true,
+        inventoryMode: storedInventoryFresh ? 'preserve-existing-or-recent-stored' : 'preserve-existing-or-zero-new',
         shopifyProductId,
         variants: variants.length,
         images: files.length,
