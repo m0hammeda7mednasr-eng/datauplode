@@ -18,6 +18,36 @@ function productSetErrors(response: any) {
   return response?.productSet?.userErrors || [];
 }
 
+async function getLinkedSizeOption(client: any, productId: string) {
+  try {
+    const data = await client.request(
+      `
+        query CatalogHardcaseProductOptions($id: ID!) {
+          product(id: $id) {
+            options {
+              id
+              name
+              linkedMetafield {
+                namespace
+                key
+              }
+            }
+          }
+        }
+      `,
+      { id: productId },
+    );
+    return (data?.product?.options || []).find((option: any) => {
+      const namespace = clean(option?.linkedMetafield?.namespace).toLowerCase();
+      const key = clean(option?.linkedMetafield?.key).toLowerCase();
+      return (namespace === 'shopify' && key === 'size') || /^size$/i.test(clean(option?.name));
+    }) || null;
+  } catch (error: any) {
+    console.warn(`[shopify-hardcase] could not inspect product options for ${productId}: ${clean(error?.message || error)}`);
+    return null;
+  }
+}
+
 export function installShopifyCatalogHardcaseHotfix() {
   if (installed) return;
   installed = true;
@@ -58,8 +88,14 @@ export function installShopifyCatalogHardcaseHotfix() {
       : [];
     if (sizeOptions.length !== 1) return first;
 
+    const existingSize = await getLinkedSizeOption(client, productId);
     const oldName = clean(sizeOptions[0].name);
     const newName = 'Source Size';
+
+    if (existingSize?.id) sizeOptions[0].id = existingSize.id;
+    // ProductSet leaves omitted option fields unchanged. Explicit null clears the
+    // taxonomy link so ordinary source size strings are accepted as normal values.
+    sizeOptions[0].linkedMetafield = null;
     sizeOptions[0].name = newName;
 
     for (const variant of retryInput.variants || []) {
@@ -71,11 +107,15 @@ export function installShopifyCatalogHardcaseHotfix() {
     }
 
     const second = await originalSetCatalog(client, productId, retryInput);
-    if (productSetErrors(second).length === 0) {
+    const secondErrors = productSetErrors(second);
+    if (secondErrors.length === 0) {
       console.log(`[shopify-hardcase] size taxonomy fallback succeeded for ${productId}`);
       return second;
     }
 
+    console.warn(
+      `[shopify-hardcase] size taxonomy fallback still rejected for ${productId}: ${secondErrors.map((entry: any) => clean(entry?.message)).filter(Boolean).join(' | ')}`,
+    );
     return first;
   } as typeof ShopifyService.setProductCatalog;
 
