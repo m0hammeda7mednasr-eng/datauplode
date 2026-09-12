@@ -20,6 +20,7 @@
     "test:sheet-sync": "tsx scripts/google-sheet-sync-safety-contract.ts",
     "smoke:production": "tsx scripts/production-smoke.ts",
     "shopify:audit-existing": "tsx scripts/shopify-existing-product-audit.ts",
+    "shopify:audit-stock": "tsx scripts/audit-live-shopify-stock.ts",
     "canary:readback": "tsx scripts/shopify-canary-readback.ts",
     "db:preflight": "tsx scripts/database-preflight.ts",
     "clean": "rm -rf dist",

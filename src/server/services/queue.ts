@@ -2403,10 +2403,13 @@ export class QueueService {
     const take = Number.isFinite(PRICE_STOCK_SYNC_BATCH_SIZE) && PRICE_STOCK_SYNC_BATCH_SIZE > 0
       ? Math.floor(PRICE_STOCK_SYNC_BATCH_SIZE)
       : 50;
+    const successCutoff = priceStockSyncCutoffDate();
+    const recentCutoff = new Date(
+      Date.now() - Math.max(5, PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES) * 60 * 1000,
+    );
     const candidates = await prisma.sourceProduct.findMany({
       where: {
         syncStatus: { not: 'paused' },
-        lastScrapedAt: { lte: priceStockSyncCutoffDate() },
         ...(PRICE_STOCK_TARGET_DOMAINS.length > 0 ? {
           OR: PRICE_STOCK_TARGET_DOMAINS.map((domain) => ({
             url: { contains: domain, mode: 'insensitive' as const },
@@ -2418,6 +2421,24 @@ export class QueueService {
             OR: [{ syncInventory: true }, { syncPrice: true }],
           },
         },
+        AND: [
+          {
+            auditLogs: {
+              none: {
+                action: { in: ['SYNC_PRODUCT_CATALOG_SET', 'SYNC_PRICE_STOCK_ONLY'] },
+                createdAt: { gte: successCutoff },
+              },
+            },
+          },
+          {
+            auditLogs: {
+              none: {
+                action: 'SYNC_PRICE_STOCK_FAILED',
+                createdAt: { gte: recentCutoff },
+              },
+            },
+          },
+        ],
       },
       select: {
         id: true,
@@ -2427,12 +2448,9 @@ export class QueueService {
         variants: { select: { sku: true, shopifyVariant: { select: { sku: true } } } },
       },
       orderBy: { lastScrapedAt: 'asc' },
-      take: Math.max(take * 10, 500),
+      take: 5000,
     });
 
-    const recentCutoff = new Date(
-      Date.now() - Math.max(5, PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES) * 60 * 1000,
-    );
     const recentJobs = await prisma.syncJob.findMany({
       where: {
         type: 'SYNC_PRICE_STOCK',
@@ -2441,7 +2459,7 @@ export class QueueService {
       },
       select: { payload: true },
       orderBy: { createdAt: 'desc' },
-      take: Math.max(take * 10, 500),
+      take: 5000,
     });
     const recentlyAttempted = new Set<string>();
     for (const job of recentJobs) {
@@ -2472,6 +2490,7 @@ export class QueueService {
     return {
       queued,
       candidates: candidates.length,
+      staleByVerifiedSuccess: candidates.length,
       eligibleCandidates: eligibleCandidates.length,
       skippedOutsideAuthorizedSheets: candidates.length - eligibleCandidates.length,
       skippedRecent: eligibleCandidates.length - selected.length,
@@ -3302,26 +3321,18 @@ export class QueueService {
             const sourceProductId = cleanOptionText(payload.sourceProductId);
             if (sourceProductId) {
               await queueDbRetry('priceStockSync.recordFailedAttempt', () =>
-                prisma.$transaction([
-                  prisma.sourceProduct.update({
-                    where: { id: sourceProductId },
-                    // Move a blocked supplier page to the back of the daily
-                    // rolling queue so it cannot starve the rest of the catalog.
-                    data: { lastScrapedAt: new Date() },
-                  }),
-                  prisma.auditLog.create({
-                    data: {
-                      sourceProductId,
-                      action: 'SYNC_PRICE_STOCK_FAILED',
-                      details: JSON.stringify({
-                        mode: 'price_stock_only',
-                        error: cleanOptionText(error?.message || error).slice(0, 2000),
-                        retryAfterMinutes: PRICE_STOCK_SYNC_MIN_AGE_MINUTES,
-                        shopifyMutationsAssumed: false,
-                      }),
-                    },
-                  }),
-                ]),
+                prisma.auditLog.create({
+                  data: {
+                    sourceProductId,
+                    action: 'SYNC_PRICE_STOCK_FAILED',
+                    details: JSON.stringify({
+                      mode: 'price_stock_only',
+                      error: cleanOptionText(error?.message || error).slice(0, 2000),
+                      retryAfterMinutes: PRICE_STOCK_SYNC_RECENT_FAILURE_MINUTES,
+                      shopifyMutationsAssumed: false,
+                    }),
+                  },
+                }),
               );
             }
           } catch (attemptError: any) {

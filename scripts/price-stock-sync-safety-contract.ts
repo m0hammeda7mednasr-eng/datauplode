@@ -79,7 +79,15 @@ requireContract(/^NEXT_PLAYWRIGHT_FALLBACK=false$/m.test(railway), 'Railway must
 requireContract(/^NEXT_READER_MAX_URLS=1$/m.test(railway), 'Railway must bound Next reader fallbacks');
 requireContract(budget.includes('SCRAPERAPI_MONTHLY_CREDIT_LIMIT'), 'ScraperAPI must support a durable monthly credit cap');
 requireContract(budget.includes('SCRAPERAPI_DAILY_CREDIT_LIMIT'), 'ScraperAPI must support a durable daily credit cap');
-requireContract(queue.includes('data: { lastScrapedAt: new Date() }'), 'blocked products must move behind the daily rolling queue');
+requireContract(
+  queue.includes("action: { in: ['SYNC_PRODUCT_CATALOG_SET', 'SYNC_PRICE_STOCK_ONLY'] }") &&
+    queue.includes('createdAt: { gte: successCutoff }'),
+  'rolling eligibility must be based on a recent verified success rather than scrape-attempt age',
+);
+requireContract(
+  !/priceStockSync\.recordFailedAttempt[\s\S]{0,900}lastScrapedAt: new Date\(\)/.test(queue),
+  'failed supplier attempts must not masquerade as successful fresh scrapes',
+);
 requireContract(railway.includes('1fCbPajWL3nukX0TdoN1m2X8LV3pfPsxSMLBb0yWug2w,13JSw5k_wX8RAd98P-TWLT-938ImshAtrukjjA4n-lkI'), 'Railway must pin both authorized spreadsheets');
 requireContract(/^SYNC_PRICE_STOCK_SOURCE_SCRAPE_TIMEOUT_MS=60000$/m.test(railway), 'Railway template must bound price/stock source scrape time');
 requireContract(/^SYNC_PRICE_STOCK_TARGET_DOMAINS=$/m.test(railway), 'Railway template must document the price/stock domain allowlist');
