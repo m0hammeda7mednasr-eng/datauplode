@@ -1,0 +1,154 @@
+name: Purge Dabdoob unverified active products
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RAILWAY_BASE_URL: ${{ secrets.RAILWAY_SMOKE_BASE_URL || 'https://datauplode-production.up.railway.app' }}
+  CONFIRM: PURGE_DABDOOB_UNVERIFIED_ACTIVE
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Wait for this exact commit to be live on Railway
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            code="$(curl --silent --show-error --max-time 20 --output ready.json --write-out '%{http_code}' "${RAILWAY_BASE_URL%/}/api/ready" || true)"
+            state="$(TARGET_SHA="$TARGET_SHA" node - <<'NODE'
+          const fs = require('node:fs');
+          let body = {};
+          try { body = JSON.parse(fs.readFileSync('ready.json', 'utf8')); } catch {}
+          const expected = String(process.env.TARGET_SHA || '').toLowerCase();
+          const actual = String(body?.deployment?.revision || '').toLowerCase();
+          process.stdout.write(body?.deployment?.revisionVerified === true && actual === expected ? 'ready' : `waiting:${actual || 'unknown'}`);
+          NODE
+            )"
+            echo "Railway ${attempt}: HTTP ${code} ${state}"
+            if [ "$state" = ready ]; then exit 0; fi
+            sleep 10
+          done
+          echo 'Exact Railway revision never became ready; no delete attempted.' >&2
+          exit 2
+
+      - name: Freeze the exact unverified product snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-unverified-purge" \
+            | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+          test -n "$oidc_token"
+          echo "::add-mask::$oidc_token"
+          code="$(curl --silent --show-error --max-time 120 --output prepare.json --write-out '%{http_code}' \
+            --request POST \
+            --header 'accept: application/json' \
+            --header 'content-type: application/json' \
+            --header "x-github-actions-oidc-token: ${oidc_token}" \
+            --header "x-shopify-unverified-purge-confirm: ${CONFIRM}" \
+            --data '{"phase":"prepare","confirm":"PURGE_DABDOOB_UNVERIFIED_ACTIVE"}' \
+            "${RAILWAY_BASE_URL%/}/api/admin/purge-unverified-active")"
+          cat prepare.json
+          HTTP_CODE="$code" node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('prepare.json', 'utf8'));
+          const status = Number(process.env.HTTP_CODE);
+          if (status < 200 || status >= 300 || body?.success !== true) throw new Error(`snapshot failed HTTP=${status} code=${body?.code || 'unknown'}`);
+          if (body?.state?.shop?.myshopifyDomain !== '09fgkz-6n.myshopify.com') throw new Error('wrong Shopify store');
+          if (Number(body?.state?.draft) !== 0 || Number(body?.state?.archived) !== 0 || Number(body?.state?.unlisted) !== 0) throw new Error('unexpected non-active Shopify states');
+          const count = Number(body?.snapshotCount || 0);
+          if (count < 1 || count > 1183) throw new Error(`snapshot count outside authorized scope: ${count}`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `PURGE_JOB_ID=${body.jobId}\nSNAPSHOT_COUNT=${count}\nINITIAL_ACTIVE=${body.state.active}\n`);
+          console.log(`Frozen snapshot ${body.jobId}: ${count} unverified products from active=${body.state.active}`);
+          NODE
+
+      - name: Delete snapshot in bounded read-back-verified batches
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token=''
+          completed='false'
+          for batch in $(seq 1 150); do
+            if [ $(( (batch - 1) % 8 )) -eq 0 ]; then
+              oidc_token="$(curl --fail --silent --show-error \
+                --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-unverified-purge" \
+                | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+              test -n "$oidc_token"
+              echo "::add-mask::$oidc_token"
+            fi
+            payload="$(node -e "process.stdout.write(JSON.stringify({phase:'execute',jobId:process.env.PURGE_JOB_ID,limit:20,confirm:process.env.CONFIRM}))")"
+            code="$(curl --silent --show-error --max-time 240 --output batch.json --write-out '%{http_code}' \
+              --request POST \
+              --header 'accept: application/json' \
+              --header 'content-type: application/json' \
+              --header "x-github-actions-oidc-token: ${oidc_token}" \
+              --header "x-shopify-unverified-purge-confirm: ${CONFIRM}" \
+              --data "$payload" \
+              "${RAILWAY_BASE_URL%/}/api/admin/purge-unverified-active")"
+            cat batch.json
+            state="$(HTTP_CODE="$code" node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('batch.json', 'utf8'));
+          const status = Number(process.env.HTTP_CODE);
+          if (status < 200 || status >= 300 || body?.success !== true) {
+            throw new Error(`purge failed HTTP=${status} code=${body?.code || 'unknown'} abandoned=${body?.totals?.abandoned || 0}`);
+          }
+          const totals = body?.totals || {};
+          console.error(`deleted=${totals.deleted} alreadyMissing=${totals.alreadyMissing} protected=${totals.protected} retryable=${totals.retryable} abandoned=${totals.abandoned} active=${body?.after?.active}`);
+          process.stdout.write(body?.complete === true ? 'complete' : 'continue');
+          NODE
+            )"
+            echo "Batch ${batch}: ${state}"
+            if [ "$state" = complete ]; then completed='true'; break; fi
+            sleep 1
+          done
+          test "$completed" = true
+
+      - name: Verify final result and Shopify readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-unverified-purge" \
+            | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+          test -n "$oidc_token"
+          echo "::add-mask::$oidc_token"
+          payload="$(node -e "process.stdout.write(JSON.stringify({phase:'status',jobId:process.env.PURGE_JOB_ID,confirm:process.env.CONFIRM}))")"
+          code="$(curl --silent --show-error --max-time 120 --output final.json --write-out '%{http_code}' \
+            --request POST \
+            --header 'accept: application/json' \
+            --header 'content-type: application/json' \
+            --header "x-github-actions-oidc-token: ${oidc_token}" \
+            --header "x-shopify-unverified-purge-confirm: ${CONFIRM}" \
+            --data "$payload" \
+            "${RAILWAY_BASE_URL%/}/api/admin/purge-unverified-active")"
+          cat final.json
+          HTTP_CODE="$code" node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('final.json', 'utf8'));
+          const status = Number(process.env.HTTP_CODE);
+          const result = body?.result || {};
+          if (status < 200 || status >= 300 || body?.success !== true) throw new Error(`final status failed HTTP=${status}`);
+          if (body?.jobStatus !== 'completed' || result?.stage !== 'completed') throw new Error(`job is not complete: ${body?.jobStatus}/${result?.stage}`);
+          const deleted = Number(result?.deletedIds?.length || 0);
+          const missing = Number(result?.alreadyMissingIds?.length || 0);
+          const protectedCount = Number(result?.protectedIds?.length || 0);
+          const failed = Object.keys(result?.failed || {}).length;
+          if (deleted + missing + protectedCount !== Number(result?.snapshotCount)) throw new Error('snapshot accounting mismatch');
+          if (failed !== 0) throw new Error(`final failures=${failed}`);
+          const expectedActive = Number(result?.initialActive) - deleted;
+          if (Number(body?.state?.active) !== expectedActive) throw new Error(`Shopify active readback mismatch expected=${expectedActive} actual=${body?.state?.active}`);
+          console.log(`FINAL_OK snapshot=${result.snapshotCount} deleted=${deleted} alreadyMissing=${missing} protected=${protectedCount} active=${body.state.active}`);
+          NODE

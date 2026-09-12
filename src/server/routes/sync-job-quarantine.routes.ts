@@ -4,12 +4,14 @@ import { prisma } from "../db.js";
 import shopifyCatalogLinkRouter from "./shopify-catalog-link.routes.js";
 import defaultVariantAuditRouter from "./default-variant-audit.routes.js";
 import shopifyOrphanPurgeRouter from "./shopify-orphan-purge.routes.js";
+import shopifyUnverifiedPurgeRouter from "./shopify-unverified-purge.routes.js";
 
 // Production-only maintenance path: exact stale SyncJob IDs, status transition only, never replay.
 const router = Router();
 router.use(shopifyCatalogLinkRouter);
 router.use(defaultVariantAuditRouter);
 router.use(shopifyOrphanPurgeRouter);
+router.use(shopifyUnverifiedPurgeRouter);
 const REQUIRED_CONFIRM = "QUARANTINE_STALE_RUNNING_NO_REPLAY";
 const MAX_ROWS = 20;
 const MIN_STALE_MINUTES = 10;
