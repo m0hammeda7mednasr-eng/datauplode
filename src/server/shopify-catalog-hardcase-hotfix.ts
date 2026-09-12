@@ -75,6 +75,16 @@ export function installShopifyCatalogHardcaseHotfix() {
     productId: string,
     input: Record<string, any>,
   ) {
+    const incomingVariants = Array.isArray(input?.variants) ? input.variants : [];
+    if (incomingVariants.length <= 1) {
+      const current = await ShopifyService.getProductCatalogSnapshot(client, productId);
+      if ((current?.variants?.length || 0) > 1) {
+        throw new Error(
+          `Catalog variant collapse rejected before Shopify mutation (${current.variants.length} -> ${incomingVariants.length})`,
+        );
+      }
+    }
+
     const first = await originalSetCatalog(client, productId, input);
     const errors = productSetErrors(first);
     const sizeLinkError = errors.some((entry: any) =>
@@ -119,7 +129,7 @@ export function installShopifyCatalogHardcaseHotfix() {
     return first;
   } as typeof ShopifyService.setProductCatalog;
 
-  console.log('[shopify-hardcase] catalog read retry + size taxonomy fallback installed');
+  console.log('[shopify-hardcase] catalog read retry + size taxonomy fallback + variant-collapse guard installed');
 }
 
 installShopifyCatalogHardcaseHotfix();
