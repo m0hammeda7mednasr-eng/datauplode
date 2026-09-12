@@ -74,8 +74,14 @@ async function runCycle() {
       where: {
         id: { in: ids },
         syncStatus: { not: 'paused' },
+        currency: 'AED',
+        price: { gt: 1 },
+        description: { not: null },
         shopifyProduct: { is: { syncEnabled: true } },
-        variants: { some: { sku: { not: null } } },
+        variants: {
+          some: { sku: { not: null } },
+          every: { sku: { not: null } },
+        },
         images: { some: {} },
         AND: [
           { auditLogs: { none: { action: SUCCESS_ACTION, createdAt: { gte: successCutoff } } } },
@@ -91,12 +97,12 @@ async function runCycle() {
         _count: { select: { variants: true, images: true } },
       },
       orderBy: { lastScrapedAt: 'asc' },
-      take: Math.max(batchSize * 5, 20),
+      take: Math.max(batchSize * 8, 40),
     });
 
     const selected = candidates.slice(0, batchSize);
     if (!selected.length) {
-      console.log('[catalog-stored-fallback] no eligible trusted stored candidates');
+      console.log('[catalog-stored-fallback] no eligible complete trusted stored candidates');
       return;
     }
 
