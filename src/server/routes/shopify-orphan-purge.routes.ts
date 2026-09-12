@@ -9,6 +9,24 @@ const REQUIRED_CONFIRM = 'PURGE_DABDOOB_ORPHAN_DRAFTS';
 const EXPECTED_ACTIVE = 5062;
 const MAX_BATCH = 50;
 const MAX_EXPECTED_DRAFTS = 1756;
+const GITHUB_OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
+const GITHUB_OIDC_AUDIENCE = 'dabdoob-orphan-purge';
+const GITHUB_REPOSITORY = 'm0hammeda7mednasr-eng/datauplode';
+const GITHUB_REPOSITORY_ID = '1236020386';
+const GITHUB_REF = 'refs/heads/main';
+const GITHUB_WORKFLOW_REF = `${GITHUB_REPOSITORY}/.github/workflows/purge-dabdoob-orphan-drafts.yml@${GITHUB_REF}`;
+
+type GithubOidcClaims = {
+  iss?: string;
+  aud?: string | string[];
+  exp?: number;
+  nbf?: number;
+  repository?: string;
+  repository_id?: string;
+  ref?: string;
+  workflow_ref?: string;
+  event_name?: string;
+};
 
 function clean(value: unknown) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -20,10 +38,63 @@ function safeEqual(left: string, right: string) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function authorized(req: Request) {
+function decodeJwtPart(value: string) {
+  return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+}
+
+async function verifyGithubActionsOidc(token: string): Promise<boolean> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+
+    const header = decodeJwtPart(parts[0]) as { alg?: string; kid?: string; typ?: string };
+    const claims = decodeJwtPart(parts[1]) as GithubOidcClaims;
+    if (header.alg !== 'RS256' || !header.kid || (header.typ && header.typ !== 'JWT')) return false;
+
+    const now = Math.floor(Date.now() / 1000);
+    const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    const claimsValid =
+      claims.iss === GITHUB_OIDC_ISSUER &&
+      audience.includes(GITHUB_OIDC_AUDIENCE) &&
+      Number.isFinite(claims.exp) &&
+      Number(claims.exp) > now - 30 &&
+      (!Number.isFinite(claims.nbf) || Number(claims.nbf) <= now + 30) &&
+      claims.repository === GITHUB_REPOSITORY &&
+      clean(claims.repository_id) === GITHUB_REPOSITORY_ID &&
+      claims.ref === GITHUB_REF &&
+      claims.workflow_ref === GITHUB_WORKFLOW_REF &&
+      (claims.event_name === 'push' || claims.event_name === 'workflow_dispatch');
+    if (!claimsValid) return false;
+
+    const response = await fetch(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return false;
+    const jwks = (await response.json()) as { keys?: Array<Record<string, unknown> & { kid?: string; kty?: string; use?: string }> };
+    const jwk = jwks.keys?.find((key) => key.kid === header.kid && key.kty === 'RSA' && (!key.use || key.use === 'sig'));
+    if (!jwk) return false;
+
+    const publicKey = crypto.createPublicKey({ key: jwk as crypto.JsonWebKey, format: 'jwk' });
+    return crypto.verify(
+      'RSA-SHA256',
+      Buffer.from(`${parts[0]}.${parts[1]}`),
+      publicKey,
+      Buffer.from(parts[2], 'base64url'),
+    );
+  } catch (error) {
+    console.warn('[shopify-orphan-purge-route] GitHub Actions OIDC verification failed', error);
+    return false;
+  }
+}
+
+async function authorized(req: Request) {
   const configured = clean(process.env.CATALOG_AUDIT_WRITE_TOKEN);
   const supplied = clean(req.header('x-catalog-audit-write-token'));
-  return Boolean(configured && supplied && safeEqual(configured, supplied));
+  if (configured && supplied && safeEqual(configured, supplied)) return true;
+
+  const oidcToken = clean(req.header('x-github-actions-oidc-token'));
+  return Boolean(oidcToken) && verifyGithubActionsOidc(oidcToken);
 }
 
 async function shopState(client: any) {
@@ -75,7 +146,7 @@ async function preconditions(client: any) {
 
 router.post('/admin/purge-shopify-orphans', async (req, res) => {
   try {
-    if (!authorized(req)) {
+    if (!(await authorized(req))) {
       return res.status(403).json({ success: false, code: 'ORPHAN_PURGE_NOT_AUTHORIZED' });
     }
     const confirm = clean(req.header('x-shopify-orphan-purge-confirm') || req.body?.confirm);
@@ -229,5 +300,3 @@ router.post('/admin/purge-shopify-orphans', async (req, res) => {
 });
 
 export default router;
-
-// purge trigger 2026-09-12
