@@ -44,10 +44,9 @@ function configuredDomains() {
   return [...new Set(values)];
 }
 
-function domainRank(url: string, domains: string[]) {
+function matchingDomain(url: string, domains: string[]) {
   const normalized = clean(url).toLowerCase();
-  const rank = domains.findIndex((domain) => normalized.includes(domain));
-  return rank >= 0 ? rank : domains.length;
+  return domains.find((domain) => normalized.includes(domain)) || null;
 }
 
 function isImportPlaceholder(title: string) {
@@ -150,17 +149,40 @@ async function runCycle() {
       take: poolSize,
     });
 
-    const selected = candidates
+    const eligible = candidates
       .filter((candidate) =>
         !isImportPlaceholder(candidate.title) &&
         Boolean(candidate.shopifyProduct?.shopifyId) &&
         Boolean(getApprovedSheetMultiplier(candidate as any)),
       )
       .sort((left, right) =>
-        domainRank(left.url, domains) - domainRank(right.url, domains) ||
         (left.lastScrapedAt?.getTime() || 0) - (right.lastScrapedAt?.getTime() || 0),
-      )
-      .slice(0, batchSize);
+      );
+
+    // Fair-share the batch across domains. A blocked/high-volume source (for example
+    // Next during a 403 wave) must not monopolize all verification slots and starve
+    // otherwise healthy brands. Domain order still controls the first pass, but each
+    // pass takes at most one candidate per domain before starting another round.
+    const queues = new Map<string, typeof eligible>();
+    for (const domain of domains) queues.set(domain, []);
+    for (const candidate of eligible) {
+      const domain = matchingDomain(candidate.url, domains);
+      if (domain) queues.get(domain)?.push(candidate);
+    }
+
+    const selected: typeof eligible = [];
+    while (selected.length < batchSize) {
+      let addedThisRound = 0;
+      for (const domain of domains) {
+        if (selected.length >= batchSize) break;
+        const queue = queues.get(domain);
+        const candidate = queue?.shift();
+        if (!candidate) continue;
+        selected.push(candidate);
+        addedThisRound += 1;
+      }
+      if (addedThisRound === 0) break;
+    }
 
     if (selected.length === 0) {
       console.log('[catalog-parallel] no eligible products in this cycle');
@@ -237,6 +259,7 @@ async function runCycle() {
       fullyAfter,
       addedFullyVerified: fullyAfter - fullyBefore,
       elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+      selectedDomains: selected.map((candidate) => matchingDomain(candidate.url, domains)),
       sampleFailures: results
         .filter((result) => !result.ok)
         .slice(0, 5)
