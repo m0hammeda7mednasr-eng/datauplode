@@ -7,6 +7,12 @@ const router = Router();
 const CACHE_TABLE = 'ShopifyCatalogIndexV2';
 const REQUIRED_SHOP = '09fgkz-6n.myshopify.com';
 const REQUIRED_CONFIRM = 'PURGE_DABDOOB_UNVERIFIED_ACTIVE';
+const REPAIR_CONFIRM = 'REPAIR_NEXT_V47744_COLOR';
+const REPAIR_PRODUCT_ID = 'gid://shopify/Product/8220083322933';
+const REPAIR_SOURCE_URL = 'https://www.next.ae/en/style/sv004113/v47744';
+const REPAIR_TITLE = 'Light Green Sweatshirt and Leggings Set (3mths-7yrs)';
+const WRONG_COLOR = 'Light Green Sweatshirt and';
+const CORRECT_COLOR = 'Light Green';
 const MAX_AUTHORIZED_CANDIDATES = 1183;
 const MAX_BATCH = 30;
 const JOB_TYPE = 'PURGE_UNVERIFIED_ACTIVE_SNAPSHOT:2026-09-12';
@@ -77,6 +83,17 @@ function snapshotHash(candidates: PurgeCandidate[]) {
     .createHash('sha256')
     .update(candidates.map((row) => row.shopifyId).sort().join('\n'))
     .digest('hex');
+}
+
+function unique(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((raw) => {
+    const value = clean(raw);
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function verifyGithubActionsOidc(token: string): Promise<boolean> {
@@ -503,6 +520,184 @@ router.post('/admin/purge-unverified-active', async (req, res) => {
   } catch (error: any) {
     console.error('[shopify-unverified-purge] failed', error);
     return res.status(500).json({ success: false, code: 'UNVERIFIED_PURGE_FAILED', error: clean(error?.message || error) });
+  }
+});
+
+router.post('/admin/repair-next-v47744-color', async (req, res) => {
+  try {
+    if (!(await authorized(req))) {
+      return res.status(403).json({ success: false, code: 'NEXT_COLOR_REPAIR_NOT_AUTHORIZED' });
+    }
+    const confirm = clean(req.header('x-next-color-repair-confirm') || req.body?.confirm);
+    if (confirm !== REPAIR_CONFIRM) {
+      return res.status(428).json({ success: false, code: 'NEXT_COLOR_REPAIR_CONFIRMATION_REQUIRED' });
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const state = await shopState(client);
+    if (clean(state.shop?.myshopifyDomain).toLowerCase() !== REQUIRED_SHOP) {
+      return res.status(409).json({ success: false, code: 'NEXT_COLOR_REPAIR_WRONG_SHOP', state });
+    }
+
+    const source = await prisma.sourceProduct.findFirst({
+      where: { url: REPAIR_SOURCE_URL },
+      include: {
+        variants: { orderBy: { createdAt: 'asc' } },
+        shopifyProduct: true,
+      },
+    });
+    if (
+      !source ||
+      source.shopifyProduct?.shopifyId !== REPAIR_PRODUCT_ID ||
+      clean(source.title) !== REPAIR_TITLE
+    ) {
+      return res.status(409).json({ success: false, code: 'NEXT_COLOR_REPAIR_IDENTITY_MISMATCH' });
+    }
+
+    const before = await ShopifyService.getProductCatalogSnapshot(client, REPAIR_PRODUCT_ID);
+    if (!before || clean(before.title) !== REPAIR_TITLE || clean(before.status).toUpperCase() !== 'ACTIVE') {
+      return res.status(409).json({ success: false, code: 'NEXT_COLOR_REPAIR_LIVE_IDENTITY_MISMATCH' });
+    }
+    if (before.variants.length !== 10 || source.variants.length !== 10) {
+      return res.status(409).json({
+        success: false,
+        code: 'NEXT_COLOR_REPAIR_VARIANT_COUNT_MISMATCH',
+        liveVariants: before.variants.length,
+        sourceVariants: source.variants.length,
+      });
+    }
+
+    const liveColors = unique(before.variants.map((variant: any) =>
+      clean(variant.selectedOptions?.find((option: any) => clean(option.name).toLowerCase() === 'color')?.value),
+    ));
+    const sourceColors = unique(source.variants.map((variant) => clean(variant.color)));
+    const alreadyRepaired = liveColors.length === 1 && liveColors[0] === CORRECT_COLOR &&
+      sourceColors.length === 1 && sourceColors[0] === CORRECT_COLOR;
+    const exactWrongState = liveColors.length === 1 && liveColors[0] === WRONG_COLOR &&
+      sourceColors.length === 1 && sourceColors[0] === WRONG_COLOR;
+    if (!alreadyRepaired && !exactWrongState) {
+      return res.status(409).json({
+        success: false,
+        code: 'NEXT_COLOR_REPAIR_UNEXPECTED_COLOR_STATE',
+        liveColors,
+        sourceColors,
+      });
+    }
+
+    const summary = {
+      productId: REPAIR_PRODUCT_ID,
+      sourceProductId: source.id,
+      title: before.title,
+      sourceUrl: source.url,
+      variants: before.variants.length,
+      liveColors,
+      sourceColors,
+      targetColor: CORRECT_COLOR,
+      prices: unique(before.variants.map((variant: any) => clean(variant.price))),
+      sizes: unique(before.variants.map((variant: any) =>
+        clean(variant.selectedOptions?.find((option: any) => clean(option.name).toLowerCase() === 'size')?.value),
+      )),
+    };
+    if (req.body?.dryRun === true || alreadyRepaired) {
+      return res.json({ success: true, dryRun: req.body?.dryRun === true, alreadyRepaired, summary });
+    }
+
+    const optionNames = unique(before.variants.flatMap((variant: any) =>
+      (variant.selectedOptions || []).map((option: any) => clean(option.name)),
+    ));
+    const productOptions = optionNames.map((optionName, position) => ({
+      name: optionName,
+      position: position + 1,
+      values: unique(before.variants.map((variant: any) => {
+        const value = clean(variant.selectedOptions?.find((option: any) => clean(option.name) === optionName)?.value);
+        return optionName.toLowerCase() === 'color' && value === WRONG_COLOR ? CORRECT_COLOR : value;
+      })).map((name) => ({ name })),
+    }));
+    const variants = before.variants.map((variant: any, index: number) => ({
+      id: variant.id,
+      optionValues: (variant.selectedOptions || []).map((option: any) => ({
+        optionName: clean(option.name),
+        name: clean(option.name).toLowerCase() === 'color' && clean(option.value) === WRONG_COLOR
+          ? CORRECT_COLOR
+          : clean(option.value),
+      })),
+      price: variant.price,
+      sku: variant.sku,
+      position: index + 1,
+    }));
+    const mutation = await ShopifyService.setProductCatalog(client, REPAIR_PRODUCT_ID, {
+      title: before.title,
+      descriptionHtml: before.descriptionHtml || '',
+      vendor: before.vendor || 'Next',
+      status: 'ACTIVE',
+      productOptions,
+      variants,
+    });
+    const userErrors = Array.isArray(mutation?.productSet?.userErrors) ? mutation.productSet.userErrors : [];
+    if (userErrors.length) {
+      throw new Error(userErrors.map((entry: any) => clean(entry?.message)).filter(Boolean).join('; ') || 'Shopify productSet rejected repair');
+    }
+
+    let after: any = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      after = await ShopifyService.getProductCatalogSnapshot(client, REPAIR_PRODUCT_ID);
+      const colors = unique((after?.variants || []).map((variant: any) =>
+        clean(variant.selectedOptions?.find((option: any) => clean(option.name).toLowerCase() === 'color')?.value),
+      ));
+      if (after?.variants?.length === 10 && colors.length === 1 && colors[0] === CORRECT_COLOR) break;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+    const afterColors = unique((after?.variants || []).map((variant: any) =>
+      clean(variant.selectedOptions?.find((option: any) => clean(option.name).toLowerCase() === 'color')?.value),
+    ));
+    if (after?.variants?.length !== 10 || afterColors.length !== 1 || afterColors[0] !== CORRECT_COLOR) {
+      throw new Error('Shopify color repair readback did not converge');
+    }
+
+    for (const variant of source.variants) {
+      const raw = parseJson<Record<string, any>>(variant.raw, {});
+      if (raw.optionValues && typeof raw.optionValues === 'object') {
+        if (clean(raw.optionValues.Color) === WRONG_COLOR) raw.optionValues.Color = CORRECT_COLOR;
+        if (clean(raw.optionValues.color) === WRONG_COLOR) raw.optionValues.color = CORRECT_COLOR;
+      }
+      await prisma.sourceVariant.update({
+        where: { id: variant.id },
+        data: {
+          color: CORRECT_COLOR,
+          raw: JSON.stringify(raw),
+        },
+      });
+    }
+    await prisma.auditLog.create({
+      data: {
+        sourceProductId: source.id,
+        action: 'NEXT_V47744_COLOR_REPAIRED',
+        userId: 'System',
+        details: JSON.stringify({
+          productId: REPAIR_PRODUCT_ID,
+          from: WRONG_COLOR,
+          to: CORRECT_COLOR,
+          variants: after.variants.length,
+          pricesPreserved: summary.prices,
+          at: new Date().toISOString(),
+        }),
+      },
+    });
+
+    return res.json({
+      success: true,
+      repaired: true,
+      productId: REPAIR_PRODUCT_ID,
+      sourceProductId: source.id,
+      variants: after.variants.length,
+      beforeColors: liveColors,
+      afterColors,
+      pricesPreserved: summary.prices,
+      sizes: summary.sizes,
+    });
+  } catch (error: any) {
+    console.error('[shopify-unverified-purge] Next V47744 color repair failed', error);
+    return res.status(500).json({ success: false, code: 'NEXT_COLOR_REPAIR_FAILED', error: clean(error?.message || error) });
   }
 });
 

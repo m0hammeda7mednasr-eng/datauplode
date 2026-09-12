@@ -1698,13 +1698,13 @@ function parseNextColourFromMarkdown(lines: string[]): string | undefined {
   return undefined;
 }
 
-function inferNextColourFromTitle(title: string): string | undefined {
+export function inferNextColourFromTitle(title: string): string | undefined {
   const normalized = cleanText(title)
     .replace(/\s+-\s+/g, " ")
     .replace(/\s+(?:from|by)\s+Next$/i, "");
 
   const productKeywordPattern =
-    /\b(?:tops?|t-?shirts?|shirts?|shorts?|set|dress(?:es)?|romper|dungaree|outfit|sleepsuit|bodysuit|leggings?|joggers?|jeans|trousers|sandals?|shoes?|trainers?|boots?|cardigan|jumper|sweater|hoodie|coat|jacket|swimsuit|pyjamas?|pajamas?)\b/i;
+    /\b(?:tops?|t-?shirts?|shirts?|shorts?|set|dress(?:es)?|romper|dungaree|outfit|sleepsuit|bodysuit|leggings?|joggers?|jeans|trousers|sandals?|shoes?|trainers?|boots?|cardigan|jumper|sweatshirts?|sweater|hoodie|coat|jacket|swimsuit|pyjamas?|pajamas?)\b/i;
   const keywordMatch = normalized.match(productKeywordPattern);
   if (
     !keywordMatch ||
