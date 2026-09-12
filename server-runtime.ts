@@ -13,5 +13,4 @@ import './src/server/shopify-catalog-hardcase-hotfix.js';
 import './src/server/catalog-stored-fallback-worker.js';
 import './src/server/catalog-parallel-sync-worker.js';
 import './src/server/catalog-relation-audit-worker.js';
-import './src/server/shopify-orphan-scan-once.js';
 await import('./server.js');
