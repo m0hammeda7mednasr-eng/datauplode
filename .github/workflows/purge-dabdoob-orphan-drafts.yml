@@ -35,7 +35,6 @@ jobs:
             | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
           test -n "$token"
           echo "::add-mask::$token"
-          echo "GITHUB_OIDC_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Wait for this exact commit to be live on Railway
         env:
@@ -65,11 +64,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          oidc_token="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-orphan-purge" \
+            | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+          test -n "$oidc_token"
+          echo "::add-mask::$oidc_token"
           code="$(curl --silent --show-error --max-time 60 --output dryrun.json --write-out '%{http_code}' \
             --request POST \
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
-            --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
+            --header "x-github-actions-oidc-token: ${oidc_token}" \
             --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
             --data '{"dryRun":true,"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
             "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
@@ -92,12 +97,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          oidc_token=''
           for batch in $(seq 1 100); do
+            # GitHub OIDC tokens expire after a few minutes. Refresh every ten
+            # batches so a long, read-back-verified purge cannot stall halfway.
+            if [ $(( (batch - 1) % 10 )) -eq 0 ]; then
+              oidc_token="$(curl --fail --silent --show-error \
+                --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-orphan-purge" \
+                | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+              test -n "$oidc_token"
+              echo "::add-mask::$oidc_token"
+            fi
             code="$(curl --silent --show-error --max-time 120 --output batch.json --write-out '%{http_code}' \
               --request POST \
               --header 'accept: application/json' \
               --header 'content-type: application/json' \
-              --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
+              --header "x-github-actions-oidc-token: ${oidc_token}" \
               --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
               --data '{"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
               "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
@@ -125,11 +141,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          oidc_token="$(curl --fail --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=dabdoob-orphan-purge" \
+            | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>process.stdout.write(JSON.parse(b).value||''))")"
+          test -n "$oidc_token"
+          echo "::add-mask::$oidc_token"
           code="$(curl --silent --show-error --max-time 60 --output final.json --write-out '%{http_code}' \
             --request POST \
             --header 'accept: application/json' \
             --header 'content-type: application/json' \
-            --header "x-github-actions-oidc-token: ${GITHUB_OIDC_TOKEN}" \
+            --header "x-github-actions-oidc-token: ${oidc_token}" \
             --header "x-shopify-orphan-purge-confirm: ${CONFIRM}" \
             --data '{"dryRun":true,"limit":25,"confirm":"PURGE_DABDOOB_ORPHAN_DRAFTS"}' \
             "${RAILWAY_BASE_URL%/}/api/admin/purge-shopify-orphans")"
