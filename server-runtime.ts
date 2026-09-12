@@ -8,5 +8,7 @@ import './src/server/catalog-source-authority-worker.js';
 import './src/server/juniors-vendor-purge-worker.js';
 import './src/server/juniors-vendor-direct-purge-worker.js';
 import './src/server/hm-managed-bypass-hotfix.js';
+import './src/server/catalog-source-repair-hotfix.js';
+import './src/server/shopify-catalog-hardcase-hotfix.js';
 import './src/server/catalog-parallel-sync-worker.js';
 await import('./server.js');
