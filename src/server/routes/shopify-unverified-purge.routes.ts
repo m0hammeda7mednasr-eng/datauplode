@@ -836,6 +836,27 @@ router.post('/admin/repair-next-v47744-catalog', async (req, res) => {
     dbUpdates.push(prisma.auditLog.create({
       data: {
         sourceProductId: source.id,
+        action: 'SYNC_PRICE_STOCK_ONLY',
+        userId: 'System',
+        details: JSON.stringify({
+          productId: REPAIR_PRODUCT_ID,
+          pricesUpdated: beforeRows.filter((row) => !moneyEqual(row.beforePrice, row.targetPrice)).length,
+          variantsUpdated: beforeRows.filter((row) => row.beforeInventory !== row.targetInventory).length,
+          inStock: summary.inStock,
+          outOfStock: summary.soldOut,
+          skippedVariants: 0,
+          unmatchedVariants: 0,
+          readbackVerified: true,
+          exactSourceReadback: true,
+          sourceUrl: REPAIR_SOURCE_URL,
+          multiplier: REPAIR_MULTIPLIER,
+          rows: afterRows,
+        }),
+      },
+    }));
+    dbUpdates.push(prisma.auditLog.create({
+      data: {
+        sourceProductId: source.id,
         action: 'NEXT_V47744_CATALOG_REPAIRED',
         userId: 'System',
         details: JSON.stringify({
