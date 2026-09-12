@@ -141,7 +141,7 @@ async function deleteDraftProduct(client: any, productId: string) {
 
     const data = await client.request(
       `mutation DeleteOrphanDraft($id: ID!) {
-        productDelete(id: $id) {
+        productDelete(input: { id: $id }, synchronous: true) {
           deletedProductId
           userErrors { field message }
         }
