@@ -857,8 +857,13 @@ async function reconcileGroup(
     }
   }
 
+  const nextVariantStructureVerified =
+    brandCode(group.url) === "NXT" &&
+    (fresh.raw?.repairedFlattenedNextVariants === true ||
+      fresh.raw?.embeddedNextData === true ||
+      Number(fresh.raw?.nextJsonLdVariantCount || 0) === sourceVariants.length);
   if (
-    fresh.raw?.repairedFlattenedNextVariants === true &&
+    nextVariantStructureVerified &&
     product.variants.length < sourceVariants.length
   ) {
     return {
