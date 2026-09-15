@@ -1356,6 +1356,28 @@ function findProductJsonLd(data: any): any {
   return findProductJsonLd(data["@graph"]) || findProductJsonLd(data.product);
 }
 
+function collectProductJsonLd(data: any, products: any[] = []): any[] {
+  if (!data) return products;
+
+  if (Array.isArray(data)) {
+    for (const item of data) collectProductJsonLd(item, products);
+    return products;
+  }
+
+  if (typeof data !== "object") return products;
+  const types = Array.isArray(data["@type"])
+    ? data["@type"]
+    : [data["@type"]];
+  if (types.some((type) => String(type || "").toLowerCase() === "product")) {
+    products.push(data);
+  }
+
+  collectProductJsonLd(data["@graph"], products);
+  collectProductJsonLd(data.product, products);
+  collectProductJsonLd(data.hasVariant, products);
+  return products;
+}
+
 function firstOffer(productData: any): any {
   if (!productData?.offers) return null;
   return Array.isArray(productData.offers)
@@ -3111,6 +3133,9 @@ function looksLikeSizeOptionValue(value: string): boolean {
 
   if (
     /^\d{1,3}(?:\.\d+)?$/.test(cleaned) ||
+    /^(?:EU|UK|US)\s*\d{1,3}(?:\.\d+)?(?:\s*\((?:EU|UK|US)\s*\d{1,3}(?:\.\d+)?\))?$/i.test(
+      cleaned,
+    ) ||
     /^\d{1,3}\s*(?:c|k|t|y)$/i.test(cleaned) ||
     /^\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?(?:\s*(?:cm|mm|in|inch|inches|mths?|months?|yrs?|years?|y|m|mths))?$/i.test(
       cleaned,
@@ -8011,6 +8036,79 @@ function variantsFromNextEmbeddedOptions(
     .filter((variant: any) => variant.size && variant.price > 0);
 }
 
+function variantsFromNextJsonLdProducts(
+  products: any[],
+  pageUrl: string,
+  productCode: string | undefined,
+  fallbackColor: string | undefined,
+  fallbackCurrency: string,
+): NormalizedProduct["variants"] {
+  const requestedUrl = stripUrlHash(pageUrl).replace(/\/$/, "").toLowerCase();
+  const requestedCode = comparableNextProductCode(productCode);
+  const seen = new Set<string>();
+
+  return products
+    .map((product: any) => {
+      const offer = firstOffer(product);
+      const id = cleanText(product?.["@id"]);
+      const parentId = cleanText(
+        typeof product?.isVariantOf === "string"
+          ? product.isVariantOf
+          : product?.isVariantOf?.["@id"],
+      );
+      const sku = cleanText(product?.sku || offer?.sku);
+      const size = cleanProductOptionValue(
+        "Size",
+        product?.size || cleanText(product?.name).match(/\s-\sSize\s+(.+)$/i)?.[1],
+      );
+      const price = parsePrice(
+        offer?.price ||
+          offer?.lowPrice ||
+          offer?.priceSpecification?.price ||
+          product?.price,
+      );
+      const itemUrl = stripUrlHash(id || parentId).replace(/\/$/, "").toLowerCase();
+      const skuMatches =
+        !requestedCode || comparableNextProductCode(sku).startsWith(requestedCode);
+      const urlMatches = !itemUrl || itemUrl === requestedUrl;
+      if (!size || price <= 0 || !skuMatches || !urlMatches) return null;
+
+      const identity = sku || `${size}|${cleanText(product?.color || fallbackColor)}`;
+      if (seen.has(identity)) return null;
+      seen.add(identity);
+
+      const availability = cleanText(offer?.availability || product?.availability);
+      const available = !/(?:SoldOut|OutOfStock|Discontinued|Unavailable)/i.test(
+        availability,
+      );
+      const rawImage = Array.isArray(product?.image)
+        ? product.image[0]
+        : product?.image;
+      const imageUrl = cleanText(
+        typeof rawImage === "string" ? rawImage : rawImage?.url,
+      );
+      const color = cleanColorOptionValue(product?.color) || fallbackColor;
+
+      return {
+        sourceVariantId:
+          sku || cleanText(id.split("#")[1]) || `${productCode || "next"}-${slugOption(size)}`,
+        sku: sku || `${productCode || "NEXT"}-${slugOption(size).toUpperCase()}`,
+        color,
+        size,
+        price,
+        currency: cleanText(offer?.priceCurrency) || fallbackCurrency,
+        optionValues: buildVariantOptionValues(color, size),
+        available,
+        stockStatus: available
+          ? ("in_stock" as const)
+          : ("out_of_stock" as const),
+        imageUrl: imageUrl || undefined,
+        raw: { ...product, nextJsonLdVariant: true },
+      };
+    })
+    .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant));
+}
+
 function extractNextSizesFromHtml(
   $: cheerio.CheerioAPI,
   title: string,
@@ -8069,13 +8167,15 @@ export function extractNextProductFromHtml(
   const $ = cheerio.load(html);
   const embeddedProduct = extractNextEmbeddedProductData($, pageUrl);
   let productData: any = null;
+  const jsonLdProducts: any[] = [];
 
   $(
     'script[type="application/ld+json"], script[data-testid="pdp-structured-data"]',
   ).each((_, el) => {
-    if (productData) return;
     try {
-      productData = findProductJsonLd(JSON.parse($(el).text() || "{}"));
+      const parsed = JSON.parse($(el).text() || "{}");
+      jsonLdProducts.push(...collectProductJsonLd(parsed));
+      productData ||= findProductJsonLd(parsed);
     } catch {}
   });
 
@@ -8101,10 +8201,10 @@ export function extractNextProductFromHtml(
     : [productData?.offers].filter(Boolean);
   const productCode = cleanText(
     embeddedProduct?.productCode ||
-      productData?.sku ||
       $('[data-testid="product-code"]').first().text() ||
       $('[data-testid="product-code"]').first().attr("content") ||
-      getProductIdFromUrl(url) ||
+      formatNextProductCodeFromProductId(getProductIdFromUrl(url)) ||
+      productData?.sku ||
       "",
   );
   const title = cleanText(
@@ -8176,6 +8276,14 @@ export function extractNextProductFromHtml(
     .flatMap((offer: any) => [offer?.price, offer?.lowPrice, offer?.highPrice])
     .map((value: any) => parsePrice(value))
     .filter((price: number) => price > 0);
+  const jsonLdVariantPriceValues = jsonLdProducts
+    .map((product: any) => {
+      const offer = firstOffer(product);
+      return parsePrice(
+        offer?.price || offer?.lowPrice || offer?.priceSpecification?.price,
+      );
+    })
+    .filter((price: number) => price > 0);
   const embeddedPriceValues = (
     Array.isArray(embeddedProduct?.options?.options)
       ? embeddedProduct.options.options
@@ -8197,6 +8305,8 @@ export function extractNextProductFromHtml(
     );
   const price = embeddedPriceValues.length
     ? Math.min(...embeddedPriceValues)
+    : jsonLdVariantPriceValues.length
+      ? Math.min(...jsonLdVariantPriceValues)
     : priceValues.length
       ? Math.min(...priceValues)
       : fallbackPrice;
@@ -8235,6 +8345,13 @@ export function extractNextProductFromHtml(
     currency,
     images[0]?.url,
   );
+  const jsonLdVariants = variantsFromNextJsonLdProducts(
+    jsonLdProducts,
+    pageUrl,
+    productCode,
+    color,
+    currency,
+  );
   const variantsFromOffers = variantsFromJsonLdOffers(
     productData?.offers,
     productCode,
@@ -8243,6 +8360,8 @@ export function extractNextProductFromHtml(
   const inferredSizes = extractNextSizesFromHtml($, title, description);
   const variants = embeddedVariants.length
     ? embeddedVariants
+    : jsonLdVariants.length
+      ? jsonLdVariants
     : variantsFromOffers.length
     ? variantsFromOffers
     : buildInferredNextVariants(
@@ -8296,6 +8415,7 @@ export function extractNextProductFromHtml(
       priceRange: { min: price, max: maxPrice },
       structuredOfferCount: offerList.length,
       embeddedNextData: embeddedVariants.length > 0,
+      nextJsonLdVariantCount: jsonLdVariants.length,
       extractedAt: new Date().toISOString(),
     },
   };

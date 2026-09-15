@@ -87,6 +87,78 @@ assert.deepEqual(product.options.find((option) => option.name === "Size")?.value
 ]);
 assert.equal(product.raw.embeddedNextData, true);
 
+const jsonLdUrl = "https://www.next.ae/en/style/su591439/w69416";
+const jsonLdProducts = [
+  {
+    "@context": "http://schema.org",
+    "@type": "ProductGroup",
+    "@id": jsonLdUrl,
+    name: "adidas Tensaur Comfort Infant Trainers",
+    productGroupID: "su591439",
+    variesBy: ["size", "color"],
+  },
+  ...[
+    ["02", "EU 20 (UK 4)", "SoldOut"],
+    ["04", "EU 21.5 (UK 5)", "InStock"],
+    ["05", "EU 22 (UK 5.5)", "SoldOut"],
+  ].map(([code, size, availability]) => ({
+    "@context": "http://schema.org",
+    "@type": "Product",
+    "@id": `${jsonLdUrl}#size${code}`,
+    isVariantOf: { "@id": jsonLdUrl, "@type": "ProductGroup" },
+    name: `adidas Pink Tensaur Comfort Infant Trainers - Size ${size}`,
+    sku: `W69-416-${code}`,
+    color: "Pink",
+    size,
+    image: [
+      "https://xcdn.next.co.uk/common/items/default/default/itemimages/3_4Ratio/product/lge/W69416s.jpg",
+    ],
+    offers: {
+      "@type": "Offer",
+      price: "156",
+      priceCurrency: "AED",
+      availability: `http://schema.org/${availability}`,
+    },
+  })),
+];
+
+const jsonLdHtml = `
+  <html>
+    <head>
+      <title>Buy adidas Pink Tensaur Comfort Infant Trainers from Next United Arab Emirates</title>
+      <script type="application/ld+json">${JSON.stringify(jsonLdProducts)}</script>
+      <meta property="og:title" content="adidas Pink Tensaur Comfort Infant Trainers" />
+    </head>
+    <body>
+      <h1>adidas Pink Tensaur Comfort Infant Trainers</h1>
+      <img src="https://xcdn.next.co.uk/common/items/default/default/itemimages/3_4Ratio/product/lge/W69416s.jpg" />
+    </body>
+  </html>
+`;
+
+const jsonLdProduct = extractNextProductFromHtml(jsonLdHtml, jsonLdUrl);
+console.log("Next JSON-LD variant fixture", {
+  count: jsonLdProduct.variants.length,
+  rawCount: jsonLdProduct.raw.nextJsonLdVariantCount,
+  variants: jsonLdProduct.variants.map((variant) => ({
+    sku: variant.sku,
+    size: variant.size,
+    available: variant.available,
+  })),
+});
+assert.equal(jsonLdProduct.source.productId, "W69-416");
+assert.equal(jsonLdProduct.price, 156);
+assert.equal(jsonLdProduct.variants.length, 3);
+assert.deepEqual(
+  jsonLdProduct.variants.map((variant) => variant.size),
+  ["EU 20 (UK 4)", "EU 21.5 (UK 5)", "EU 22 (UK 5.5)"],
+);
+assert.deepEqual(
+  jsonLdProduct.variants.map((variant) => variant.available),
+  [false, true, false],
+);
+assert.equal(jsonLdProduct.raw.nextJsonLdVariantCount, 3);
+
 console.log("Next embedded product state test passed", {
   title: product.title,
   variants: product.variants.length,
