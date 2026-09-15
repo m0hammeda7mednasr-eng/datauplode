@@ -5354,6 +5354,29 @@ router.post("/products/:id/sync", async (req, res) => {
   res.json({ success: true, jobId: job.id });
 });
 
+router.post("/products/:id/sync-catalog", async (req, res) => {
+  const product = await prisma.sourceProduct.findUnique({
+    where: { id: req.params.id },
+    select: {
+      id: true,
+      shopifyProduct: { select: { id: true } },
+    },
+  });
+
+  if (!product) return res.status(404).json({ error: "Product not found" });
+  if (!product.shopifyProduct) {
+    return res.status(409).json({
+      error: "Product is not linked to Shopify yet.",
+    });
+  }
+
+  const job = await QueueService.addTask("SYNC_PRODUCT_CATALOG", {
+    sourceProductId: product.id,
+    reason: "manual_catalog_repair",
+  });
+  res.json({ success: true, jobId: job.id });
+});
+
 router.post("/products/:id/republish", async (req, res) => {
   const product = await prisma.sourceProduct.findUnique({
     where: { id: req.params.id },

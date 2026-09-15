@@ -3314,6 +3314,12 @@ export class QueueService {
             result = await this.syncProductInventory(sourceProductId, jobId, payload);
             break;
           }
+          case 'SYNC_PRODUCT_CATALOG': {
+            const { sourceProductId } = payload;
+            if (!sourceProductId) throw new Error('Missing sourceProductId');
+            result = await syncFullProductCatalog({ prisma, sourceProductId });
+            break;
+          }
           case 'SYNC_INVENTORY':
             result = await this.queueInventorySyncBatch();
             break;
