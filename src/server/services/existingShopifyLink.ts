@@ -37,6 +37,21 @@ function spreadsheetId(value: string) {
   return value.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)?.[1] || "";
 }
 
+function sourceIdentityMatches(
+  fresh: NormalizedProduct,
+  linked: { productId: string | null; url: string },
+) {
+  const freshProductId = clean(fresh.source.productId).toLowerCase();
+  const linkedProductId = clean(linked.productId).toLowerCase();
+  if (!freshProductId || freshProductId !== linkedProductId) return false;
+  try {
+    return new URL(fresh.source.url).hostname.toLowerCase() ===
+      new URL(linked.url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 export async function persistVerifiedExistingShopifyLink(input: PersistExistingLinkInput) {
   const url = canonicalUrl(input.fresh.source.url);
   const variants = Array.isArray(input.fresh.variants) ? input.fresh.variants : [];
@@ -58,14 +73,35 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
   return prisma.$transaction(async (tx) => {
     const linkedShopify = await tx.shopifyProduct.findUnique({
       where: { shopifyId: input.shopifyProductId },
-      select: { id: true, sourceProductId: true },
+      select: {
+        id: true,
+        sourceProductId: true,
+        sourceProduct: { select: { id: true, productId: true, url: true } },
+      },
     });
-    const existingSource = await tx.sourceProduct.findUnique({
+    const sourceAtUrl = await tx.sourceProduct.findUnique({
       where: { url },
       include: { shopifyProduct: { select: { id: true, shopifyId: true } } },
     });
-    if (linkedShopify && linkedShopify.sourceProductId !== existingSource?.id) {
-      throw new Error("Shopify product became linked to another source during reconciliation");
+    let existingSource = sourceAtUrl;
+    if (linkedShopify && linkedShopify.sourceProductId !== sourceAtUrl?.id) {
+      if (!sourceIdentityMatches(input.fresh, linkedShopify.sourceProduct)) {
+        throw new Error("Shopify product became linked to another source during reconciliation");
+      }
+      if (sourceAtUrl?.shopifyProduct) {
+        throw new Error("Source URL is already linked to a different Shopify product");
+      }
+      if (sourceAtUrl) {
+        await tx.manualReviewItem.deleteMany({ where: { sourceProductId: sourceAtUrl.id } });
+        await tx.auditLog.deleteMany({ where: { sourceProductId: sourceAtUrl.id } });
+        await tx.sourceImage.deleteMany({ where: { sourceProductId: sourceAtUrl.id } });
+        await tx.sourceVariant.deleteMany({ where: { sourceProductId: sourceAtUrl.id } });
+        await tx.sourceProduct.delete({ where: { id: sourceAtUrl.id } });
+      }
+      existingSource = await tx.sourceProduct.findUnique({
+        where: { id: linkedShopify.sourceProductId },
+        include: { shopifyProduct: { select: { id: true, shopifyId: true } } },
+      });
     }
     if (existingSource?.shopifyProduct?.shopifyId !== undefined &&
         existingSource.shopifyProduct.shopifyId !== input.shopifyProductId) {
