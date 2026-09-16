@@ -71,9 +71,7 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
         existingSource.shopifyProduct.shopifyId !== input.shopifyProductId) {
       throw new Error("Source URL is already linked to a different Shopify product");
     }
-    if (linkedShopify && existingSource?.shopifyProduct) {
-      return { sourceProductId: existingSource.id, shopifyProductId: linkedShopify.id, alreadyLinked: true };
-    }
+    const alreadyLinked = Boolean(linkedShopify && existingSource?.shopifyProduct);
 
     const supplierName = clean(input.fresh.source.supplier || input.fresh.brand || "Unknown Supplier");
     const supplier = await tx.supplier.upsert({
@@ -109,6 +107,9 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
       : await tx.sourceProduct.create({ data: { ...productData, url } });
 
     await tx.manualReviewItem.deleteMany({ where: { sourceProductId: sourceProduct.id, status: "pending" } });
+    if (alreadyLinked && linkedShopify) {
+      await tx.shopifyVariant.deleteMany({ where: { shopifyProductId: linkedShopify.id } });
+    }
     await tx.sourceImage.deleteMany({ where: { sourceProductId: sourceProduct.id } });
     await tx.sourceVariant.deleteMany({ where: { sourceProductId: sourceProduct.id } });
     const imageRows = input.fresh.images.filter((image) => clean(image.url)).map((image, position) => ({
@@ -124,8 +125,7 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
       });
     }
 
-    const shopifyProduct = await tx.shopifyProduct.create({
-      data: {
+    const shopifyProductData = {
         sourceProductId: sourceProduct.id,
         shopifyId: input.shopifyProductId,
         handle: clean(input.shopifyHandle) || null,
@@ -136,8 +136,13 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
         syncPrice: true,
         syncInventory: true,
         syncImages: false,
-      },
-    });
+    };
+    const shopifyProduct = alreadyLinked && linkedShopify
+      ? await tx.shopifyProduct.update({
+          where: { id: linkedShopify.id },
+          data: shopifyProductData,
+        })
+      : await tx.shopifyProduct.create({ data: shopifyProductData });
 
     for (const [linkIndex, link] of variantLinks.entries()) {
       const variant = variants[link.sourceVariantIndex];
@@ -188,6 +193,6 @@ export async function persistVerifiedExistingShopifyLink(input: PersistExistingL
         }),
       },
     });
-    return { sourceProductId: sourceProduct.id, shopifyProductId: shopifyProduct.id, alreadyLinked: false };
+    return { sourceProductId: sourceProduct.id, shopifyProductId: shopifyProduct.id, alreadyLinked };
   }, { maxWait: 10_000, timeout: 30_000 });
 }

@@ -35,6 +35,7 @@ if (!filePath) throw new Error("Missing required --file argument");
 const apiBase = (args.get("api") || "https://datauplode-production.up.railway.app").replace(/\/$/, "");
 const sheetNameArg = args.get("sheet");
 const limit = Math.max(1, Number(args.get("limit") || Number.MAX_SAFE_INTEGER));
+const concurrency = Math.min(8, Math.max(1, Number(args.get("concurrency") || 1)));
 const retryFailed = args.get("retry-failed") === "true";
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
@@ -123,14 +124,16 @@ console.log(JSON.stringify({
   uniqueRows: rows.length,
   alreadyCompleted: completed.size,
   selected: pending.length,
+  concurrency,
   checkpointPath,
 }));
 
 let successful = 0;
 let skipped = 0;
 let failed = 0;
+let completedCount = 0;
 
-for (const [position, row] of pending.entries()) {
+async function processRow(row: WorkbookRow) {
   let checkpoint: CheckpointEntry;
   try {
     const response = await postJson(`${apiBase}/api/imports/excel/process`, {
@@ -160,15 +163,27 @@ for (const [position, row] of pending.entries()) {
     checkpoint = { at: new Date().toISOString(), rowNumber: row.rowNumber, url: row.url, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
   }
   fs.appendFileSync(checkpointPath, `${JSON.stringify(checkpoint)}\n`);
+  completedCount += 1;
   console.log(JSON.stringify({
     event: "row",
-    progress: `${position + 1}/${pending.length}`,
+    progress: `${completedCount}/${pending.length}`,
     successful,
     skipped,
     failed,
     ...checkpoint,
   }));
 }
+
+let nextRowIndex = 0;
+await Promise.all(
+  Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
+    while (nextRowIndex < pending.length) {
+      const row = pending[nextRowIndex];
+      nextRowIndex += 1;
+      await processRow(row);
+    }
+  }),
+);
 
 console.log(JSON.stringify({ event: "complete", selected: pending.length, successful, skipped, failed, checkpointPath }));
 if (failed > 0) process.exitCode = 2;
