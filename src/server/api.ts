@@ -4014,7 +4014,7 @@ router.post("/imports/analyze", async (req, res) => {
           };
         }
       }
-      if (!snapshotText) setCachedAnalyzeProduct(url, data);
+      setCachedAnalyzeProduct(url, data);
     }
 
     const rule = await findBestPricingRuleForProduct(data);

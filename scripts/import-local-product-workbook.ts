@@ -37,6 +37,7 @@ const sheetNameArg = args.get("sheet");
 const limit = Math.max(1, Number(args.get("limit") || Number.MAX_SAFE_INTEGER));
 const concurrency = Math.min(8, Math.max(1, Number(args.get("concurrency") || 1)));
 const retryFailed = args.get("retry-failed") === "true";
+const scraperApiKey = args.get("scraper-api-key") || process.env.SCRAPERAPI_KEY || "";
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
   `${path.basename(filePath).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}-shopify-import.jsonl`,
@@ -88,6 +89,28 @@ async function postJson(url: string, body: unknown, attempts = 3) {
   throw lastError;
 }
 
+function shouldRetryWithManagedSnapshot(response: any) {
+  const failure = response?.failed?.[0];
+  const message = String(failure?.error || failure?.reason || "");
+  return /Cloudflare|protected|browser snapshot|Bridge task timeout|No usable product HTML/i.test(message);
+}
+
+async function loadManagedSnapshot(url: string) {
+  if (!scraperApiKey) return "";
+  const endpoint = new URL("https://api.scraperapi.com");
+  endpoint.searchParams.set("api_key", scraperApiKey);
+  endpoint.searchParams.set("url", url);
+  endpoint.searchParams.set("render", "true");
+  endpoint.searchParams.set("premium", "true");
+  endpoint.searchParams.set("country_code", "ae");
+  endpoint.searchParams.set("device_type", "mobile");
+  const response = await fetch(endpoint, { signal: AbortSignal.timeout(3 * 60 * 1000) });
+  if (!response.ok) throw new Error(`Managed snapshot failed with HTTP ${response.status}`);
+  const html = await response.text();
+  if (html.trim().length < 500) throw new Error("Managed snapshot returned incomplete HTML");
+  return html;
+}
+
 const workbook = XLSX.readFile(filePath, { raw: false });
 const sheetName = sheetNameArg || workbook.SheetNames[0];
 const sheet = workbook.Sheets[sheetName];
@@ -136,7 +159,7 @@ let completedCount = 0;
 async function processRow(row: WorkbookRow) {
   let checkpoint: CheckpointEntry;
   try {
-    const response = await postJson(`${apiBase}/api/imports/excel/process`, {
+    const requestBody = {
       rows: [row],
       collectionNames: [row.collection],
       createManualReview: true,
@@ -144,7 +167,13 @@ async function processRow(row: WorkbookRow) {
       reconcileExistingProducts: true,
       sheetName: `${path.basename(filePath)} / ${sheetName}`,
       sheetUrl: `local-workbook:${path.basename(filePath)}`,
-    });
+    };
+    let response = await postJson(`${apiBase}/api/imports/excel/process`, requestBody);
+    if (scraperApiKey && shouldRetryWithManagedSnapshot(response)) {
+      const pageText = await loadManagedSnapshot(row.url);
+      await postJson(`${apiBase}/api/imports/analyze`, { url: row.url, pageText }, 1);
+      response = await postJson(`${apiBase}/api/imports/excel/process`, requestBody);
+    }
     const success = response?.successful?.find((item: any) => item.rowNumber === row.rowNumber);
     const skip = response?.skipped?.find((item: any) => item.rowNumber === row.rowNumber);
     const failure = response?.failed?.find((item: any) => item.rowNumber === row.rowNumber);
