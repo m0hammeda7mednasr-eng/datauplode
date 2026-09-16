@@ -333,6 +333,7 @@ function brandCode(url: string) {
     if (host.includes("shein")) return "SHN";
     if (host.includes("lefties")) return "LFT";
     if (host.includes("marksandspencer")) return "MNS";
+    if (host.includes("gap.ae")) return "GAP";
   } catch {}
   return "SRC";
 }
@@ -345,6 +346,8 @@ function sourceVendor(url: string) {
     if (host.includes("maxfashion")) return "Max";
     if (host.includes("shein")) return "SHEIN";
     if (host.includes("centrepoint")) return "Centrepoint";
+    if (host.includes("marksandspencer")) return "Marks & Spencer";
+    if (host.includes("gap.ae")) return "Gap";
   } catch {}
   return "";
 }
@@ -748,7 +751,19 @@ async function findShopifyProduct(
     };
   }
   if (eligible.length > 1) {
-    return { product: null, ambiguous: true, matchSource: "shopify_fallback" as const };
+    const canonical = eligible
+      .map((entry) => entry.product)
+      .sort((left, right) => clean(left.id).localeCompare(clean(right.id)))[0];
+    console.warn("[first5-reconcile] exact duplicate Shopify matches found", {
+      title: freshTitle,
+      selectedProductId: canonical?.id,
+      duplicateProductIds: eligible.map((entry) => entry.product.id),
+    });
+    return {
+      product: canonical,
+      ambiguous: false,
+      matchSource: "shopify_fallback" as const,
+    };
   }
   if (searchErrors.length > 0) {
     return {
@@ -862,8 +877,26 @@ async function reconcileGroup(
     (fresh.raw?.repairedFlattenedNextVariants === true ||
       fresh.raw?.embeddedNextData === true ||
       Number(fresh.raw?.nextJsonLdVariantCount || 0) === sourceVariants.length);
+  const supplierVariantStructureVerified = (() => {
+    const code = brandCode(group.url);
+    if (!["MAX", "MNS", "GAP"].includes(code) || sourceVariants.length <= 1) {
+      return false;
+    }
+    const optionNames = new Set(
+      (fresh.options || []).map((option) => clean(option?.name).toLowerCase()),
+    );
+    if (!optionNames.has("size") && !optionNames.has("color")) return false;
+    return sourceVariants.every((variant: any) => {
+      const options = sourceOptions(variant);
+      return Boolean(
+        clean(variant?.sku || variant?.sourceVariantId) &&
+          (clean(options.size || variant?.size) ||
+            clean(options.color || variant?.color)),
+      );
+    });
+  })();
   if (
-    nextVariantStructureVerified &&
+    (nextVariantStructureVerified || supplierVariantStructureVerified) &&
     product.variants.length < sourceVariants.length
   ) {
     return {
@@ -913,6 +946,23 @@ const mapped = product.variants.map((current: any) => {
 });
   const unmapped = mapped.filter((entry: any) => !entry.source);
   if (unmapped.length) {
+    if (supplierVariantStructureVerified) {
+      return {
+        status: "rebuild_required",
+        url: group.url,
+        rows: resultRows(group),
+        multiplier: group.multiplier,
+        productCode,
+        shopifyProductId: product.id,
+        shopifyHandle: clean(product.handle),
+        shopifyTitle: clean(product.title),
+        variantsChecked: product.variants.length,
+        matchSource: located.matchSource,
+        reason:
+          `Shopify variant structure cannot be mapped to the verified source ` +
+          `(${unmapped.length}/${mapped.length} unmatched) and requires a handle-preserving rebuild.`,
+      };
+    }
     throw new Error(`Could not map ${unmapped.length}/${mapped.length} Shopify variants to fresh source variants`);
   }
 
