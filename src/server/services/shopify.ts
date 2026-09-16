@@ -385,6 +385,7 @@ export class ShopifyService {
     productId: string,
     details: {
       title?: string;
+      handle?: string;
       descriptionHtml?: string | null;
       vendor?: string | null;
       status?: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
