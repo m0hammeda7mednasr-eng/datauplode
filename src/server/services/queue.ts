@@ -2918,6 +2918,7 @@ export class QueueService {
             let client: any = null;
             let replacementProductIdToDelete: string | null = null;
             let linkedReplacementDbId: string | null = null;
+            let replacedSourceProductId: string | null = null;
             let replacementHandleWarning: string | null = null;
             
             // 1. Fetch source product
@@ -2938,10 +2939,25 @@ export class QueueService {
               }
               const linkedReplacement = await prisma.shopifyProduct.findFirst({
                 where: { shopifyId: replacementId },
-                select: { id: true, sourceProductId: true },
+                select: {
+                  id: true,
+                  sourceProductId: true,
+                  sourceProduct: {
+                    select: { productId: true, supplierId: true },
+                  },
+                },
               });
               if (linkedReplacement && linkedReplacement.sourceProductId !== sourceProductId) {
-                throw new Error('Safe Shopify replacement refused because the target is linked to a different source product');
+                const currentProductId = cleanOptionText(product.productId).toLowerCase();
+                const linkedProductId = cleanOptionText(linkedReplacement.sourceProduct.productId).toLowerCase();
+                const sameSupplierProduct =
+                  Boolean(currentProductId) &&
+                  currentProductId === linkedProductId &&
+                  product.supplierId === linkedReplacement.sourceProduct.supplierId;
+                if (!sameSupplierProduct) {
+                  throw new Error('Safe Shopify replacement refused because the target is linked to a different source product');
+                }
+                replacedSourceProductId = linkedReplacement.sourceProductId;
               }
               const replacement = await ShopifyService.getProductBasic(client, replacementId);
               if (!replacement || cleanOptionText(replacement.handle) !== expectedHandle) {
@@ -3140,10 +3156,31 @@ export class QueueService {
                     await tx.shopifyVariant.deleteMany({
                       where: { shopifyProductId: linkedReplacementDbId! },
                     });
-                    return tx.shopifyProduct.update({
+                    const updated = await tx.shopifyProduct.update({
                       where: { id: linkedReplacementDbId! },
                       data: shopifyProductData,
                     });
+                    await tx.manualReviewItem.deleteMany({
+                      where: { sourceProductId, status: 'pending' },
+                    });
+                    if (replacedSourceProductId && replacedSourceProductId !== sourceProductId) {
+                      await tx.manualReviewItem.deleteMany({
+                        where: { sourceProductId: replacedSourceProductId },
+                      });
+                      await tx.auditLog.deleteMany({
+                        where: { sourceProductId: replacedSourceProductId },
+                      });
+                      await tx.sourceImage.deleteMany({
+                        where: { sourceProductId: replacedSourceProductId },
+                      });
+                      await tx.sourceVariant.deleteMany({
+                        where: { sourceProductId: replacedSourceProductId },
+                      });
+                      await tx.sourceProduct.delete({
+                        where: { id: replacedSourceProductId },
+                      });
+                    }
+                    return updated;
                   })
                 : await prisma.shopifyProduct.create({ data: shopifyProductData });
               await prisma.sourceProduct.update({
