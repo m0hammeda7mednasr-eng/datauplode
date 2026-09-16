@@ -4,6 +4,7 @@ import axios from "axios";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
 import { reserveScraperApiCredits } from "./scraperCreditBudget.js";
 
 export interface NormalizedProduct {
@@ -5022,6 +5023,190 @@ function extractGapProductFromHtml(
   });
 }
 
+async function fetchGapVariation(url: string): Promise<any> {
+  const response = await axios.get(url, {
+    headers: {
+      ...browserHeaders,
+      Accept: "application/json",
+      "Accept-Language": "en-AE,en;q=0.9",
+      Referer: "https://www.gap.ae/",
+    },
+    timeout: 20000,
+    responseType: "json",
+  });
+  if (!response.data?.product) {
+    throw new Error("Gap variation endpoint returned no product data");
+  }
+  return response.data.product;
+}
+
+function gapSelectedAttribute(product: any, id: string): any {
+  return (product?.variationAttributes || []).find(
+    (attribute: any) =>
+      cleanText(attribute?.attributeId || attribute?.id).toLowerCase() === id,
+  )?.selectedValue;
+}
+
+function gapVariationAvailable(product: any): boolean {
+  const availability = product?.availability || {};
+  if (product?.available === false || availability?.notAvailable === true) {
+    return false;
+  }
+  if (typeof availability?.availableQuantity === "number") {
+    return availability.availableQuantity > 0;
+  }
+  return product?.online !== false;
+}
+
+function addGapApiImages(
+  images: NormalizedProduct["images"],
+  product: any,
+  pageUrl: string,
+  color?: string,
+) {
+  for (const image of product?.images?.large || []) {
+    const before = images.length;
+    pushImage(
+      images,
+      image?.url || image?.absUrl || image?.urlRetina,
+      pageUrl,
+      image?.alt || image?.title || product?.productName,
+    );
+    if (images.length > before && color) images[images.length - 1].color = color;
+  }
+}
+
+async function enrichGapProductFromVariationApi(
+  base: NormalizedProduct,
+  html: string,
+  pageUrl: string,
+): Promise<NormalizedProduct> {
+  const $ = cheerio.load(html);
+  const initialUrl = cleanText(
+    $('[data-url*="/Product-Variation"]').first().attr("data-url"),
+  );
+  if (!initialUrl) return base;
+
+  const initial = await fetchGapVariation(new URL(initialUrl, pageUrl).toString());
+  const colorAttribute = (initial?.variationAttributes || []).find(
+    (attribute: any) =>
+      cleanText(attribute?.attributeId || attribute?.id).toLowerCase() === "color",
+  );
+  const colorValues = colorAttribute?.values?.length
+    ? colorAttribute.values
+    : [colorAttribute?.selectedValue].filter(Boolean);
+  const colorProducts: any[] = [];
+
+  for (const colorValue of colorValues) {
+    if (colorValue?.selected || !colorValue?.url) {
+      colorProducts.push(initial);
+      continue;
+    }
+    try {
+      colorProducts.push(
+        await fetchGapVariation(new URL(colorValue.url, pageUrl).toString()),
+      );
+    } catch {
+      // Keep processing the other colors; the selected response is still valid.
+    }
+  }
+
+  const requested = new Set<string>();
+  const variationUrls: string[] = [];
+  for (const colorProduct of colorProducts) {
+    const sizeAttribute = (colorProduct?.variationAttributes || []).find(
+      (attribute: any) =>
+        cleanText(attribute?.attributeId || attribute?.id).toLowerCase() === "size",
+    );
+    const values = sizeAttribute?.values?.length
+      ? sizeAttribute.values
+      : [sizeAttribute?.selectedValue].filter(Boolean);
+    for (const value of values) {
+      if (!value?.url) continue;
+      const variationUrl = new URL(value.url, pageUrl).toString();
+      if (!requested.has(variationUrl)) {
+        requested.add(variationUrl);
+        variationUrls.push(variationUrl);
+      }
+    }
+  }
+
+  const exactProducts: any[] = [];
+  for (let index = 0; index < variationUrls.length; index += 4) {
+    const batch = await Promise.allSettled(
+      variationUrls.slice(index, index + 4).map(fetchGapVariation),
+    );
+    for (const result of batch) {
+      if (result.status === "fulfilled") exactProducts.push(result.value);
+    }
+  }
+  if (exactProducts.length === 0) exactProducts.push(...colorProducts);
+
+  const images: NormalizedProduct["images"] = [];
+  for (const image of base.images) pushImage(images, image.url, pageUrl, image.alt);
+  const variants = new Map<string, NormalizedProduct["variants"][number]>();
+  const optionValues = new Map<string, string[]>();
+
+  for (const product of exactProducts) {
+    const colorEntry = gapSelectedAttribute(product, "color");
+    const sizeEntry = gapSelectedAttribute(product, "size");
+    const color = cleanColorOptionValue(
+      colorEntry?.displayValue || colorEntry?.value,
+    );
+    const size = cleanProductOptionValue(
+      "Size",
+      sizeEntry?.displayValue || sizeEntry?.value,
+    );
+    const id = cleanText(product?.id || product?.EAN);
+    if (!id) continue;
+
+    addGapApiImages(images, product, pageUrl, color);
+    if (color)
+      optionValues.set(
+        "Color",
+        uniqueCleanValues([...(optionValues.get("Color") || []), color]),
+      );
+    if (size)
+      optionValues.set(
+        "Size",
+        uniqueCleanValues([...(optionValues.get("Size") || []), size]),
+      );
+
+    const available = gapVariationAvailable(product);
+    variants.set(id, {
+      sourceVariantId: id,
+      sku: cleanText(product?.EAN || id) || undefined,
+      color,
+      size,
+      price: gapPriceValue(product?.price?.sales) || base.price,
+      currency: product?.price?.sales?.currency || base.currency,
+      optionValues: buildVariantOptionValues(color, size),
+      available,
+      stockStatus: available ? "in_stock" : "out_of_stock",
+      imageUrl: color
+        ? images.find((image) => cleanColorOptionValue(image.color) === color)?.url
+        : images[0]?.url,
+      raw: product,
+    });
+  }
+
+  if (variants.size === 0) return base;
+  return normalizeProductOptionsAndVariants({
+    ...base,
+    title: cleanText(initial?.productName) || base.title,
+    description:
+      htmlToPlainText(initial?.longDescription || initial?.shortDescription) ||
+      base.description,
+    brand: cleanText(initial?.brandName) || base.brand,
+    price: gapPriceValue(initial?.price?.sales) || base.price,
+    currency: initial?.price?.sales?.currency || base.currency,
+    images: images.map((image, position) => ({ ...image, position })),
+    options: [...optionValues].map(([name, values]) => ({ name, values })),
+    variants: [...variants.values()],
+    raw: { ...base.raw, gapVariationProduct: initial },
+  });
+}
+
 export class GapScraper implements SupplierScraper {
   canHandle(url: string): boolean {
     return hostMatches(url, ["gap.ae"]);
@@ -5035,14 +5220,22 @@ export class GapScraper implements SupplierScraper {
         "Accept-Language": "en-AE,en;q=0.9",
         Referer: "https://www.gap.ae/",
       });
-      return extractGapProductFromHtml(html, url);
+      return await enrichGapProductFromVariationApi(
+        extractGapProductFromHtml(html, url),
+        html,
+        url,
+      );
     } catch (error: any) {
       errors.push(`browser: ${error.message}`);
     }
 
     try {
       const html = await fetchHtmlWithCurl(url);
-      return extractGapProductFromHtml(html, url);
+      return await enrichGapProductFromVariationApi(
+        extractGapProductFromHtml(html, url),
+        html,
+        url,
+      );
     } catch (error: any) {
       errors.push(`curl: ${error.message}`);
     }
@@ -5124,15 +5317,49 @@ function addMarksAndSpencerDigitalFallbackImages(
   }
 }
 
+function findMarksAndSpencerProductPayload(value: any): any {
+  if (!value || typeof value !== "object") return null;
+  if (
+    cleanText(value?.productCode) &&
+    (Array.isArray(value?.variations) || Array.isArray(value?.options))
+  ) {
+    return value;
+  }
+  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+    const product = findMarksAndSpencerProductPayload(child);
+    if (product) return product;
+  }
+  return null;
+}
+
+function extractMarksAndSpencerNextProduct(html: string): any {
+  for (const match of html.matchAll(/H4sI[A-Za-z0-9+/=]+/g)) {
+    try {
+      const decoded = gunzipSync(Buffer.from(match[0], "base64")).toString(
+        "utf8",
+      );
+      const product = findMarksAndSpencerProductPayload(JSON.parse(decoded));
+      if (product) return product;
+    } catch {
+      // Next.js can include other compressed payloads; only the product payload matters.
+    }
+  }
+  return null;
+}
+
 function parseMarksAndSpencerHtml(
   html: string,
   url: string,
 ): NormalizedProduct {
-  const preloadProduct = parseJsonScriptById(
-    html,
-    "data-mz-preload-product",
-  );
+  const preloadProduct =
+    parseJsonScriptById(html, "data-mz-preload-product") ||
+    extractMarksAndSpencerNextProduct(html);
   const productData = extractProductJsonLdFromHtml(html);
+  if (!preloadProduct) {
+    throw new Error(
+      "Marks & Spencer page did not expose its complete product payload",
+    );
+  }
   const offer = firstOffer(productData);
   const productCode = cleanText(
     productData?.sku || getProductIdFromUrl(url) || "",
@@ -5265,7 +5492,9 @@ function parseMarksAndSpencerHtml(
 
   const normalizedOptions = kiboOptions
     .map((option: any) => ({
-      name: cleanText(option?.attributeDetail?.name || option?.attributeFQN),
+      name: cleanText(
+        option?.attributeDetail?.name || option?.name || option?.attributeFQN,
+      ),
       values: uniqueCleanValues(
         (option?.values || []).map(
           (value: any) => value?.stringValue || value?.value,
@@ -6513,8 +6742,8 @@ function maxPriceAmount(product: any): { amount: number; currency?: string } {
 
 function normalizeMaxOptionName(name: string | undefined): string {
   const cleaned = cleanText(name);
-  if (/^colou?r$/i.test(cleaned)) return "Color";
-  if (/^size/i.test(cleaned)) return "Size";
+  if (/^(?:colou?r|اللون)$/i.test(cleaned)) return "Color";
+  if (/^(?:size|المقاس)/i.test(cleaned)) return "Size";
   return cleaned
     ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
     : "Option";
@@ -6524,8 +6753,15 @@ function buildMaxOptionLookup(product: any): Map<string, string> {
   const lookup = new Map<string, string>();
 
   for (const option of product?.options || []) {
+    const optionName = normalizeMaxOptionName(
+      option?.label || option?.attributeChoice?.attributeName,
+    );
     for (const value of option?.attributeChoice?.allowedValues || []) {
-      const label = cleanText(value?.label || value?.value);
+      const label = cleanText(
+        optionName === "Size"
+          ? value?.value || value?.label
+          : value?.label || value?.value,
+      );
       if (!label) continue;
       if (value?.id) lookup.set(String(value.id), label);
       if (value?.value) lookup.set(String(value.value), label);
@@ -6538,23 +6774,30 @@ function buildMaxOptionLookup(product: any): Map<string, string> {
 function buildMaxOptions(
   product: any,
 ): Array<{ name: string; values: string[] }> {
-  return (product?.options || [])
-    .map((option: any) => {
-      const values = (option?.attributeChoice?.allowedValues || [])
-        .slice()
-        .sort(
-          (a: any, b: any) => (a?.displayOrder || 0) - (b?.displayOrder || 0),
-        )
-        .map((value: any) => cleanText(value?.label || value?.value));
+  const merged = new Map<string, string[]>();
 
-      return {
-        name: normalizeMaxOptionName(
-          option?.label || option?.attributeChoice?.attributeName,
+  for (const option of product?.options || []) {
+    const name = normalizeMaxOptionName(
+      option?.label || option?.attributeChoice?.attributeName,
+    );
+    const values = (option?.attributeChoice?.allowedValues || [])
+      .slice()
+      .sort(
+        (a: any, b: any) => (a?.displayOrder || 0) - (b?.displayOrder || 0),
+      )
+      .map((value: any) =>
+        cleanText(
+          name === "Size"
+            ? value?.value || value?.label
+            : value?.label || value?.value,
         ),
-        values: uniqueCleanValues(values),
-      };
-    })
-    .filter((option: any) => option.name && option.values.length);
+      );
+
+    if (!name || values.length === 0) continue;
+    merged.set(name, uniqueCleanValues([...(merged.get(name) || []), ...values]));
+  }
+
+  return [...merged].map(([name, values]) => ({ name, values }));
 }
 
 function buildMaxDescription(
@@ -6649,8 +6892,11 @@ function normalizeMaxFashionProductFromState(
     title,
   );
 
-  const colorOption = product?.options?.find((option: any) =>
-    /^colou?r$/i.test(option?.label || option?.attributeChoice?.attributeName),
+  const colorOption = product?.options?.find(
+    (option: any) =>
+      normalizeMaxOptionName(
+        option?.label || option?.attributeChoice?.attributeName,
+      ) === "Color",
   )?.attributeChoice?.allowedValues?.[0];
   const defaultColor = cleanText(
     colorOption?.label ||
@@ -6677,7 +6923,8 @@ function normalizeMaxFashionProductFromState(
 
       const available =
         variant?.available ??
-        variant?.stock !== 0 ??
+        variant?.online ??
+        variant?.active ??
         product?.availableOnline ??
         true;
       return {
