@@ -6849,8 +6849,19 @@ function parseSheinStructuredSnapshot(
     throw new Error("SHEIN structured snapshot did not expose product images");
   }
 
+  const detailRows = Array.isArray(product?.product_details?.productDetails)
+    ? product.product_details.productDetails
+    : Array.isArray(product?.attributes)
+      ? product.attributes
+      : [];
+  const englishColor = cleanText(
+    detailRows.find(
+      (entry: any) => cleanText(entry?.attr_name_en || entry?.name) === "Color",
+    )?.attr_value_en,
+  );
   const currentColor = cleanText(
-    product?.color ||
+    englishColor ||
+      product?.color ||
       (Array.isArray(product?.colors)
         ? product.colors.find((entry: any) => entry?.is_current)?.name
         : ""),
@@ -6891,11 +6902,6 @@ function parseSheinStructuredSnapshot(
     };
   });
 
-  const detailRows = Array.isArray(product?.product_details?.productDetails)
-    ? product.product_details.productDetails
-    : Array.isArray(product?.attributes)
-      ? product.attributes
-      : [];
   const description = uniqueCleanValues(
     detailRows.map((entry: any) => {
       const name = cleanText(entry?.attr_name_en || entry?.name || entry?.attr_name);
