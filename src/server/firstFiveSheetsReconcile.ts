@@ -345,6 +345,7 @@ function sourceVendor(url: string) {
     if (host.includes("hm.com")) return "H&M";
     if (host.includes("maxfashion")) return "Max";
     if (host.includes("shein")) return "SHEIN";
+    if (host.includes("lefties")) return "Lefties";
     if (host.includes("centrepoint")) return "Centrepoint";
     if (host.includes("marksandspencer")) return "Marks & Spencer";
     if (host.includes("gap.ae")) return "Gap";
