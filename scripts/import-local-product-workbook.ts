@@ -41,6 +41,8 @@ const limit = Math.max(1, Number(args.get("limit") || Number.MAX_SAFE_INTEGER));
 const concurrency = Math.min(8, Math.max(1, Number(args.get("concurrency") || 1)));
 const retryFailed = args.get("retry-failed") === "true";
 const scraperApiKey = args.get("scraper-api-key") || process.env.SCRAPERAPI_KEY || "";
+const reefApiKey = args.get("reef-api-key") || process.env.REEF_API_KEY || "";
+const reefDemo = args.get("reef-demo") === "true";
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
   `${path.basename(filePath).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}-shopify-import.jsonl`,
@@ -123,6 +125,53 @@ async function loadManagedSnapshot(url: string) {
   return html;
 }
 
+function isSheinProductUrl(url: string) {
+  try {
+    return /(^|\.)shein\.com$/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function loadStructuredSheinSnapshot(url: string) {
+  const goodsId = new URL(url).pathname.match(/-p-(\d+)(?:\.|-|\/|$)/i)?.[1];
+  if (!goodsId) throw new Error("SHEIN URL does not include a product ID");
+  if (!reefApiKey && !reefDemo) {
+    throw new Error("SHEIN requires --reef-api-key (or --reef-demo for a one-row canary)");
+  }
+
+  const params = { goods_id: goodsId, market: "ae", url, deep: true };
+  const endpoint = reefApiKey
+    ? "https://api.reefapi.com/shein/v1/product/detail"
+    : "https://reefapi.com/api/proxy";
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(reefApiKey ? { "x-api-key": reefApiKey } : {}),
+    },
+    body: JSON.stringify(
+      reefApiKey
+        ? params
+        : { engine: "shein", action: "product/detail", params },
+    ),
+    signal: AbortSignal.timeout(3 * 60 * 1000),
+  });
+  const text = await response.text();
+  let payload: any;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error(`SHEIN structured API returned non-JSON HTTP ${response.status}`);
+  }
+  if (!response.ok || payload?.ok !== true || !payload?.data?.product) {
+    throw new Error(
+      `SHEIN structured API failed: ${payload?.error?.message || `HTTP ${response.status}`}`,
+    );
+  }
+  return `SYNCLY_SHEIN_STRUCTURED_V1\n${JSON.stringify(payload.data.product)}`;
+}
+
 const workbook = XLSX.readFile(filePath, { raw: false });
 const selectedSheetNames = allSheets
   ? workbook.SheetNames
@@ -165,6 +214,9 @@ const completed = loadCompleted();
 const pending = rows
   .filter((row) => !completed.has(checkpointKey(row)) && !completed.has(`:${row.rowNumber}`))
   .slice(0, limit);
+if (reefDemo && pending.filter((row) => isSheinProductUrl(row.url)).length > 1) {
+  throw new Error("--reef-demo is limited to a single SHEIN canary row; use --reef-api-key for batch imports");
+}
 fs.mkdirSync(path.dirname(checkpointPath), { recursive: true });
 
 console.log(JSON.stringify({
@@ -186,8 +238,11 @@ let completedCount = 0;
 async function processRow(row: WorkbookRow) {
   let checkpoint: CheckpointEntry;
   try {
+    const snapshotText = isSheinProductUrl(row.url)
+      ? await loadStructuredSheinSnapshot(row.url)
+      : undefined;
     const requestBody = {
-      rows: [row],
+      rows: [{ ...row, snapshotText }],
       collectionNames: [row.collection],
       createManualReview: true,
       waitForPublishCompletion: true,

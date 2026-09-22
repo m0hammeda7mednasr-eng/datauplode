@@ -6445,6 +6445,9 @@ export class SheinScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    const structured = parseSheinStructuredSnapshot(url, snapshotText);
+    if (structured) return structured;
+
     const product = parseGenericReaderMarkdown(snapshotText, url);
     this.assertTrustworthySheinSnapshot(product, snapshotText);
     return normalizeProductOptionsAndVariants({
@@ -6798,6 +6801,139 @@ function buildMaxOptions(
   }
 
   return [...merged].map(([name, values]) => ({ name, values }));
+}
+
+const SHEIN_STRUCTURED_SNAPSHOT_PREFIX = "SYNCLY_SHEIN_STRUCTURED_V1\n";
+
+function parseSheinStructuredSnapshot(
+  url: string,
+  snapshotText: string,
+): NormalizedProduct | null {
+  if (!snapshotText.startsWith(SHEIN_STRUCTURED_SNAPSHOT_PREFIX)) return null;
+
+  let product: any;
+  try {
+    const payload = JSON.parse(
+      snapshotText.slice(SHEIN_STRUCTURED_SNAPSHOT_PREFIX.length),
+    );
+    product = payload?.product || payload;
+  } catch {
+    throw new Error("SHEIN structured snapshot is not valid JSON");
+  }
+
+  const expectedProductId = extractSheinProductId(url);
+  const productId = cleanText(product?.goods_id);
+  if (!productId || (expectedProductId && productId !== expectedProductId)) {
+    throw new Error("SHEIN structured snapshot product ID does not match the URL");
+  }
+
+  const currency = cleanText(product?.currency_code).toUpperCase();
+  const price = Number(product?.price);
+  if (currency !== "AED" || !Number.isFinite(price) || price <= 0) {
+    throw new Error("SHEIN structured snapshot did not expose a trusted AED price");
+  }
+
+  const titleFromUrl = titleFromSheinUrl(url);
+  const suppliedTitle = cleanText(product?.name);
+  const title =
+    titleFromUrl && /[A-Za-z]/.test(titleFromUrl)
+      ? titleFromUrl
+      : suppliedTitle;
+  if (!title) throw new Error("SHEIN structured snapshot did not expose a title");
+
+  const imageUrls = uniqueCleanValues([
+    product?.image,
+    ...(Array.isArray(product?.images) ? product.images : []),
+  ]).filter((value) => /^https?:\/\//i.test(value));
+  if (imageUrls.length === 0) {
+    throw new Error("SHEIN structured snapshot did not expose product images");
+  }
+
+  const currentColor = cleanText(
+    product?.color ||
+      (Array.isArray(product?.colors)
+        ? product.colors.find((entry: any) => entry?.is_current)?.name
+        : ""),
+  );
+  const sizeRows = (Array.isArray(product?.sizes) ? product.sizes : []).filter(
+    (entry: any) => cleanText(entry?.size || entry?.size_local) && cleanText(entry?.sku_code),
+  );
+  if (sizeRows.length === 0) {
+    throw new Error("SHEIN structured snapshot did not expose purchasable size variants");
+  }
+
+  const variants = sizeRows.map((entry: any) => {
+    const size = cleanText(entry?.size_local || entry?.size);
+    const sku = cleanText(entry?.sku_code);
+    const variantPrice = Number(entry?.price);
+    const stock = Number(entry?.stock);
+    const available =
+      entry?.in_stock === true && (!Number.isFinite(stock) || stock > 0);
+
+    return {
+      sourceVariantId: sku,
+      sku,
+      color: currentColor || undefined,
+      size,
+      price:
+        Number.isFinite(variantPrice) && variantPrice > 0 ? variantPrice : price,
+      currency,
+      optionValues: buildVariantOptionValues(currentColor, size),
+      available,
+      stockStatus: available ? ("in_stock" as const) : ("out_of_stock" as const),
+      imageUrl: imageUrls[0],
+      raw: {
+        stockQuantity: Number.isFinite(stock) ? Math.max(0, Math.floor(stock)) : undefined,
+        stockIsMinimum: entry?.stock_is_minimum === true,
+        listPrice: entry?.list_price,
+        basePrice: entry?.base_price,
+      },
+    };
+  });
+
+  const detailRows = Array.isArray(product?.product_details?.productDetails)
+    ? product.product_details.productDetails
+    : Array.isArray(product?.attributes)
+      ? product.attributes
+      : [];
+  const description = uniqueCleanValues(
+    detailRows.map((entry: any) => {
+      const name = cleanText(entry?.attr_name_en || entry?.name || entry?.attr_name);
+      const value = cleanText(entry?.attr_value_en || entry?.value || entry?.attr_value);
+      return name && value ? `${name}: ${value}` : "";
+    }),
+  ).join("\n");
+  const sizeValues = uniqueCleanValues(variants.map((variant) => variant.size));
+  const options = [
+    ...(currentColor ? [{ name: "Color", values: [currentColor] }] : []),
+    { name: "Size", values: sizeValues },
+  ];
+
+  return normalizeProductOptionsAndVariants({
+    source: { supplier: "SHEIN", url, productId },
+    title,
+    description,
+    brand: cleanText(product?.brand || product?.store_name || "SHEIN"),
+    currency,
+    price,
+    images: imageUrls.map((imageUrl, position) => ({
+      url: imageUrl,
+      alt: title,
+      color: currentColor || undefined,
+      position,
+    })),
+    options,
+    variants,
+    raw: {
+      structuredSnapshotProvider: "reefapi",
+      category: product?.category,
+      categoryId: product?.category_id,
+      totalStock: product?.total_stock,
+      totalStockIsMinimum: product?.total_stock_is_minimum === true,
+      colorVariants: Array.isArray(product?.colors) ? product.colors : [],
+      extractedAt: new Date().toISOString(),
+    },
+  });
 }
 
 function buildMaxDescription(
