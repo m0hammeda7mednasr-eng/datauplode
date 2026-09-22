@@ -3,6 +3,7 @@ import path from "node:path";
 import XLSX from "xlsx";
 
 type WorkbookRow = {
+  sheetName: string;
   rowNumber: number;
   url: string;
   priceMultiplier: number;
@@ -11,6 +12,7 @@ type WorkbookRow = {
 
 type CheckpointEntry = {
   at: string;
+  sheetName?: string;
   rowNumber: number;
   url: string;
   outcome: "successful" | "skipped" | "failed";
@@ -34,6 +36,7 @@ if (!filePath) throw new Error("Missing required --file argument");
 
 const apiBase = (args.get("api") || "https://datauplode-production.up.railway.app").replace(/\/$/, "");
 const sheetNameArg = args.get("sheet");
+const allSheets = args.get("all-sheets") === "true";
 const limit = Math.max(1, Number(args.get("limit") || Number.MAX_SAFE_INTEGER));
 const concurrency = Math.min(8, Math.max(1, Number(args.get("concurrency") || 1)));
 const retryFailed = args.get("retry-failed") === "true";
@@ -43,7 +46,7 @@ const checkpointPath = args.get("checkpoint") || path.join(
   `${path.basename(filePath).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}-shopify-import.jsonl`,
 );
 
-function normalizeNextUrl(value: string) {
+function normalizeProductUrl(value: string) {
   const parsed = new URL(value.trim());
   parsed.hash = "";
   if (/^(www\.)?next\.ae$/i.test(parsed.hostname)) {
@@ -52,14 +55,27 @@ function normalizeNextUrl(value: string) {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function productIdentity(url: string) {
+  const parsed = new URL(url);
+  if (/(^|\.)shein\.com$/i.test(parsed.hostname)) {
+    const productId = parsed.pathname.match(/-p-(\d+)(?:\.|-|\/|$)/i)?.[1];
+    if (productId) return `shein:${productId}`;
+  }
+  return url;
+}
+
+function checkpointKey(entry: { sheetName?: string; rowNumber: number }) {
+  return `${entry.sheetName || sheetNameArg || ""}:${entry.rowNumber}`;
+}
+
 function loadCompleted() {
-  const completed = new Map<number, CheckpointEntry>();
+  const completed = new Map<string, CheckpointEntry>();
   if (!fs.existsSync(checkpointPath)) return completed;
   for (const line of fs.readFileSync(checkpointPath, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line) as CheckpointEntry;
-      if (entry.outcome !== "failed" || !retryFailed) completed.set(entry.rowNumber, entry);
+      if (entry.outcome !== "failed" || !retryFailed) completed.set(checkpointKey(entry), entry);
     } catch {
       // Ignore a partially written final line so interrupted runs stay resumable.
     }
@@ -108,38 +124,53 @@ async function loadManagedSnapshot(url: string) {
 }
 
 const workbook = XLSX.readFile(filePath, { raw: false });
-const sheetName = sheetNameArg || workbook.SheetNames[0];
-const sheet = workbook.Sheets[sheetName];
-if (!sheet) throw new Error(`Sheet not found: ${sheetName}`);
-
-const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "" });
-const seenUrls = new Set<string>();
+const selectedSheetNames = allSheets
+  ? workbook.SheetNames
+  : [sheetNameArg || workbook.SheetNames[0]];
+const seenProducts = new Set<string>();
 const rows: WorkbookRow[] = [];
-for (let index = 0; index < rawRows.length; index += 1) {
-  const values = rawRows[index];
-  const rawUrl = String(values[0] || "").trim();
-  if (!/^https?:\/\//i.test(rawUrl)) continue;
-  const priceMultiplier = Number(values[1]);
-  if (![22, 23, 24].includes(priceMultiplier)) continue;
-  const url = normalizeNextUrl(rawUrl);
-  if (seenUrls.has(url)) continue;
-  seenUrls.add(url);
-  rows.push({
-    rowNumber: index + 1,
-    url,
-    priceMultiplier,
-    collection: String(values[2] || "").trim() || "General",
-  });
+for (const sheetName of selectedSheetNames) {
+  const sheet = workbook.Sheets[sheetName];
+  if (!sheet) throw new Error(`Sheet not found: ${sheetName}`);
+  const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "" });
+  for (let index = 0; index < rawRows.length; index += 1) {
+    const values = rawRows[index];
+    const urlIndex = values.findIndex((value) => /^https?:\/\//i.test(String(value || "").trim()));
+    if (urlIndex < 0) continue;
+    const multiplierIndex = values.findIndex(
+      (value, valueIndex) => valueIndex !== urlIndex && [22, 23, 24].includes(Number(value)),
+    );
+    if (multiplierIndex < 0) continue;
+    const rawUrl = String(values[urlIndex] || "").trim();
+    const priceMultiplier = Number(values[multiplierIndex]);
+    const url = normalizeProductUrl(rawUrl);
+    const identity = productIdentity(url);
+    if (seenProducts.has(identity)) continue;
+    seenProducts.add(identity);
+    const collectionIndex = values.findIndex((value, valueIndex) => {
+      const text = String(value || "").trim();
+      return valueIndex > multiplierIndex && Boolean(text) && !/^https?:\/\//i.test(text) && ![22, 23, 24].includes(Number(value));
+    });
+    rows.push({
+      sheetName,
+      rowNumber: index + 1,
+      url,
+      priceMultiplier,
+      collection: collectionIndex >= 0 ? String(values[collectionIndex]).trim() : "General",
+    });
+  }
 }
 
 const completed = loadCompleted();
-const pending = rows.filter((row) => !completed.has(row.rowNumber)).slice(0, limit);
+const pending = rows
+  .filter((row) => !completed.has(checkpointKey(row)) && !completed.has(`:${row.rowNumber}`))
+  .slice(0, limit);
 fs.mkdirSync(path.dirname(checkpointPath), { recursive: true });
 
 console.log(JSON.stringify({
   event: "start",
   filePath,
-  sheetName,
+  sheetNames: selectedSheetNames,
   uniqueRows: rows.length,
   alreadyCompleted: completed.size,
   selected: pending.length,
@@ -161,7 +192,7 @@ async function processRow(row: WorkbookRow) {
       createManualReview: true,
       waitForPublishCompletion: true,
       reconcileExistingProducts: true,
-      sheetName: `${path.basename(filePath)} / ${sheetName}`,
+      sheetName: `${path.basename(filePath)} / ${row.sheetName}`,
       sheetUrl: `local-workbook:${path.basename(filePath)}`,
     };
     let response = await postJson(`${apiBase}/api/imports/excel/process`, requestBody);
@@ -175,17 +206,17 @@ async function processRow(row: WorkbookRow) {
     const failure = response?.failed?.find((item: any) => item.rowNumber === row.rowNumber);
     if (success) {
       successful += 1;
-      checkpoint = { at: new Date().toISOString(), rowNumber: row.rowNumber, url: row.url, outcome: "successful", response: success };
+      checkpoint = { at: new Date().toISOString(), sheetName: row.sheetName, rowNumber: row.rowNumber, url: row.url, outcome: "successful", response: success };
     } else if (skip) {
       skipped += 1;
-      checkpoint = { at: new Date().toISOString(), rowNumber: row.rowNumber, url: row.url, outcome: "skipped", response: skip };
+      checkpoint = { at: new Date().toISOString(), sheetName: row.sheetName, rowNumber: row.rowNumber, url: row.url, outcome: "skipped", response: skip };
     } else {
       failed += 1;
-      checkpoint = { at: new Date().toISOString(), rowNumber: row.rowNumber, url: row.url, outcome: "failed", response: failure || response, error: failure?.error || failure?.reason || "No successful result returned" };
+      checkpoint = { at: new Date().toISOString(), sheetName: row.sheetName, rowNumber: row.rowNumber, url: row.url, outcome: "failed", response: failure || response, error: failure?.error || failure?.reason || "No successful result returned" };
     }
   } catch (error) {
     failed += 1;
-    checkpoint = { at: new Date().toISOString(), rowNumber: row.rowNumber, url: row.url, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+    checkpoint = { at: new Date().toISOString(), sheetName: row.sheetName, rowNumber: row.rowNumber, url: row.url, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
   }
   fs.appendFileSync(checkpointPath, `${JSON.stringify(checkpoint)}\n`);
   completedCount += 1;
