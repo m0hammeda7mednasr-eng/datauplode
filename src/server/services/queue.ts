@@ -1664,7 +1664,11 @@ export class QueueService {
     if (shouldRefreshSource) {
       try {
         const scraped = normalizeFreshProductPrices(
-          await scraperService.scrape(product.url),
+          await withTimeout(
+            scraperService.scrape(product.url),
+            priceStockSourceScrapeTimeoutMs(product.url),
+            'Full product source scrape timed out before Shopify mutation',
+          ),
           options,
         );
         if (options.sheetMeta?.excelRowNumber) {
@@ -1740,7 +1744,11 @@ export class QueueService {
     let availabilitySnapshot: any = { available: true, variants: [] };
     if (shouldSyncInventory) {
       try {
-        availabilitySnapshot = await scraperService.checkAvailability(product.url);
+        availabilitySnapshot = await withTimeout(
+          scraperService.checkAvailability(product.url),
+          priceStockSourceScrapeTimeoutMs(product.url),
+          'Full product availability check timed out before Shopify mutation',
+        );
       } catch (error: any) {
         if (isConfirmedSourceGoneError(error)) {
           return this.handleConfirmedSourceGone(product, jobId, error);
