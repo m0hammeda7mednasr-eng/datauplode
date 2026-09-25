@@ -2460,6 +2460,16 @@ function isLikelyBlockedImportError(error: any) {
   );
 }
 
+function isMalformedCachedImportProduct(product: any) {
+  const title = String(product?.title || "").trim();
+  return (
+    !title ||
+    /<\/?(?:script|style|html|head|body)\b|(?:personalisation|personalization)Script|javascript:/i.test(
+      title,
+    )
+  );
+}
+
 function guessProductIdFromUrl(url: string) {
   const normalizedUrl = normalizeAnalyzeCacheUrl(url);
   const nextStyleMatch = normalizedUrl.match(/\/style\/([a-z0-9]+)\/([a-z0-9]+)/i);
@@ -5031,10 +5041,17 @@ router.post("/imports/excel/process", async (req, res) => {
 
       try {
         const snapshotText = String(row?.snapshotText || "").trim();
+        const cached = getCachedAnalyzeProduct(normalizedUrl);
         const analyzed = snapshotText
           ? await scraperService.scrapeSnapshot(normalizedUrl, snapshotText)
-          : getCachedAnalyzeProduct(normalizedUrl) ||
-            (await scrapeWithBridgeFallback(normalizedUrl));
+          : cached && !isMalformedCachedImportProduct(cached)
+            ? cached
+            : await scrapeWithBridgeFallback(normalizedUrl);
+        if (isMalformedCachedImportProduct(analyzed)) {
+          throw new Error(
+            "Product analysis returned markup instead of a trustworthy product title",
+          );
+        }
         analyzed.importMeta = {
           excelRowNumber: rowNumber,
           mode: "file_upload",
