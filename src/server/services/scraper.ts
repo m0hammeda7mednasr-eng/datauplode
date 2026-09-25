@@ -8006,7 +8006,10 @@ function parseNextSnapshotText(
 
   if (
     !title ||
-    /^(Access Denied|404|Page Not Found|Next Product)$/i.test(title)
+    /^(Access Denied|404|Page Not Found|Next Product)$/i.test(title) ||
+    /<\/?(?:script|style|html|head|body)\b|(?:personalisation|personalization)Script|javascript:/i.test(
+      title,
+    )
   ) {
     throw new Error("Reader fallback did not expose a product title");
   }
@@ -8082,6 +8085,17 @@ function parseNextSnapshotText(
     : typeInferredSizes.length
       ? typeInferredSizes
       : babyInferredSizes;
+  if (rawFlags.pastedSnapshotFallback && !sizeValues.length) {
+    throw new ScraperError(
+      "Next page snapshot did not expose trustworthy size values. The product was not published as a Default variant.",
+      {
+        code: "NEXT_SIZE_VALUES_MISSING",
+        status: 422,
+        supplier: "Next",
+        retryWithSnapshot: true,
+      },
+    );
+  }
   if (!sizeValues.length && nextSnapshotHasSizePicker(lines)) {
     throw new ScraperError(
       "Next exposed a size picker, but the page snapshot did not include the size values. Re-analyze with the full visible product page text after opening the size selector, so Syncly does not publish this as One Size.",
