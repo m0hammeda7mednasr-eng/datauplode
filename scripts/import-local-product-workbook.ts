@@ -111,7 +111,7 @@ async function postJson(url: string, body: unknown, attempts = 3) {
 function shouldRetryWithManagedSnapshot(response: any) {
   const failure = response?.failed?.[0];
   const message = String(failure?.error || failure?.reason || "");
-  return /Cloudflare|protected|browser snapshot|Bridge task timeout|No usable product HTML/i.test(message);
+  return /HTTP 403|Cloudflare|protected|browser snapshot|Bridge task timeout|No usable product HTML/i.test(message);
 }
 
 async function loadManagedSnapshot(url: string) {

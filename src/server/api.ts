@@ -5033,7 +5033,8 @@ router.post("/imports/excel/process", async (req, res) => {
         const snapshotText = String(row?.snapshotText || "").trim();
         const analyzed = snapshotText
           ? await scraperService.scrapeSnapshot(normalizedUrl, snapshotText)
-          : await scrapeWithBridgeFallback(normalizedUrl);
+          : getCachedAnalyzeProduct(normalizedUrl) ||
+            (await scrapeWithBridgeFallback(normalizedUrl));
         analyzed.importMeta = {
           excelRowNumber: rowNumber,
           mode: "file_upload",
