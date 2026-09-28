@@ -79,6 +79,7 @@ async function main() {
   const poolSize = Math.max(limit * 5, numberArg("pool", 500));
   const minAgeDays = numberArg("min-age-days", 30);
   const failureRetryMinutes = numberArg("failure-retry-minutes", 1440);
+  const newestFirst = arg("order", "oldest").toLowerCase() === "newest";
   const successCutoff = new Date(Date.now() - minAgeDays * 24 * 60 * 60 * 1000);
   const failureCutoff = new Date(Date.now() - failureRetryMinutes * 60 * 1000);
 
@@ -104,11 +105,12 @@ async function main() {
       title: true,
       url: true,
       raw: true,
+      createdAt: true,
       lastScrapedAt: true,
       variants: { select: { sku: true, shopifyVariant: { select: { sku: true } } }, take: 8 },
       shopifyProduct: { select: { variants: { select: { sku: true }, take: 8 } } },
     },
-    orderBy: { lastScrapedAt: "asc" },
+    orderBy: newestFirst ? { createdAt: "desc" } : { lastScrapedAt: "asc" },
     take: poolSize,
   });
 
@@ -116,7 +118,9 @@ async function main() {
     .filter((candidate) => !isImportPlaceholderTitle(candidate.title) && Boolean(getApprovedSheetMultiplier(candidate)))
     .sort((left, right) =>
       domainRank(left.url, domains) - domainRank(right.url, domains) ||
-      (left.lastScrapedAt?.getTime() || 0) - (right.lastScrapedAt?.getTime() || 0),
+      (newestFirst
+        ? (right.createdAt?.getTime() || 0) - (left.createdAt?.getTime() || 0)
+        : (left.lastScrapedAt?.getTime() || 0) - (right.lastScrapedAt?.getTime() || 0)),
     )
     .slice(0, Math.max(0, Math.min(limit, target - fullyBefore)));
 
@@ -175,6 +179,7 @@ async function main() {
 
   console.log(JSON.stringify({
     domains,
+    order: newestFirst ? "newest" : "oldest",
     selected: selected.length,
     ok,
     failed,

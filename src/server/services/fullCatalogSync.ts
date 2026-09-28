@@ -173,6 +173,37 @@ function validateFreshProduct(product: NormalizedProduct, multiplier: number) {
   if (skus.some((sku) => !sku) || new Set(skus).size !== skus.length) {
     throw new Error("Fresh source has empty or duplicate deterministic SKUs");
   }
+
+  const markupPattern = /<\/?(?:script|style|html|body)\b|javascript:|personalisationScript/i;
+  if (markupPattern.test(clean(product.title)) || markupPattern.test(String(product.description || ""))) {
+    throw new Error("Fresh source title or description contains executable markup");
+  }
+
+  const prices = product.variants.map((variant) => Number(variant.price || product.price));
+  if (prices.some((price) => !Number.isFinite(price) || price <= 1 || price > 10_000)) {
+    throw new Error("Fresh source contains an implausible or missing AED variant price");
+  }
+  const lowestPrice = Math.min(...prices);
+  const highestPrice = Math.max(...prices);
+  if (highestPrice / lowestPrice > 8) {
+    throw new Error("Fresh source variant price spread is implausibly large");
+  }
+
+  const suspiciousOption = /(?:<[^>]+>|https?:\/\/|\b(?:aed|egp|price|add to|description|javascript|undefined|null)\b)/i;
+  const optionValues = product.options.flatMap((option) => option.values.map((value) => clean(value)));
+  const variantValues = product.variants.flatMap((variant) => [
+    clean(variant.color),
+    clean(variant.size),
+    ...Object.values(variant.optionValues || {}).map((value) => clean(value)),
+  ]).filter(Boolean);
+  if (
+    [...optionValues, ...variantValues].some((value) => value.length > 100 || suspiciousOption.test(value))
+  ) {
+    throw new Error("Fresh source contains a suspicious color or size value");
+  }
+  if (product.variants.length > 1 && variantValues.some((value) => /^default(?: title| 1)?$/i.test(value))) {
+    throw new Error("Fresh multi-variant source contains a placeholder option value");
+  }
 }
 
 export interface FullCatalogSyncOptions {

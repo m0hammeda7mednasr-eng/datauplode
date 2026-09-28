@@ -45,6 +45,30 @@ function moneyEqual(left: unknown, right: unknown) {
   return Math.abs(Number(left) - Number(right)) < 0.01;
 }
 
+function optionKey(value: unknown) {
+  return clean(value)
+    .toLowerCase()
+    .replace(/\b(?:colour|color|size)\b\s*[:\-]?\s*/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function expectedOptionKeys(variant: CatalogVariant) {
+  const color = optionKey(variant.color);
+  const size = optionKey(variant.size);
+  return new Set([
+    [color, size].filter(Boolean).join(' '),
+    [size, color].filter(Boolean).join(' '),
+    size,
+  ].filter(Boolean));
+}
+
+function variantOptionsMatch(expected: CatalogVariant, actual: StorefrontVariant) {
+  const actualKey = optionKey(actual.title);
+  if (!actualKey) return false;
+  return [...expectedOptionKeys(expected)].some((key) => key === actualKey);
+}
+
 async function fetchJson<T>(url: string, attempts = 3): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -169,13 +193,24 @@ async function main() {
         );
         const productIssues: any[] = [];
 
+        const matchedLiveSkus = new Set<string>();
+        const unmatchedLive = [...liveBySku.entries()];
+
         for (const [sku, expected] of expectedBySku) {
-          const actual = liveBySku.get(sku);
+          const exact = liveBySku.get(sku);
+          const optionMatch = exact
+            ? null
+            : unmatchedLive.find(([liveSku, variant]) =>
+                !matchedLiveSkus.has(liveSku) && variantOptionsMatch(expected, variant),
+              );
+          const actual = exact || optionMatch?.[1];
+          const actualSku = exact ? sku : optionMatch?.[0];
           if (!actual) {
             missingVariants += 1;
             productIssues.push({ type: 'missing_live_variant', sku, expected });
             continue;
           }
+          if (actualSku) matchedLiveSkus.add(actualSku);
           variantsChecked += 1;
           if (Boolean(actual.available) !== Boolean(expected.available)) {
             stockMismatches += 1;
@@ -201,7 +236,7 @@ async function main() {
         }
 
         for (const [sku, actual] of liveBySku) {
-          if (!expectedBySku.has(sku)) {
+          if (!expectedBySku.has(sku) && !matchedLiveSkus.has(sku)) {
             extraVariants += 1;
             productIssues.push({ type: 'extra_live_variant', sku, actualTitle: actual.title });
           }
