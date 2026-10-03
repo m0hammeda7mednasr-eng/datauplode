@@ -9065,18 +9065,46 @@ function filterCentrepointProductImages(
   return images.filter((image) => isCentrepointProductImageUrl(image.url));
 }
 
+function normalizeCentrepointColor(value: unknown): string {
+  const candidate = cleanText(value);
+  if (!candidate || /breadcrumb|select\s+(?:a\s+)?colou?r|^colou?r$/i.test(candidate)) return "";
+  if (/^[a-z][a-z /&-]{1,30}$/i.test(candidate)) return candidate;
+
+  const knownColors: Array<[RegExp, string]> = [
+    [/multi(?:color|colour)/i, "Multicolour"],
+    [/navy/i, "Navy"],
+    [/blue/i, "Blue"],
+    [/pink/i, "Pink"],
+    [/yellow/i, "Yellow"],
+    [/green/i, "Green"],
+    [/white/i, "White"],
+    [/black/i, "Black"],
+    [/beige/i, "Beige"],
+    [/brown/i, "Brown"],
+    [/gr[ae]y/i, "Grey"],
+    [/red/i, "Red"],
+    [/orange/i, "Orange"],
+    [/purple/i, "Purple"],
+    [/cream/i, "Cream"],
+    [/gold/i, "Gold"],
+    [/silver/i, "Silver"],
+  ];
+  return knownColors.find(([pattern]) => pattern.test(candidate))?.[1] || "";
+}
+
 export function parseCentrepointHtml(html: string, url: string): NormalizedProduct {
   const $ = cheerio.load(html);
   const product = extractGenericProductFromHtml(html, url, "Centrepoint");
   const jsonLdProduct = extractProductJsonLdFromHtml(html);
   const productId = product.source.productId || getProductIdFromUrl(url);
-  const color = cleanText(
-    jsonLdProduct?.color ||
-      product.raw?.color ||
-      product.options.find((option) => /^colou?r$/i.test(option.name))
-        ?.values?.[0] ||
-      product.variants.find((variant) => variant.color)?.color,
-  );
+  const colorCandidates = [
+    jsonLdProduct?.color,
+    $('meta[property="product:color"]').attr("content"),
+    product.raw?.color,
+    product.options.find((option) => /^colou?r$/i.test(option.name))?.values?.[0],
+    product.variants.find((variant) => variant.color)?.color,
+  ];
+  const color = colorCandidates.map(normalizeCentrepointColor).find(Boolean) || "";
   const images = filterCentrepointProductImages(product.images);
   const centrepointImageRegex =
     /https:\/\/media\.centrepointstores\.com\/i\/centrepoint\/[^"',\s?&<]+\.(?:jpg|jpeg|png|webp)/gi;
