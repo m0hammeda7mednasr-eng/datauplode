@@ -1244,7 +1244,7 @@ export function isLikelyProductImageSource(
 
   const decodedUrl = decodeImageUrl(imageUrl);
   if (!decodedUrl || decodedUrl.startsWith("data:")) return false;
-  if (/\.(svg|ico)(?:[?#]|$)/i.test(decodedUrl)) return false;
+  if (/\.(?:svg|ico|mp4|webm|mov|avi|m4v|ogv|mp3|wav|pdf)(?:[?#]|$)/i.test(decodedUrl)) return false;
 
   const lowerUrl = decodedUrl.toLowerCase();
   const lowerAlt = cleanText(alt).toLowerCase();
@@ -9160,6 +9160,9 @@ export class CentrepointScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    if (/<(?:!doctype|html|head|body)\b/i.test(snapshotText)) {
+      return parseCentrepointHtml(snapshotText, url);
+    }
     const product = parseGenericReaderMarkdown(
       normalizeCentrepointSnapshotText(snapshotText),
       url,

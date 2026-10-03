@@ -1,7 +1,11 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import XLSX from "xlsx";
+
+const execFileAsync = promisify(execFile);
 
 type WorkbookRow = {
   sheetName: string;
@@ -44,6 +48,10 @@ const retryFailed = args.get("retry-failed") === "true";
 const scraperApiKey = args.get("scraper-api-key") || process.env.SCRAPERAPI_KEY || "";
 const reefApiKey = args.get("reef-api-key") || process.env.REEF_API_KEY || "";
 const reefDemo = args.get("reef-demo") === "true";
+const managedFirst = args.get("managed-first") === "true";
+const directFirst = args.get("direct-first") === "true";
+const brandCollection = String(args.get("brand-collection") || "").trim();
+const normalizeCollections = args.get("normalize-collections") === "true";
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
   `${path.basename(filePath).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}-shopify-import.jsonl`,
@@ -69,6 +77,40 @@ function productIdentity(url: string) {
 
 function checkpointKey(entry: { sheetName?: string; rowNumber: number }) {
   return `${entry.sheetName || sheetNameArg || ""}:${entry.rowNumber}`;
+}
+
+const COLLECTION_ALIASES = new Map<string, string>([
+  ["blanket", "Blanket"],
+  ["blankets", "Blanket"],
+  ["body suit", "Bodysuits"],
+  ["bodysuit", "Bodysuits"],
+  ["bodysuits", "Bodysuits"],
+  ["dress", "Dresses"],
+  ["dresses", "Dresses"],
+  ["dungaree set", "Dungrees & sets"],
+  ["dungarees set", "Dungrees & sets"],
+  ["dungrees & sets", "Dungrees & sets"],
+  ["hospital set", "Hospital sets"],
+  ["hospital sets", "Hospital sets"],
+  ["leggings", "Trousers & Leggings"],
+  ["pyjama", "Pyjamas & Homewear"],
+  ["pyjamas", "Pyjamas & Homewear"],
+  ["romper", "Rompers"],
+  ["rompers", "Rompers"],
+  ["shoes", "Footwear"],
+  ["sleepsuit", "Sleepsuits"],
+  ["sleepsuits", "Sleepsuits"],
+  ["t-shirts", "Tops & T-shirts"],
+  ["tops & t-shirts", "Tops & T-shirts"],
+]);
+
+function normalizedCollectionName(value: string, url: string) {
+  const trimmed = value.trim();
+  if (!normalizeCollections) return trimmed || "General";
+  if (!trimmed && /(?:^|[-/])shirt(?:s)?(?:[-/]|$)/i.test(new URL(url).pathname)) {
+    return "Tops & T-shirts";
+  }
+  return COLLECTION_ALIASES.get(trimmed.toLowerCase()) || trimmed || "General";
 }
 
 function loadCompleted() {
@@ -123,6 +165,25 @@ async function loadManagedSnapshot(url: string) {
   if (!response.ok) throw new Error(`Managed snapshot failed with HTTP ${response.status}`);
   const html = await response.text();
   if (html.trim().length < 500) throw new Error("Managed snapshot returned incomplete HTML");
+  return html;
+}
+
+async function loadDirectSnapshot(url: string) {
+  const { stdout: html } = await execFileAsync(
+    "curl.exe",
+    [
+      "-L",
+      "-sS",
+      "--compressed",
+      "-m",
+      "180",
+      "-A",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
+      url,
+    ],
+    { maxBuffer: 12 * 1024 * 1024, windowsHide: true },
+  );
+  if (html.trim().length < 500) throw new Error("Direct snapshot returned incomplete HTML");
   return html;
 }
 
@@ -206,7 +267,10 @@ for (const sheetName of selectedSheetNames) {
       rowNumber: index + 1,
       url,
       priceMultiplier,
-      collection: collectionIndex >= 0 ? String(values[collectionIndex]).trim() : "General",
+      collection: normalizedCollectionName(
+        collectionIndex >= 0 ? String(values[collectionIndex]).trim() : "",
+        url,
+      ),
     });
   }
 }
@@ -228,6 +292,10 @@ console.log(JSON.stringify({
   alreadyCompleted: completed.size,
   selected: pending.length,
   concurrency,
+  managedFirst,
+  directFirst,
+  brandCollection: brandCollection || null,
+  normalizeCollections,
   checkpointPath,
 }));
 
@@ -241,10 +309,14 @@ async function processRow(row: WorkbookRow) {
   try {
     const snapshotText = isSheinProductUrl(row.url)
       ? await loadStructuredSheinSnapshot(row.url)
-      : undefined;
+      : directFirst
+        ? await loadDirectSnapshot(row.url)
+        : managedFirst && scraperApiKey
+          ? await loadManagedSnapshot(row.url)
+          : undefined;
     const requestBody = {
       rows: [{ ...row, snapshotText }],
-      collectionNames: [row.collection],
+      collectionNames: [...new Set([brandCollection, row.collection].filter(Boolean))],
       createManualReview: true,
       waitForPublishCompletion: true,
       reconcileExistingProducts: true,
@@ -254,7 +326,7 @@ async function processRow(row: WorkbookRow) {
     let response = await postJson(`${apiBase}/api/imports/excel/process`, requestBody);
     if (scraperApiKey && shouldRetryWithManagedSnapshot(response)) {
       const pageText = await loadManagedSnapshot(row.url);
-      await postJson(`${apiBase}/api/imports/analyze`, { url: row.url, pageText }, 1);
+      requestBody.rows[0].snapshotText = pageText;
       response = await postJson(`${apiBase}/api/imports/excel/process`, requestBody);
     }
     const success = response?.successful?.find((item: any) => item.rowNumber === row.rowNumber);
