@@ -766,6 +766,20 @@ async function findShopifyProduct(
       matchSource: "shopify_fallback" as const,
     };
   }
+  const exactTitleVendorCandidates = [...found.values()].filter(
+    (product) =>
+      clean(product.vendor).toLowerCase() === vendor.toLowerCase() &&
+      clean(product.title).toLowerCase() === freshTitle.toLowerCase(),
+  );
+  if (exactTitleVendorCandidates.length > 0) {
+    return {
+      product: null,
+      ambiguous: true,
+      matchSource: "shopify_fallback" as const,
+      reason:
+        "An ACTIVE Shopify product already has the exact title and vendor, but source identity is not exact. No product was created to avoid a duplicate.",
+    };
+  }
   if (searchErrors.length > 0) {
     return {
       product: null,

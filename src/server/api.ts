@@ -3720,6 +3720,52 @@ async function publishPreparedProductToQueue(params: {
   return { sourceProductId: sourceProduct.id, jobId: job.id };
 }
 
+async function detachDeletedShopifyLinkForImport(
+  client: Awaited<ReturnType<typeof ShopifyService.getClientFromDb>>,
+  sourceUrl: string,
+) {
+  const existing = await prisma.sourceProduct.findUnique({
+    where: { url: sourceUrl },
+    select: {
+      id: true,
+      shopifyProduct: {
+        select: { id: true, shopifyId: true },
+      },
+    },
+  });
+  if (!existing?.shopifyProduct) return "unlinked" as const;
+
+  const liveProduct = await ShopifyService.getProductBasic(
+    client,
+    existing.shopifyProduct.shopifyId,
+  );
+  if (liveProduct) return "still_exists" as const;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shopifyVariant.deleteMany({
+      where: { shopifyProductId: existing.shopifyProduct!.id },
+    });
+    await tx.shopifyProduct.deleteMany({
+      where: {
+        id: existing.shopifyProduct!.id,
+        shopifyId: existing.shopifyProduct!.shopifyId,
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        sourceProductId: existing.id,
+        action: "DETACH_DELETED_SHOPIFY_LINK_FOR_IMPORT",
+        details: JSON.stringify({
+          shopifyId: existing.shopifyProduct!.shopifyId,
+          sourceUrl,
+          verifiedMissingAt: new Date().toISOString(),
+        }),
+      },
+    });
+  });
+  return "detached" as const;
+}
+
 function verifyShopifyHmac(query: any, clientSecret: string) {
   const hmac = firstQueryValue(query.hmac);
   if (!hmac) return false;
@@ -5184,6 +5230,18 @@ router.post("/imports/excel/process", async (req, res) => {
                 ...(verification ? { verification } : {}),
               });
               continue;
+            }
+
+            if (reconciliation.status === "missing") {
+              const linkState = await detachDeletedShopifyLinkForImport(
+                reconcileContext.client,
+                normalizedUrl,
+              );
+              if (linkState === "still_exists") {
+                throw new Error(
+                  "The linked Shopify product still exists outside the ACTIVE catalog. No duplicate product was created.",
+                );
+              }
             }
 
             if (reconciliation.status !== "missing") {
