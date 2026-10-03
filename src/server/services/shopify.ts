@@ -138,8 +138,8 @@ export class ShopifyService {
 
   static async getCollections(client: ShopifyGraphqlClient) {
     const query = `
-      query {
-        collections(first: 100) {
+      query CollectionsPage($after: String) {
+        collections(first: 250, after: $after) {
           edges {
             node {
               id
@@ -147,11 +147,30 @@ export class ShopifyService {
               handle
             }
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
       }
     `;
-    const data = await client.request(query);
-    return data.collections.edges.map((e: any) => e.node);
+
+    const collections: any[] = [];
+    let after: string | null = null;
+
+    do {
+      const data: any = await client.request(query, { after });
+      const connection = data?.collections;
+      collections.push(...(connection?.edges || []).map((edge: any) => edge.node));
+
+      if (!connection?.pageInfo?.hasNextPage) break;
+      after = connection.pageInfo.endCursor || null;
+      if (!after) {
+        throw new Error('Shopify collections pagination reported another page without an endCursor');
+      }
+    } while (after);
+
+    return collections;
   }
 
   static async createCollection(client: ShopifyGraphqlClient, title: string) {
