@@ -3673,6 +3673,14 @@ async function publishPreparedProductToQueue(params: {
     });
 
     if (existingProduct) {
+      if (
+        existingProduct.shopifyProduct &&
+        existingProduct.shopifyProduct.shopifyId === replaceShopifyProductId
+      ) {
+        await tx.shopifyVariant.deleteMany({
+          where: { shopifyProductId: existingProduct.shopifyProduct.id },
+        });
+      }
       await tx.sourceImage.deleteMany({
         where: { sourceProductId: existingProduct.id },
       });
