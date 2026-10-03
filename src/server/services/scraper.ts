@@ -9160,6 +9160,9 @@ export class CentrepointScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    if (/Just a moment|security verification|cf-chl|Cloudflare/i.test(snapshotText)) {
+      throw new Error("Centrepoint snapshot returned a Cloudflare challenge");
+    }
     if (/<(?:!doctype|html|head|body)\b/i.test(snapshotText)) {
       return parseCentrepointHtml(snapshotText, url);
     }

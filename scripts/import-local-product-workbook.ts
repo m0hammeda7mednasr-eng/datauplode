@@ -60,6 +60,9 @@ const checkpointPath = args.get("checkpoint") || path.join(
 function normalizeProductUrl(value: string) {
   const parsed = new URL(value.trim());
   parsed.hash = "";
+  if (/(^|\.)centrepointstores\.com$/i.test(parsed.hostname)) {
+    parsed.pathname = parsed.pathname.replace(/[.,;:]+$/, "");
+  }
   if (/^(www\.)?next\.ae$/i.test(parsed.hostname)) {
     parsed.pathname = parsed.pathname.replace(/^\/ar\//i, "/en/");
   }
@@ -174,7 +177,15 @@ async function loadDirectSnapshot(url: string) {
     [
       "-L",
       "-sS",
+      "--fail-with-body",
       "--compressed",
+      "--retry",
+      "4",
+      "--retry-all-errors",
+      "--retry-delay",
+      "3",
+      "--connect-timeout",
+      "30",
       "-m",
       "180",
       "-A",
