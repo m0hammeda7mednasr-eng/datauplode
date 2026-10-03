@@ -3594,7 +3594,10 @@ async function publishPreparedProductToQueue(params: {
       include: { shopifyProduct: true },
     });
 
-    if (existingProduct?.shopifyProduct) {
+    if (
+      existingProduct?.shopifyProduct &&
+      existingProduct.shopifyProduct.shopifyId !== replaceShopifyProductId
+    ) {
       throw Object.assign(
         new Error(
           "This product is already linked to Shopify. Use Sync Now from the product detail page.",
