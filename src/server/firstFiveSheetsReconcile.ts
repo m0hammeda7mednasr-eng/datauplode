@@ -894,7 +894,7 @@ async function reconcileGroup(
       Number(fresh.raw?.nextJsonLdVariantCount || 0) === sourceVariants.length);
   const supplierVariantStructureVerified = (() => {
     const code = brandCode(group.url);
-    if (!["MAX", "MNS", "GAP"].includes(code) || sourceVariants.length <= 1) {
+    if (!["MAX", "MNS", "GAP", "CPT"].includes(code) || sourceVariants.length <= 1) {
       return false;
     }
     const optionNames = new Set(
@@ -979,6 +979,33 @@ const mapped = product.variants.map((current: any) => {
       };
     }
     throw new Error(`Could not map ${unmapped.length}/${mapped.length} Shopify variants to fresh source variants`);
+  }
+
+  if (
+    brandCode(group.url) === "CPT" &&
+    mapped.some(({ current }: any) => {
+      const options = shopifyOptions(current);
+      return /^(?:breadcrumb|default(?: title| 1)?)$/i.test(clean(options.color)) ||
+        /^(?:breadcrumb|default(?: title| 1)?)$/i.test(clean(options.size));
+    }) &&
+    mapped.every(({ source }: any) => {
+      const options = sourceOptions(source);
+      return Boolean(clean(options.color || source?.color) || clean(options.size || source?.size));
+    })
+  ) {
+    return {
+      status: "rebuild_required",
+      url: group.url,
+      rows: resultRows(group),
+      multiplier: group.multiplier,
+      productCode,
+      shopifyProductId: product.id,
+      shopifyHandle: clean(product.handle),
+      shopifyTitle: clean(product.title),
+      variantsChecked: product.variants.length,
+      matchSource: located.matchSource,
+      reason: "Centrepoint Shopify options contain a placeholder and require a handle-preserving rebuild from verified source options.",
+    };
   }
 
   const canonicalCandidates = mapped

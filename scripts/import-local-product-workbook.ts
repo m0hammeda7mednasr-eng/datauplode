@@ -52,6 +52,7 @@ const managedFirst = args.get("managed-first") === "true";
 const directFirst = args.get("direct-first") === "true";
 const brandCollection = String(args.get("brand-collection") || "").trim();
 const normalizeCollections = args.get("normalize-collections") === "true";
+const onlyUrlsFile = String(args.get("only-urls-file") || "").trim();
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
   `${path.basename(filePath).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}-shopify-import.jsonl`,
@@ -287,7 +288,20 @@ for (const sheetName of selectedSheetNames) {
 }
 
 const completed = loadCompleted();
+const onlyUrls = (() => {
+  if (!onlyUrlsFile) return null;
+  const text = fs.readFileSync(onlyUrlsFile, "utf8").replace(/^\uFEFF/, "");
+  let values: unknown[];
+  try {
+    const parsed = JSON.parse(text);
+    values = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    values = text.split(/\r?\n/).filter(Boolean);
+  }
+  return new Set(values.map((value: any) => normalizeProductUrl(String(value?.url || value || ""))).filter(Boolean));
+})();
 const pending = rows
+  .filter((row) => !onlyUrls || onlyUrls.has(row.url))
   .filter((row) => !completed.has(checkpointKey(row)) && !completed.has(`:${row.rowNumber}`))
   .slice(0, limit);
 if (reefDemo && pending.filter((row) => isSheinProductUrl(row.url)).length > 1) {
