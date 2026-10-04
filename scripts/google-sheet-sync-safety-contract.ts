@@ -346,6 +346,29 @@ assert.equal(nextSnapshot.variants.at(-1)?.size, "7-8 Years (122-128cm)");
 assert.equal(nextSnapshot.variants[0].price, 92);
 assert.equal(nextSnapshot.variants.at(-1)?.price, 114);
 
+const nextHtmlSnapshot = new NextScraper().scrapeSnapshot(
+  "https://www.next.ae/en/style/sv041885/g97318",
+  `<!doctype html>
+  <html><head>
+    <meta property="og:title" content="Baker by Ted Baker Blue Knitted Blanket">
+    <script type="application/ld+json">${JSON.stringify({
+      "@type": "Product",
+      name: "Baker by Ted Baker Blue Knitted Blanket",
+      sku: "G97-318",
+      brand: { "@type": "Brand", name: "Baker by Ted Baker" },
+      offers: [
+        { "@type": "Offer", sku: "G97-318-ONE", price: "40", priceCurrency: "AED", availability: "https://schema.org/InStock" },
+      ],
+    })}</script>
+  </head><body><h1>Baker by Ted Baker Blue Knitted Blanket</h1></body></html>`,
+);
+assert.equal(nextHtmlSnapshot.title, "Baker by Ted Baker Blue Knitted Blanket");
+assert.equal(nextHtmlSnapshot.currency, "AED");
+assert.equal(nextHtmlSnapshot.price, 40);
+assert.equal(nextHtmlSnapshot.variants.length, 1);
+assert.equal(nextHtmlSnapshot.variants[0].available, true);
+assert.equal(nextHtmlSnapshot.raw?.managedSnapshotHtml, true);
+
 assert.throws(
   () =>
     new HmScraper().scrapeSnapshot(

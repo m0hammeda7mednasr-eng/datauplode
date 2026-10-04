@@ -9503,6 +9503,17 @@ export class NextScraper implements SupplierScraper {
   }
 
   scrapeSnapshot(url: string, snapshotText: string): NormalizedProduct {
+    if (/<(?:!doctype\s+html|html|head|body|script|meta)\b/i.test(snapshotText)) {
+      const product = extractNextProductFromHtml(snapshotText, url, url);
+      return normalizeProductOptionsAndVariants({
+        ...product,
+        raw: {
+          ...product.raw,
+          managedSnapshotHtml: true,
+        },
+      });
+    }
+
     return parseNextSnapshotText(snapshotText, url, url, {
       pastedSnapshotFallback: true,
       imageUnavailableReason:
