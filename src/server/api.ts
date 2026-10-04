@@ -4996,11 +4996,14 @@ router.post("/imports/excel/process", async (req, res) => {
     const processedUrls = new Set<string>();
     const shopifyClient = await ShopifyService.getClientFromDb(prisma);
     const shopifyCollections = await ShopifyService.getCollections(shopifyClient);
-    const collectionByName = new Map<string, string>(
-      shopifyCollections
-        .map((collection: any) => [normalizeLabel(collection.title), String(collection.id)] as const)
-        .filter((entry) => Boolean(entry[0] && entry[1])),
-    );
+    const collectionByName = new Map<string, string>();
+    for (const collection of shopifyCollections) {
+      const key = normalizeLabel(collection?.title);
+      const id = String(collection?.id || "").trim();
+      if (key && id && !collectionByName.has(key)) {
+        collectionByName.set(key, id);
+      }
+    }
     const resolveCollectionIds = async (names: string[]) => {
       const ids: string[] = [];
       for (const rawName of names) {
