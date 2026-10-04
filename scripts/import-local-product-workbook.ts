@@ -168,6 +168,10 @@ async function loadManagedSnapshot(url: string) {
   if (!scraperApiKey) return "";
   const endpoint = new URL("https://api.scraperapi.com");
   endpoint.searchParams.set("api_key", scraperApiKey);
+  if (/^(www\.)?next\.ae$/i.test(new URL(url).hostname)) {
+    endpoint.searchParams.set("premium", "true");
+    endpoint.searchParams.set("max_cost", "10");
+  }
   endpoint.searchParams.set("url", url);
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(3 * 60 * 1000) });
   if (!response.ok) throw new Error(`Managed snapshot failed with HTTP ${response.status}`);
