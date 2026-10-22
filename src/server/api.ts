@@ -5946,6 +5946,97 @@ router.post("/shopify/collections", async (req, res) => {
   }
 });
 
+router.post("/shopify/collections/assign-products", async (req, res) => {
+  const collectionTitle = String(req.body?.collectionTitle || "").trim();
+  const productIds = Array.isArray(req.body?.productIds)
+    ? [...new Set(
+        req.body.productIds
+          .map((value: unknown) => String(value || "").trim())
+          .filter(Boolean),
+      )]
+    : [];
+
+  if (!collectionTitle || collectionTitle.length > 255) {
+    return res.status(400).json({ error: "A collection title between 1 and 255 characters is required" });
+  }
+  if (productIds.length === 0 || productIds.length > 500) {
+    return res.status(400).json({ error: "Provide between 1 and 500 unique Shopify product IDs" });
+  }
+  if (productIds.some((id) => !/^gid:\/\/shopify\/Product\/\d+$/.test(id))) {
+    return res.status(400).json({ error: "Every product ID must be a Shopify Product GID" });
+  }
+
+  try {
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const normalizedTitle = collectionTitle.toLocaleLowerCase();
+    let collection = (await ShopifyService.getCollections(client)).find(
+      (entry: any) => String(entry.title || "").trim().toLocaleLowerCase() === normalizedTitle,
+    );
+    let created = false;
+    if (!collection) {
+      collection = await ShopifyService.createCollection(client, collectionTitle);
+      created = true;
+    }
+
+    const before = await ShopifyService.getCollectionProductIds(client, collection.id);
+    const existingIds = new Set(before.productIds);
+    const missingBefore = productIds.filter((id) => !existingIds.has(id));
+    for (let index = 0; index < missingBefore.length; index += 250) {
+      await ShopifyService.addProductsToCollection(
+        client,
+        missingBefore.slice(index, index + 250),
+        collection.id,
+      );
+    }
+
+    const linkedProducts = await prisma.shopifyProduct.findMany({
+      where: { shopifyId: { in: productIds } },
+      select: { id: true, collectionIds: true },
+    });
+    const dbUpdates = linkedProducts.flatMap((product) => {
+      const storedIds = String(product.collectionIds || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const nextIds = [...new Set([...storedIds, collection.id])];
+      if (nextIds.length === storedIds.length) return [];
+      return [
+        prisma.shopifyProduct.update({
+          where: { id: product.id },
+          data: { collectionIds: nextIds.join(",") },
+        }),
+      ];
+    });
+    for (let index = 0; index < dbUpdates.length; index += 100) {
+      await prisma.$transaction(dbUpdates.slice(index, index + 100));
+    }
+
+    const after = await ShopifyService.getCollectionProductIds(client, collection.id);
+    const verifiedIds = new Set(after.productIds);
+    const missingAfter = productIds.filter((id) => !verifiedIds.has(id));
+    const status = missingAfter.length === 0 ? 200 : 409;
+    return res.status(status).json({
+      success: missingAfter.length === 0,
+      collection: after.collection,
+      collectionCreated: created,
+      requested: productIds.length,
+      alreadyMember: productIds.length - missingBefore.length,
+      added: missingBefore.length - missingAfter.length,
+      verified: productIds.length - missingAfter.length,
+      collectionProductCount: after.productIds.length,
+      databaseLinksUpdated: dbUpdates.length,
+      databaseLinksFound: linkedProducts.length,
+      missingProductIds: missingAfter,
+    });
+  } catch (error: any) {
+    if (isShopifyReconnectRequired(error)) {
+      return res.status(409).json({ error: error.message, code: "SHOPIFY_RECONNECT_REQUIRED" });
+    }
+    console.error("Failed to assign Shopify collection products:", error.message);
+    return res.status(500).json({ error: error.message || "Failed to assign Shopify collection products" });
+  }
+});
+
 wrapAsyncRouterHandlers(router);
 
 router.use((error: any, req: Request, res: Response, next: NextFunction) => {

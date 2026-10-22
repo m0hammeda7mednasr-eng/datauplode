@@ -783,6 +783,93 @@ export class ShopifyService {
     return client.request(mutation, { id: collectionId, productIds: [productId] });
   }
 
+  static async addProductsToCollection(
+    client: ShopifyGraphqlClient,
+    productIds: string[],
+    collectionId: string,
+  ) {
+    const uniqueProductIds = [...new Set(productIds.map(id => String(id || '').trim()).filter(Boolean))];
+    if (uniqueProductIds.length === 0) {
+      return { collection: null, userErrors: [] };
+    }
+    if (uniqueProductIds.length > 250) {
+      throw new Error('Shopify collection batches cannot exceed 250 products');
+    }
+
+    const mutation = `
+      mutation collectionAddProducts($id: ID!, $productIds: [ID!]!) {
+        collectionAddProducts(id: $id, productIds: $productIds) {
+          collection {
+            id
+            title
+            handle
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    const data: any = await client.request(mutation, {
+      id: collectionId,
+      productIds: uniqueProductIds,
+    });
+    const result = data?.collectionAddProducts;
+    const userErrors = result?.userErrors || [];
+    if (userErrors.length > 0) {
+      throw new Error(userErrors.map((error: any) => error.message).join('; '));
+    }
+    return result;
+  }
+
+  static async getCollectionProductIds(
+    client: ShopifyGraphqlClient,
+    collectionId: string,
+  ) {
+    const query = `
+      query CollectionProducts($id: ID!, $after: String) {
+        collection(id: $id) {
+          id
+          title
+          handle
+          products(first: 250, after: $after) {
+            nodes { id }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    `;
+    const productIds: string[] = [];
+    let after: string | null = null;
+    let collection: any = null;
+
+    do {
+      const data: any = await client.request(query, { id: collectionId, after });
+      collection = data?.collection;
+      if (!collection) throw new Error('Shopify collection was not found');
+      const connection = collection.products;
+      productIds.push(...(connection?.nodes || []).map((node: any) => String(node.id)));
+      if (!connection?.pageInfo?.hasNextPage) break;
+      after = connection.pageInfo.endCursor || null;
+      if (!after) {
+        throw new Error('Shopify collection pagination reported another page without an endCursor');
+      }
+    } while (after);
+
+    return {
+      collection: {
+        id: collection.id,
+        title: collection.title,
+        handle: collection.handle,
+      },
+      productIds: [...new Set(productIds)],
+    };
+  }
+
   static async deleteProduct(client: ShopifyGraphqlClient, productId: string) {
     const numericId = this.parseNumericIdFromGid(productId);
     if (numericId) {
