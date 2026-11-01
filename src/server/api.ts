@@ -427,6 +427,10 @@ function verifyPublishJobResult(jobResult: Record<string, any>) {
     throw new Error("Shopify variant SKU verification failed");
   }
 
+  if (jobResult?.variantPricingVerified === false) {
+    throw new Error("Shopify variant price or compare-at verification failed");
+  }
+
   const variantImagesRequested = Number(jobResult?.variantImagesRequested);
   const variantImagesLinked = Number(jobResult?.variantImagesLinked);
   if (
@@ -3497,6 +3501,7 @@ async function publishPreparedProductToQueue(params: {
   pricingRuleId?: string | null;
   collections?: string[];
   priceMultiplier?: number | null;
+  compareAtMultiplier?: number | null;
   replaceShopifyProductId?: string;
   replaceShopifyHandle?: string;
 }) {
@@ -3505,6 +3510,7 @@ async function publishPreparedProductToQueue(params: {
     pricingRuleId,
     collections,
     priceMultiplier,
+    compareAtMultiplier,
     replaceShopifyProductId,
     replaceShopifyHandle,
   } = params;
@@ -3525,6 +3531,17 @@ async function publishPreparedProductToQueue(params: {
 
   const selectedPricingRuleId = asOptionalString(pricingRuleId);
   const selectedPriceMultiplier = toPositiveSheetNumber(priceMultiplier);
+  const selectedCompareAtMultiplier = toPositiveSheetNumber(compareAtMultiplier);
+  if (
+    selectedCompareAtMultiplier &&
+    selectedPriceMultiplier &&
+    selectedCompareAtMultiplier <= selectedPriceMultiplier
+  ) {
+    throw Object.assign(
+      new Error("Compare-at multiplier must exceed the selling-price multiplier"),
+      { statusCode: 400 },
+    );
+  }
   if (selectedPricingRuleId) {
     const ruleExists = await prisma.pricingRule.findUnique({
       where: { id: selectedPricingRuleId },
@@ -3623,6 +3640,9 @@ async function publishPreparedProductToQueue(params: {
             pricingRuleId: selectedPricingRuleId,
             ...(selectedPriceMultiplier
               ? { sheetPriceMultiplier: selectedPriceMultiplier }
+              : {}),
+            ...(selectedCompareAtMultiplier
+              ? { sheetCompareAtMultiplier: selectedCompareAtMultiplier }
               : {}),
             selectedImageCount: images.length,
             removedDuplicateImages,
@@ -3726,6 +3746,9 @@ async function publishPreparedProductToQueue(params: {
         }
       : {}),
     ...(selectedPriceMultiplier ? { priceMultiplier: selectedPriceMultiplier } : {}),
+    ...(selectedCompareAtMultiplier
+      ? { compareAtMultiplier: selectedCompareAtMultiplier }
+      : {}),
   });
 
   return { sourceProductId: sourceProduct.id, jobId: job.id };
@@ -4930,6 +4953,7 @@ router.post("/imports/excel/process-async", async (req, res) => {
 router.post("/imports/excel/process", async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   const selectedPricingRuleId = asOptionalString(req.body?.pricingRuleId);
+  const compareAtMultiplier = toPositiveSheetNumber(req.body?.compareAtMultiplier);
   const collections = Array.isArray(req.body?.collections)
     ? req.body.collections.map((value: any) => String(value || "").trim()).filter(Boolean)
     : [];
@@ -5093,6 +5117,10 @@ router.post("/imports/excel/process", async (req, res) => {
         await registerFailure("Missing or invalid price multiplier");
         continue;
       }
+      if (compareAtMultiplier !== null && compareAtMultiplier <= priceMultiplier) {
+        await registerFailure("Compare-at multiplier must exceed the selling-price multiplier");
+        continue;
+      }
       if (processedUrls.has(normalizedUrl)) {
         await registerFailure("Duplicate URL inside the same Excel batch");
         continue;
@@ -5186,6 +5214,7 @@ router.post("/imports/excel/process", async (req, res) => {
                 pricingRuleId: selectedPricingRuleId,
                 collections: selectedCollectionIds,
                 priceMultiplier,
+                compareAtMultiplier,
                 replaceShopifyProductId: reconciliation.shopifyProductId,
                 replaceShopifyHandle: reconciliation.shopifyHandle,
               });
@@ -5281,6 +5310,7 @@ router.post("/imports/excel/process", async (req, res) => {
           pricingRuleId: selectedPricingRuleId,
           collections: selectedCollectionIds,
           priceMultiplier,
+          compareAtMultiplier,
         });
 
         let verification:
@@ -5372,13 +5402,14 @@ router.post("/imports/excel/process", async (req, res) => {
       failed,
       metadata: {
         pricingRuleId: selectedPricingRuleId,
-      collections,
-      collectionNames,
-      reconcileExistingProducts,
-      sourceSheetName,
-      sourceSheetUrl,
-    },
-  });
+        collections,
+        collectionNames,
+        compareAtMultiplier,
+        reconcileExistingProducts,
+        sourceSheetName,
+        sourceSheetUrl,
+      },
+    });
 
     return res.json({
       success: true,
@@ -6034,6 +6065,167 @@ router.post("/shopify/collections/assign-products", async (req, res) => {
     }
     console.error("Failed to assign Shopify collection products:", error.message);
     return res.status(500).json({ error: error.message || "Failed to assign Shopify collection products" });
+  }
+});
+
+router.post("/shopify/products/apply-price-presentation", async (req, res) => {
+  const productIds = Array.isArray(req.body?.productIds)
+    ? [...new Set(
+        req.body.productIds
+          .map((value: unknown) => String(value || "").trim())
+          .filter(Boolean),
+      )]
+    : [];
+  const sellingMultiplier = Number(req.body?.sellingMultiplier);
+  const compareAtMultiplier = Number(req.body?.compareAtMultiplier);
+
+  if (productIds.length === 0 || productIds.length > 100) {
+    return res.status(400).json({ error: "Provide between 1 and 100 unique Shopify product IDs" });
+  }
+  if (productIds.some((id) => !/^gid:\/\/shopify\/Product\/\d+$/.test(id))) {
+    return res.status(400).json({ error: "Every product ID must be a Shopify Product GID" });
+  }
+  if (!Number.isFinite(sellingMultiplier) || sellingMultiplier <= 0) {
+    return res.status(400).json({ error: "sellingMultiplier must be a positive number" });
+  }
+  if (!Number.isFinite(compareAtMultiplier) || compareAtMultiplier <= sellingMultiplier) {
+    return res.status(400).json({
+      error: "compareAtMultiplier must be a positive number greater than sellingMultiplier",
+    });
+  }
+
+  try {
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const results: Array<Record<string, any>> = [];
+
+    for (const productId of productIds) {
+      const before = await ShopifyService.getProductInventoryVariants(client, productId);
+      if (before.length === 0) {
+        throw Object.assign(new Error(`Shopify product has no variants: ${productId}`), {
+          statusCode: 409,
+        });
+      }
+
+      const expectedByVariantId = new Map<string, { price: number; compareAtPrice: number }>();
+      const updates = before.map((variant: any) => {
+        const price = Number(variant?.price);
+        if (!Number.isFinite(price) || price <= 0) {
+          throw Object.assign(
+            new Error(`Shopify variant has an invalid selling price: ${variant?.id || productId}`),
+            { statusCode: 409 },
+          );
+        }
+        const compareAtPrice = Number(
+          ((price / sellingMultiplier) * compareAtMultiplier).toFixed(2),
+        );
+        if (compareAtPrice <= price) {
+          throw Object.assign(
+            new Error(`Calculated compare-at price is not above the selling price: ${variant?.id}`),
+            { statusCode: 409 },
+          );
+        }
+        expectedByVariantId.set(String(variant.id), { price, compareAtPrice });
+        return {
+          id: variant.id,
+          price: price.toFixed(2),
+          compareAtPrice: compareAtPrice.toFixed(2),
+        };
+      });
+
+      const updateResult = await ShopifyService.updateVariantsBulk(client, productId, updates);
+      const userErrors = updateResult?.productVariantsBulkUpdate?.userErrors || [];
+      if (userErrors.length > 0) {
+        throw Object.assign(
+          new Error(
+            `Shopify rejected variant pricing: ${userErrors
+              .map((entry: any) => entry.message)
+              .filter(Boolean)
+              .join("; ")}`,
+          ),
+          { statusCode: 409 },
+        );
+      }
+
+      const after = await ShopifyService.getProductInventoryVariants(client, productId);
+      const mismatches = after.flatMap((variant: any) => {
+        const expected = expectedByVariantId.get(String(variant.id));
+        if (!expected) return [{ variantId: variant.id, reason: "unexpected_variant" }];
+        const actualPrice = Number(variant.price);
+        const actualCompareAtPrice = Number(variant.compareAtPrice);
+        if (
+          !Number.isFinite(actualPrice) ||
+          !Number.isFinite(actualCompareAtPrice) ||
+          Math.abs(actualPrice - expected.price) >= 0.01 ||
+          Math.abs(actualCompareAtPrice - expected.compareAtPrice) >= 0.01
+        ) {
+          return [
+            {
+              variantId: variant.id,
+              expectedPrice: expected.price.toFixed(2),
+              actualPrice: String(variant.price || ""),
+              expectedCompareAtPrice: expected.compareAtPrice.toFixed(2),
+              actualCompareAtPrice: String(variant.compareAtPrice || ""),
+            },
+          ];
+        }
+        return [];
+      });
+      if (after.length !== before.length || mismatches.length > 0) {
+        throw Object.assign(
+          new Error(`Shopify price presentation verification failed for ${productId}`),
+          { statusCode: 409, details: mismatches },
+        );
+      }
+
+      results.push({
+        productId,
+        variantsUpdated: updates.length,
+        variantsVerified: after.length,
+        sellingMultiplier,
+        compareAtMultiplier,
+      });
+    }
+
+    const linkedProducts = await prisma.shopifyProduct.findMany({
+      where: { shopifyId: { in: productIds } },
+      select: { sourceProduct: { select: { id: true, raw: true } } },
+    });
+    for (const linked of linkedProducts) {
+      const currentRaw = parseJsonObject(linked.sourceProduct.raw) || {};
+      const currentImport = parseJsonObject(currentRaw.import) || {};
+      await prisma.sourceProduct.update({
+        where: { id: linked.sourceProduct.id },
+        data: {
+          raw: JSON.stringify({
+            ...currentRaw,
+            import: {
+              ...currentImport,
+              sheetPriceMultiplier: sellingMultiplier,
+              sheetCompareAtMultiplier: compareAtMultiplier,
+            },
+          }),
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      requested: productIds.length,
+      productsVerified: results.length,
+      variantsVerified: results.reduce((sum, entry) => sum + Number(entry.variantsVerified || 0), 0),
+      databaseLinksUpdated: linkedProducts.length,
+      results,
+    });
+  } catch (error: any) {
+    if (isShopifyReconnectRequired(error)) {
+      return res.status(409).json({ error: error.message, code: "SHOPIFY_RECONNECT_REQUIRED" });
+    }
+    const status = Number(error?.statusCode) || 500;
+    console.error("Failed to apply Shopify price presentation:", error.message);
+    return res.status(status).json({
+      error: error.message || "Failed to apply Shopify price presentation",
+      ...(error?.details ? { details: error.details } : {}),
+    });
   }
 });
 

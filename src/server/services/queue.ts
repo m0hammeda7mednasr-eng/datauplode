@@ -74,6 +74,7 @@ type CatalogSyncOptions = {
   refreshSource?: boolean;
   pricingRuleId?: string | null;
   priceMultiplier?: number | null;
+  compareAtMultiplier?: number | null;
   priceOverride?: number | null;
   collections?: string[];
   sheetMeta?: Record<string, any>;
@@ -668,7 +669,13 @@ function verifyShopifyVariantSkus(shopifyVariants: any[], variantPayloads: any[]
   };
 }
 
-function buildVariantPayloads(product: any, rule: any, optionNames: string[], locationId: string) {
+function buildVariantPayloads(
+  product: any,
+  rule: any,
+  optionNames: string[],
+  locationId: string,
+  compareAtMultiplier?: number | null,
+) {
   const seen = new Set<string>();
   const productSwatches = getProductColorSwatches(product);
 
@@ -680,6 +687,14 @@ function buildVariantPayloads(product: any, rule: any, optionNames: string[], lo
       const calculatedPrice = rule
         ? PricingEngine.calculatePrice(sourcePrice, rule)
         : sourcePrice;
+      const calculatedCompareAtPrice = toPositiveNumber(compareAtMultiplier)
+        ? sourcePrice * Number(compareAtMultiplier)
+        : null;
+      if (calculatedCompareAtPrice !== null && calculatedCompareAtPrice <= calculatedPrice) {
+        throw new Error(
+          `Compare-at price must exceed the selling price (${calculatedCompareAtPrice} <= ${calculatedPrice})`,
+        );
+      }
       const imageUrl = getVariantImageUrl(variant, product.images || [], product.variants || []);
       const availableQuantity = getVariantInventoryQuantity(variant);
       const metafields = buildVariantMetafields(variant, productSwatches);
@@ -688,10 +703,15 @@ function buildVariantPayloads(product: any, rule: any, optionNames: string[], lo
         key,
         sourceVariant: variant,
         price: formatPrice(calculatedPrice),
+        compareAtPrice:
+          calculatedCompareAtPrice === null ? null : formatPrice(calculatedCompareAtPrice),
         imageUrl,
         availableQuantity,
         input: {
           price: formatPrice(calculatedPrice),
+          ...(calculatedCompareAtPrice === null
+            ? {}
+            : { compareAtPrice: formatPrice(calculatedCompareAtPrice) }),
           inventoryPolicy: 'DENY',
           optionValues: optionNames.map((optionName, index) => ({
             optionName,
@@ -825,6 +845,57 @@ function isPriceStockTargetProduct(product: any): boolean {
   const rowNumber = Number(importMeta.excelRowNumber || importMeta.sheetRowNumber);
   const hasSheetRow = Number.isSafeInteger(rowNumber) && rowNumber > 0;
   return hasSheetRow;
+}
+
+function pricesMatch(actual: unknown, expected: unknown) {
+  const actualNumber = Number(actual);
+  const expectedNumber = Number(expected);
+  return (
+    Number.isFinite(actualNumber) &&
+    Number.isFinite(expectedNumber) &&
+    Math.abs(actualNumber - expectedNumber) < 0.01
+  );
+}
+
+function verifyShopifyVariantPricing(
+  shopifyVariants: any[],
+  variantPayloads: any[],
+  optionNames: string[],
+) {
+  const mismatches: Array<{
+    variantId?: string;
+    optionKey: string;
+    expectedPrice: string;
+    actualPrice: string;
+    expectedCompareAtPrice: string | null;
+    actualCompareAtPrice: string | null;
+  }> = [];
+
+  for (const [index, variant] of (shopifyVariants || []).entries()) {
+    const payload = matchCreatedVariantPayload(variant, variantPayloads, optionNames, index);
+    if (!payload) continue;
+    const expectedCompareAtPrice = payload.compareAtPrice || null;
+    const actualCompareAtPrice = variant?.compareAtPrice || null;
+    if (
+      !pricesMatch(variant?.price, payload.price) ||
+      (expectedCompareAtPrice !== null &&
+        !pricesMatch(actualCompareAtPrice, expectedCompareAtPrice))
+    ) {
+      mismatches.push({
+        variantId: variant?.id,
+        optionKey: payload.key,
+        expectedPrice: String(payload.price),
+        actualPrice: String(variant?.price || ""),
+        expectedCompareAtPrice,
+        actualCompareAtPrice,
+      });
+    }
+  }
+
+  return {
+    verified: mismatches.length === 0 && shopifyVariants.length === variantPayloads.length,
+    mismatches,
+  };
 }
 
 function cleanStringList(values: any): string[] {
@@ -1001,6 +1072,9 @@ function buildProductRawAfterSourceSync(
       : {}),
     ...(toPositiveNumber(options.priceMultiplier)
       ? { sheetPriceMultiplier: toPositiveNumber(options.priceMultiplier) }
+      : {}),
+    ...(toPositiveNumber(options.compareAtMultiplier)
+      ? { sheetCompareAtMultiplier: toPositiveNumber(options.compareAtMultiplier) }
       : {}),
     lastSourceSyncedAt: new Date().toISOString(),
     lastSourceSyncReason: cleanOptionText(options.reason || 'scheduled'),
@@ -1525,6 +1599,9 @@ export class QueueService {
     const priceMultiplier =
       toPositiveNumber(options.priceMultiplier) ||
       toPositiveNumber(importMeta.sheetPriceMultiplier);
+    const compareAtMultiplier =
+      toPositiveNumber(options.compareAtMultiplier) ||
+      toPositiveNumber(importMeta.sheetCompareAtMultiplier);
     const shopifyId = existingProduct.shopifyProduct?.shopifyId;
 
     if (!shopifyId) {
@@ -1580,6 +1657,7 @@ export class QueueService {
       collections,
       handle: cleanOptionText(existingProduct.shopifyProduct?.handle) || undefined,
       ...(priceMultiplier ? { priceMultiplier } : {}),
+      ...(compareAtMultiplier ? { compareAtMultiplier } : {}),
     });
     const finishedJob = await this.waitForJobCompletion(publishJob.id);
 
@@ -2918,6 +2996,7 @@ export class QueueService {
               pricingRuleId,
               collections,
               priceMultiplier,
+              compareAtMultiplier,
               handle,
               replaceShopifyProductId,
               replaceShopifyHandle,
@@ -3000,7 +3079,13 @@ export class QueueService {
 
             const inventoryLocation = await ShopifyService.getInventoryLocation(client);
             const optionNames = buildShopifyOptionNames(product.variants);
-            const variantPayloads = buildVariantPayloads(product, rule, optionNames, inventoryLocation.id);
+            const variantPayloads = buildVariantPayloads(
+              product,
+              rule,
+              optionNames,
+              inventoryLocation.id,
+              compareAtMultiplier,
+            );
             if (variantPayloads.length === 0) {
               throw new Error('No variants available to publish');
             }
@@ -3102,6 +3187,21 @@ export class QueueService {
                     optionNames,
                   );
                 }
+              }
+              const variantPricingVerification = verifyShopifyVariantPricing(
+                verifiedShopifyVariants,
+                variantPayloads,
+                optionNames,
+              );
+              if (!variantPricingVerification.verified) {
+                throw new Error(
+                  `Shopify variant pricing verification failed: ${variantPricingVerification.mismatches
+                    .slice(0, 3)
+                    .map((mismatch) =>
+                      `${mismatch.optionKey} price ${mismatch.actualPrice}/${mismatch.expectedPrice} compare-at ${mismatch.actualCompareAtPrice || "N/A"}/${mismatch.expectedCompareAtPrice || "N/A"}`,
+                    )
+                    .join("; ")}`,
+                );
               }
               if (!variantSkuVerification.verified) {
                 throw new Error(
@@ -3239,6 +3339,7 @@ export class QueueService {
                 variantsExpected: variantPayloads.length,
                 variantsVerified: verifiedShopifyVariants.length === variantPayloads.length,
                 variantSkusVerified: variantSkuVerification.verified,
+                variantPricingVerified: variantPricingVerification.verified,
                 variantSkusRepaired,
                 variantSkuMismatches: variantSkuVerification.mismatches,
                 shopifyVerified: Boolean(verifiedShopifyProduct?.id),

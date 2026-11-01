@@ -519,6 +519,7 @@ export class ShopifyService {
             id
             title
             price
+            compareAtPrice
             inventoryItem {
               id
               sku
@@ -563,6 +564,7 @@ export class ShopifyService {
               id
               title
               price
+              compareAtPrice
               sku
               inventoryQuantity
               inventoryItem {
@@ -668,6 +670,7 @@ export class ShopifyService {
           productVariants {
             id
             price
+            compareAtPrice
             inventoryItem {
               id
               sku

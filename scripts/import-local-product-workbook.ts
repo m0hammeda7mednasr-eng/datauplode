@@ -50,8 +50,22 @@ const reefApiKey = args.get("reef-api-key") || process.env.REEF_API_KEY || "";
 const reefDemo = args.get("reef-demo") === "true";
 const managedFirst = args.get("managed-first") === "true";
 const directFirst = args.get("direct-first") === "true";
+const nextApiFirst = args.get("next-api-first") === "true";
 const brandCollection = String(args.get("brand-collection") || "").trim();
 const normalizeCollections = args.get("normalize-collections") === "true";
+const defaultMultiplierArg = String(args.get("default-multiplier") || "").trim();
+const defaultMultiplier = defaultMultiplierArg ? Number(defaultMultiplierArg) : null;
+if (defaultMultiplier !== null && ![22, 23, 24].includes(defaultMultiplier)) {
+  throw new Error("--default-multiplier must be one of 22, 23, or 24");
+}
+const compareAtMultiplierArg = String(args.get("compare-at-multiplier") || "").trim();
+const compareAtMultiplier = compareAtMultiplierArg ? Number(compareAtMultiplierArg) : null;
+if (
+  compareAtMultiplier !== null &&
+  (!Number.isFinite(compareAtMultiplier) || compareAtMultiplier <= 0)
+) {
+  throw new Error("--compare-at-multiplier must be a positive number");
+}
 const onlyUrlsFile = String(args.get("only-urls-file") || "").trim();
 const checkpointPath = args.get("checkpoint") || path.join(
   process.env.TEMP || "C:/tmp",
@@ -215,6 +229,85 @@ function isSheinProductUrl(url: string) {
   }
 }
 
+function isNextProductUrl(url: string) {
+  try {
+    return /(^|\.)next\.ae$/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function loadStructuredNextSnapshot(url: string) {
+  const itemNumber = new URL(url).pathname.split("/").filter(Boolean).at(-1)?.toUpperCase();
+  if (!itemNumber || !/^[A-Z0-9]+$/.test(itemNumber)) {
+    throw new Error("Next URL does not include a valid item number");
+  }
+
+  const endpoint = new URL("https://api.nextdirect.com/api/edge-aggregator/product/V2/index.json");
+  endpoint.searchParams.set("realm", "next");
+  endpoint.searchParams.set("territory", "AE");
+  endpoint.searchParams.set("language", "en");
+  endpoint.searchParams.set("useStock", "true");
+  endpoint.searchParams.set("productId", itemNumber);
+
+  const response = await fetch(endpoint, { signal: AbortSignal.timeout(60_000) });
+  if (!response.ok) throw new Error(`Next product API failed with HTTP ${response.status}`);
+  const payload: any = await response.json();
+  const style = payload?.productData?.data?.style;
+  const item = style?.item;
+  if (!style || !item?.itemNumber || !item?.itemTitle) {
+    throw new Error("Next product API did not return a usable product");
+  }
+
+  const optionPrices = new Map<string, number>(
+    (Array.isArray(item?.price?.options) ? item.price.options : [])
+      .map((entry: any) => [String(entry?.optionNumber || ""), Number(entry?.price || 0)] as const)
+      .filter((entry: readonly [string, number]) => entry[0] && entry[1] > 0),
+  );
+  const minPrice = Number(item?.price?.price?.minPrice || 0);
+  const maxPrice = Number(item?.price?.price?.maxPrice || minPrice);
+  const options = (Array.isArray(item?.options) ? item.options : []).map((option: any) => ({
+    name: String(option?.displaySize || "").trim(),
+    value: String(option?.number || "").trim(),
+    optionNumber: String(option?.number || "").trim(),
+    stockStatus: String(option?.stockStatus || "").trim(),
+    priceUnformatted: optionPrices.get(String(option?.number || "")) || minPrice,
+  }));
+  if (!options.length || options.some((option: any) => !option.name || !option.value)) {
+    throw new Error("Next product API did not return complete size options");
+  }
+
+  const imageUrls = (Array.isArray(item?.media) ? item.media : [])
+    .map((media: any) => String(media?.name || "").trim())
+    .filter(Boolean)
+    .map((name: string) =>
+      `https://xcdn.next.co.uk/common/items/default/default/itemimages/3_4Ratio/product/lge/${name}.jpg?im=Resize,width=750`,
+    );
+  if (!imageUrls.length) throw new Error("Next product API did not return product images");
+
+  const embeddedProduct = {
+    itemNumber: String(item.itemNumber),
+    productCode: String(item.itemNumber),
+    title: String(item.itemTitle),
+    itemDescription: item.itemDescription || {},
+    brand: String(style.brand || "Next"),
+    colour: String(item.colour || ""),
+    currencyCode: String(item?.price?.currencyCode || "AED"),
+    price: `${String(item?.price?.currencyCode || "AED")} ${minPrice}`,
+    priceData: {
+      price: { minPrice, maxPrice },
+      priceOptions: [...optionPrices].map(([optionNumber, price]) => ({ optionNumber, price })),
+    },
+    options: { options },
+    imageUrls,
+  };
+  const nextData = {
+    props: { pageProps: { dehydratedState: { queries: [{ state: { data: embeddedProduct } }] } } },
+  };
+  const serialized = JSON.stringify(nextData).replace(/<\/script/gi, "<\\/script");
+  return `<html><head><title>${embeddedProduct.title}</title></head><body><script id="__NEXT_DATA__" type="application/json">${serialized}</script>${imageUrls.join("\n")}</body></html>`;
+}
+
 async function loadStructuredSheinSnapshot(url: string) {
   const goodsId = new URL(url).pathname.match(/-p-(\d+)(?:\.|-|\/|$)/i)?.[1];
   if (!goodsId) throw new Error("SHEIN URL does not include a product ID");
@@ -271,16 +364,19 @@ for (const sheetName of selectedSheetNames) {
     const multiplierIndex = values.findIndex(
       (value, valueIndex) => valueIndex !== urlIndex && [22, 23, 24].includes(Number(value)),
     );
-    if (multiplierIndex < 0) continue;
+    if (multiplierIndex < 0 && defaultMultiplier === null) continue;
     const rawUrl = String(values[urlIndex] || "").trim();
-    const priceMultiplier = Number(values[multiplierIndex]);
+    const priceMultiplier = multiplierIndex >= 0
+      ? Number(values[multiplierIndex])
+      : defaultMultiplier!;
     const url = normalizeProductUrl(rawUrl);
     const identity = productIdentity(url);
     if (seenProducts.has(identity)) continue;
     seenProducts.add(identity);
+    const collectionAnchorIndex = multiplierIndex >= 0 ? multiplierIndex : urlIndex;
     const collectionIndex = values.findIndex((value, valueIndex) => {
       const text = String(value || "").trim();
-      return valueIndex > multiplierIndex && Boolean(text) && !/^https?:\/\//i.test(text) && ![22, 23, 24].includes(Number(value));
+      return valueIndex > collectionAnchorIndex && Boolean(text) && !/^https?:\/\//i.test(text) && ![22, 23, 24].includes(Number(value));
     });
     rows.push({
       sheetName,
@@ -327,8 +423,11 @@ console.log(JSON.stringify({
   concurrency,
   managedFirst,
   directFirst,
+  nextApiFirst,
   brandCollection: brandCollection || null,
   normalizeCollections,
+  defaultMultiplier,
+  compareAtMultiplier,
   checkpointPath,
 }));
 
@@ -336,12 +435,23 @@ let successful = 0;
 let skipped = 0;
 let failed = 0;
 let completedCount = 0;
+const verifiedShopifyProductIds = new Set<string>();
+for (const entry of completed.values()) {
+  if (entry.outcome !== "successful") continue;
+  const response = entry.response as any;
+  const shopifyId = String(response?.verification?.shopifyId || "").trim();
+  if (/^gid:\/\/shopify\/Product\/\d+$/.test(shopifyId)) {
+    verifiedShopifyProductIds.add(shopifyId);
+  }
+}
 
 async function processRow(row: WorkbookRow) {
   let checkpoint: CheckpointEntry;
   try {
     const snapshotText = isSheinProductUrl(row.url)
       ? await loadStructuredSheinSnapshot(row.url)
+      : nextApiFirst && isNextProductUrl(row.url)
+        ? await loadStructuredNextSnapshot(row.url)
       : directFirst
         ? await loadDirectSnapshot(row.url)
         : managedFirst && scraperApiKey
@@ -350,6 +460,7 @@ async function processRow(row: WorkbookRow) {
     const requestBody = {
       rows: [{ ...row, snapshotText }],
       collectionNames: [...new Set([brandCollection, row.collection].filter(Boolean))],
+      ...(compareAtMultiplier ? { compareAtMultiplier } : {}),
       createManualReview: true,
       waitForPublishCompletion: true,
       reconcileExistingProducts: true,
@@ -366,6 +477,23 @@ async function processRow(row: WorkbookRow) {
     const skip = response?.skipped?.find((item: any) => item.rowNumber === row.rowNumber);
     const failure = response?.failed?.find((item: any) => item.rowNumber === row.rowNumber);
     if (success) {
+      const shopifyId = String(success?.verification?.shopifyId || "").trim();
+      if (compareAtMultiplier) {
+        if (!shopifyId) {
+          throw new Error("Compare-at verification requires the Shopify product id returned by publish");
+        }
+        success.pricingPresentation = await postJson(
+          `${apiBase}/api/shopify/products/apply-price-presentation`,
+          {
+            productIds: [shopifyId],
+            sellingMultiplier: row.priceMultiplier,
+            compareAtMultiplier,
+          },
+        );
+      }
+      if (/^gid:\/\/shopify\/Product\/\d+$/.test(shopifyId)) {
+        verifiedShopifyProductIds.add(shopifyId);
+      }
       successful += 1;
       checkpoint = { at: new Date().toISOString(), sheetName: row.sheetName, rowNumber: row.rowNumber, url: row.url, outcome: "successful", response: success };
     } else if (skip) {
@@ -401,6 +529,26 @@ await Promise.all(
     }
   }),
 );
+
+if (brandCollection && verifiedShopifyProductIds.size > 0) {
+  const productIds = [...verifiedShopifyProductIds];
+  for (let index = 0; index < productIds.length; index += 500) {
+    const assignment = await postJson(`${apiBase}/api/shopify/collections/assign-products`, {
+      collectionTitle: brandCollection,
+      productIds: productIds.slice(index, index + 500),
+    });
+    if (assignment?.success !== true) {
+      throw new Error(`Collection verification failed for ${brandCollection}`);
+    }
+    console.log(JSON.stringify({
+      event: "collection_verified",
+      collection: brandCollection,
+      requested: assignment.requested,
+      verified: assignment.verified,
+      collectionProductCount: assignment.collectionProductCount,
+    }));
+  }
+}
 
 console.log(JSON.stringify({ event: "complete", selected: pending.length, successful, skipped, failed, checkpointPath }));
 if (failed > 0) process.exitCode = 2;
