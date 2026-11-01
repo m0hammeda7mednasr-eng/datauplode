@@ -50,6 +50,7 @@ const reefApiKey = args.get("reef-api-key") || process.env.REEF_API_KEY || "";
 const reefDemo = args.get("reef-demo") === "true";
 const managedFirst = args.get("managed-first") === "true";
 const directFirst = args.get("direct-first") === "true";
+const readerFirst = args.get("reader-first") === "true";
 const nextApiFirst = args.get("next-api-first") === "true";
 const brandCollection = String(args.get("brand-collection") || "").trim();
 const normalizeCollections = args.get("normalize-collections") === "true";
@@ -227,6 +228,21 @@ function isSheinProductUrl(url: string) {
   } catch {
     return false;
   }
+}
+
+async function loadReaderSnapshot(url: string) {
+  const parsed = new URL(url);
+  const readerUrl = `https://r.jina.ai/http://${parsed.host}${parsed.pathname}${parsed.search}`;
+  const response = await fetch(readerUrl, { signal: AbortSignal.timeout(2 * 60 * 1000) });
+  if (!response.ok) throw new Error(`Reader snapshot failed with HTTP ${response.status}`);
+  const text = await response.text();
+  if (
+    text.trim().length < 500 ||
+    /Attention Required!|Target URL returned error 403|Cloudflare/i.test(text)
+  ) {
+    throw new Error("Reader snapshot returned an access-denied or incomplete page");
+  }
+  return text;
 }
 
 function isNextProductUrl(url: string) {
@@ -423,6 +439,7 @@ console.log(JSON.stringify({
   concurrency,
   managedFirst,
   directFirst,
+  readerFirst,
   nextApiFirst,
   brandCollection: brandCollection || null,
   normalizeCollections,
@@ -452,6 +469,8 @@ async function processRow(row: WorkbookRow) {
       ? await loadStructuredSheinSnapshot(row.url)
       : nextApiFirst && isNextProductUrl(row.url)
         ? await loadStructuredNextSnapshot(row.url)
+      : readerFirst && /(^|\.)marksandspencer\.ae$/i.test(new URL(row.url).hostname)
+        ? await loadReaderSnapshot(row.url)
       : directFirst
         ? await loadDirectSnapshot(row.url)
         : managedFirst && scraperApiKey

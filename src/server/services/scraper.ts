@@ -8869,6 +8869,8 @@ function parseGenericReaderMarkdown(
     .filter(Boolean);
   const ignoredSnapshotTitleLine =
     /^(?:Home|Sign in|Search|Basket|Cart|Add to Basket|Add to Cart|Description|Product Details|Details|Size|Color|Colour)$/i;
+  const genericSizeLinePattern =
+    /^(?:\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+(?:\.\d+)?\s*(?:S|L)|XS|S|M|L|XL|XXL)$/i;
   const titleLine =
     lines.find((line) => /^#\s+/.test(line)) ||
     lines.find((line) => /^Title:\s+/i.test(line)) ||
@@ -8878,9 +8880,7 @@ function parseGenericReaderMarkdown(
         !ignoredSnapshotTitleLine.test(line) &&
         !/^colou?r\s*:/i.test(line) &&
         !looksLikeCurrencyText(line) &&
-        !/^(?:\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|XS|S|M|L|XL|XXL)$/i.test(
-          line,
-        ) &&
+        !genericSizeLinePattern.test(line) &&
         !/^https?:\/\//i.test(line),
     ) ||
     "";
@@ -8933,20 +8933,45 @@ function parseGenericReaderMarkdown(
             .join(" "),
         );
   const productId = getProductIdFromUrl(url);
-  const colorIndex = lines.findIndex((line) => /^colou?r\s*:/i.test(line));
+  const colorIndex = lines.findIndex((line) => /^colou?r(?:\s*:.*)?$/i.test(line));
+  const inlineColor =
+    colorIndex >= 0 ? lines[colorIndex].split(":").slice(1).join(":") : "";
+  const followingColor =
+    colorIndex >= 0
+      ? lines
+          .slice(colorIndex + 1, colorIndex + 6)
+          .find(
+            (line) =>
+              line !== ":" &&
+              !/^!\[/.test(line) &&
+              !/^(?:select size|size chart)$/i.test(line),
+          )
+      : undefined;
   const color =
     colorIndex >= 0
-      ? cleanColorOptionValue(
-          lines[colorIndex].split(":").slice(1).join(":") ||
-            lines[colorIndex + 1],
-        )
+      ? cleanColorOptionValue(inlineColor || followingColor)
       : undefined;
-  const sizeValues = uniqueCleanValues(
-    lines.filter((line) =>
-      /^(?:\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|\d+\s*(?:M|MTHS?|MONTHS?|Y|YRS?|YEARS?)|XS|S|M|L|XL|XXL)$/i.test(
-        line,
-      ),
+  const sizeSectionStart = lines.findIndex((line) => /^select size$/i.test(line));
+  const sizeSection =
+    sizeSectionStart >= 0
+      ? lines.slice(sizeSectionStart + 1, sizeSectionStart + 45)
+      : [];
+  const sizeSectionEnd = sizeSection.findIndex((line) =>
+    /^(?:description|product details)|!\[.*(?:visa|master card|apple pay|blue pay)/i.test(
+      line,
     ),
+  );
+  const boundedSizeSection =
+    sizeSectionEnd >= 0 ? sizeSection.slice(0, sizeSectionEnd) : sizeSection;
+  const sizeValues = uniqueCleanValues(
+    [
+      ...lines.filter((line) => genericSizeLinePattern.test(line)),
+      ...boundedSizeSection.filter(
+        (line) =>
+          genericSizeLinePattern.test(line) ||
+          /^\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?$/.test(line),
+      ),
+    ],
   );
 
   return normalizeProductOptionsAndVariants({
