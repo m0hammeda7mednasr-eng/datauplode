@@ -182,6 +182,9 @@ function normalizeAnalyzeCacheUrl(url: string): string {
   try {
     const parsed = new URL(String(url).trim());
     parsed.hash = "";
+    if (/(^|\.)marksandspencer\.ae$/i.test(parsed.hostname)) {
+      parsed.searchParams.delete("sq");
+    }
     return parsed.toString();
   } catch {
     return String(url || "").trim();
@@ -4547,6 +4550,98 @@ router.post("/products/cleanup-draft-unsynced", async (req, res) => {
     return res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || "Failed to cleanup draft and unsynced products",
+    });
+  }
+});
+
+router.post("/products/:id/delete-shopify-confirmed", async (req, res) => {
+  const CONFIRMATION = "DELETE_EXACT_SHOPIFY_PRODUCT";
+  const expectedShopifyId = String(req.body?.expectedShopifyId || "").trim();
+  const reason = String(req.body?.reason || "operator_confirmed_exact_duplicate").trim();
+
+  if (String(req.body?.confirm || "").trim() !== CONFIRMATION) {
+    return res.status(400).json({
+      success: false,
+      error: `Confirmation must equal ${CONFIRMATION}`,
+    });
+  }
+  if (!/^gid:\/\/shopify\/Product\/\d+$/.test(expectedShopifyId)) {
+    return res.status(400).json({
+      success: false,
+      error: "expectedShopifyId must be a Shopify product GID",
+    });
+  }
+
+  try {
+    const product = await prisma.sourceProduct.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        shopifyProduct: { select: { shopifyId: true } },
+      },
+    });
+    if (!product) return res.status(404).json({ success: false, error: "Product not found" });
+    if (product.shopifyProduct?.shopifyId !== expectedShopifyId) {
+      return res.status(409).json({
+        success: false,
+        error: "The stored Shopify product ID does not match expectedShopifyId",
+        storedShopifyId: product.shopifyProduct?.shopifyId || null,
+      });
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const before = await ShopifyService.getProductBasic(client, expectedShopifyId);
+    if (before) await ShopifyService.deleteProduct(client, expectedShopifyId);
+    const after = await ShopifyService.getProductBasic(client, expectedShopifyId);
+    if (after) {
+      throw Object.assign(new Error("Shopify delete read-back still returned the product"), {
+        statusCode: 502,
+      });
+    }
+
+    const deletion = await hardDeleteCatalogProduct({
+      sourceProductId: product.id,
+      reason,
+      deleteFromShopify: false,
+    });
+    await prisma.$executeRawUnsafe(`
+      UPDATE "ShopifyCatalogIndexV2"
+      SET "status" = 'DELETED',
+          "matchStatus" = 'deleted',
+          "reason" = $2,
+          "updatedAt" = NOW()
+      WHERE "shopifyId" = $1
+    `, expectedShopifyId, reason);
+    await prisma.auditLog.create({
+      data: {
+        action: "DELETE_EXACT_SHOPIFY_PRODUCT",
+        details: JSON.stringify({
+          sourceProductId: product.id,
+          shopifyId: expectedShopifyId,
+          title: product.title,
+          url: product.url,
+          reason,
+          shopifyStateBefore: before ? "present" : "already_missing",
+          shopifyReadbackAfter: "missing",
+        }),
+        userId: "System",
+      },
+    });
+
+    return res.json({
+      success: true,
+      sourceProductId: product.id,
+      shopifyId: expectedShopifyId,
+      shopifyStateBefore: before ? "present" : "already_missing",
+      shopifyReadbackAfter: "missing",
+      deletion,
+    });
+  } catch (error: any) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to delete the confirmed Shopify product",
     });
   }
 });

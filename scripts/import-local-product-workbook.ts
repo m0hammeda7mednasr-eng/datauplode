@@ -82,11 +82,18 @@ function normalizeProductUrl(value: string) {
   if (/^(www\.)?next\.ae$/i.test(parsed.hostname)) {
     parsed.pathname = parsed.pathname.replace(/^\/ar\//i, "/en/");
   }
+  if (/(^|\.)marksandspencer\.ae$/i.test(parsed.hostname)) {
+    parsed.searchParams.delete("sq");
+  }
   return parsed.toString().replace(/\/$/, "");
 }
 
 function productIdentity(url: string) {
   const parsed = new URL(url);
+  if (/(^|\.)marksandspencer\.ae$/i.test(parsed.hostname)) {
+    const productCode = parsed.pathname.match(/\/([A-Z]\d{6}[A-Z0-9]?)\/?$/i)?.[1];
+    if (productCode) return `marks-and-spencer:${productCode.toUpperCase()}`;
+  }
   if (/(^|\.)shein\.com$/i.test(parsed.hostname)) {
     const productId = parsed.pathname.match(/-p-(\d+)(?:\.|-|\/|$)/i)?.[1];
     if (productId) return `shein:${productId}`;

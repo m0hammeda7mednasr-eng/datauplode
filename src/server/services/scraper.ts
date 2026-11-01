@@ -3134,6 +3134,7 @@ function looksLikeSizeOptionValue(value: string): boolean {
 
   if (
     /^\d{1,3}(?:\.\d+)?$/.test(cleaned) ||
+    /^\d+(?:\.\d+)?\s*(?:S|L)$/i.test(cleaned) ||
     /^(?:EU|UK|US)\s*\d{1,3}(?:\.\d+)?(?:\s*\((?:EU|UK|US)\s*\d{1,3}(?:\.\d+)?\))?$/i.test(
       cleaned,
     ) ||

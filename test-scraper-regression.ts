@@ -130,6 +130,38 @@ Abbie Rosie collection • 2 piece set • Stripe • Top • Short puff sleeves
 ![Image: River Island Pink Stripe Puff Sleeve Top & Bow Wide Leg Set - Image 2 of 5](https://xcdn.next.co.uk/common/items/default/default/itemimages/3_4Ratio/product/lge/G44412s2.jpg?im=Resize,width=750)
 `;
 
+const marksAndSpencerSlippersSnapshot = `
+Title: Kids' Christmas Santa Elastic Back Slippers (4 Small-2 Large)
+
+Markdown Content:
+Kids' Christmas Santa Elastic Back Slippers (4 Small-2 Large)
+
+![Image 1: Kids' Christmas Santa Elastic Back Slippers](https://cdn.example.com/slippers-1.jpg)
+
+Product code: T723107S
+
+AED 85.00
+
+Colour
+:
+RED
+
+Select size
+Size chart
+6 S
+7 S
+8 S
+9 S
+10 S
+11 S
+12 S
+13 S
+1 L
+
+Description
+Festive elastic-back slippers.
+`;
+
 function assertProduct(caseName: string, product: NormalizedProduct, expected: {
   supplier: string;
   currency: string;
@@ -203,6 +235,25 @@ await assert.rejects(
 console.log("Snapshot regression passed", {
   name: "Next blocked snapshot",
   result: "refused missing size values instead of publishing One Size",
+});
+
+const marksAndSpencerSlippers = await scraper.scrapeSnapshot(
+  "https://www.marksandspencer.ae/en/fashion/products/kids-christmas-santa-elastic-back-slippers-4-small-2-large-/T723107S?sq=baby",
+  marksAndSpencerSlippersSnapshot,
+);
+assertProduct("Marks & Spencer slippers snapshot", marksAndSpencerSlippers, {
+  supplier: "Marks & Spencer",
+  currency: "AED",
+  minImages: 1,
+  minVariants: 9,
+});
+assert.deepEqual(
+  marksAndSpencerSlippers.variants.map((variant) => variant.size),
+  ["6 S", "7 S", "8 S", "9 S", "10 S", "11 S", "12 S", "13 S", "1 L"],
+);
+console.log("Snapshot regression passed", {
+  name: "Marks & Spencer slippers snapshot",
+  variants: marksAndSpencerSlippers.variants.length,
 });
 
 console.log("Live regression summary", {
