@@ -6545,7 +6545,8 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
     const deletedCollections: any[] = [];
     const retainedCollections: any[] = [];
     const collectionFailures: any[] = [];
-    if (failed.length === 0) {
+    const catalogScanComplete = summerSearchComplete && soldOutScanComplete;
+    if (failed.length === 0 && catalogScanComplete) {
       const deleteCollectionMutation = `
         mutation DeleteSummerCollection($input: CollectionDeleteInput!) {
           collectionDelete(input: $input) {

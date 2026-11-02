@@ -56,11 +56,6 @@ jobs:
               "$API_BASE/api/shopify/catalog/purge-sold-out-summer")"
 
             jq -e '.success == true and .dryRun == true' >/dev/null <<<"$dry"
-            jq -e '.summerCollectionFound == true' >/dev/null <<<"$dry" || {
-              echo "Summer Collection was not found; refusing partial purge" >&2
-              exit 1
-            }
-
             selected="$(jq -r '.selectedCount' <<<"$dry")"
             if [[ "$selected" == "0" ]]; then
               jq -c '{event:"complete", cycle, summerCollectionProducts, inventoryZeroCandidates, inventoryVerificationExcluded, soldOutScanComplete}' --argjson cycle "$cycle" <<<"$dry" | tee -a purge-report.jsonl
@@ -97,8 +92,8 @@ jobs:
             --header 'content-type: application/json' \
             --data '{"dryRun":true,"limit":50}' \
             "$API_BASE/api/shopify/catalog/purge-sold-out-summer")"
-          jq -e '.success == true and .selectedCount == 0 and .summerCollectionProducts == 0 and .soldOutScanComplete == true' >/dev/null <<<"$final"
-          jq -c '{event:"final_verification", summerCollectionProducts, selectedCount, inventoryZeroCandidates, inventoryVerificationExcluded, soldOutScanComplete}' <<<"$final" | tee -a purge-report.jsonl
+          jq -e '.success == true and .selectedCount == 0 and .summerCollectionCount == 0 and .summerCollectionProducts == 0 and .summerSearchComplete == true and .soldOutScanComplete == true' >/dev/null <<<"$final"
+          jq -c '{event:"final_verification", summerCollectionCount, summerCollectionProducts, summerSearchComplete, selectedCount, inventoryZeroCandidates, inventoryVerificationExcluded, soldOutScanComplete}' <<<"$final" | tee -a purge-report.jsonl
 
           echo "deleted_total=$deleted_total" >> "$GITHUB_OUTPUT"
           echo "batches=$batches" >> "$GITHUB_OUTPUT"
@@ -106,6 +101,7 @@ jobs:
             echo "## Sold-out and Summer Collection purge"
             echo "- Deleted with Shopify readback: $deleted_total"
             echo "- Guarded batches: $batches"
+            echo "- Remaining Summer collections: $(jq -r '.summerCollectionCount' <<<"$final")"
             echo "- Final Summer Collection products: $(jq -r '.summerCollectionProducts' <<<"$final")"
             echo "- Final verified deletion candidates: $(jq -r '.selectedCount' <<<"$final")"
             echo "- Zero-inventory but still sellable/excluded: $(jq -r '.inventoryVerificationExcluded' <<<"$final")"
