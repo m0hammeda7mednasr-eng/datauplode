@@ -6166,7 +6166,6 @@ router.post("/shopify/collections/assign-products", async (req, res) => {
 router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
   const CONFIRMATION = "DELETE_SOLD_OUT_AND_SUMMER_PRODUCTS";
   const REQUIRED_SHOP_DOMAIN = "09fgkz-6n.myshopify.com";
-  const ONE_TIME_WRITE_TOKEN_SHA256 = "65183af0f7c4a387bc5eb60d9edc706e43d2a03a07365ea62b5a78788090cd10";
   const dryRun = req.body?.dryRun !== false;
   const limitRaw = Number(req.body?.limit);
   const limit = Number.isFinite(limitRaw)
@@ -6192,15 +6191,9 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
       const suppliedToken = String(req.header("x-catalog-audit-write-token") || "").trim();
       const configuredBuffer = Buffer.from(configuredToken);
       const suppliedBuffer = Buffer.from(suppliedToken);
-      const environmentTokenAuthorized = configuredBuffer.length > 0
+      const authorized = configuredBuffer.length > 0
         && configuredBuffer.length === suppliedBuffer.length
         && crypto.timingSafeEqual(configuredBuffer, suppliedBuffer);
-      const oneTimeTokenAuthorized = suppliedBuffer.length > 0
-        && crypto
-          .createHash("sha256")
-          .update(suppliedToken)
-          .digest("hex") === ONE_TIME_WRITE_TOKEN_SHA256;
-      const authorized = environmentTokenAuthorized || oneTimeTokenAuthorized;
       if (!authorized) {
         return res.status(403).json({
           success: false,
