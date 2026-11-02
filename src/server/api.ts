@@ -6251,19 +6251,19 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
     }
 
     const summerSearchQuery = `
-      query SummerMarkedProducts($after: String, $query: String!) {
-        products(first: 50, after: $after, sortKey: ID, query: $query) {
+      query SummerMarkedProducts($after: String) {
+        products(first: 250, after: $after, sortKey: ID) {
           nodes { id title handle status totalInventory productType tags }
           pageInfo { hasNextPage endCursor }
         }
       }
     `;
+    const summerSeasonPattern = /(^|[\s_-])(summer|swim(?:suit|wear|ming)?|bikini|tankini|rash[\s_-]?(?:vest|guard|suit)|sunsafe|sunsuit|beach|pool|sandals?|flip[\s_-]?flops?|sliders?|slides|shorts|sun[\s_-]?hat|bucket[\s_-]?hat|straw[\s_-]?hat|sun[\s_-]?cap|boardshorts?|swim[\s_-]?trunks?|water[\s_-]?shoes?)([\s_-]|$)/i;
     let summerSearchAfter: string | null = null;
     let summerSearchComplete = false;
     while (candidateMap.size < limit && !summerSearchComplete) {
       const data: any = await client.request(summerSearchQuery, {
         after: summerSearchAfter,
-        query: 'tag:summer OR tag:"summer collection" OR product_type:summer OR title:summer',
       });
       const page = data?.products;
       for (const product of page?.nodes || []) {
@@ -6273,6 +6273,7 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
         const tags = Array.isArray(product?.tags)
           ? product.tags.map((tag: unknown) => String(tag || "").trim()).filter(Boolean)
           : [];
+        const seasonalText = [title, handle, productType, ...tags].join(" ");
         const reasons = [
           /(^|[\s_-])summer([\s_-]|$)/i.test(title)
             || /(^|[\s_-])summer([\s_-]|$)/i.test(handle)
@@ -6283,6 +6284,9 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
             : null,
           tags.some((tag: string) => /(^|[\s_-])summer([\s_-]|$)/i.test(tag))
             ? "summer_tag"
+            : null,
+          summerSeasonPattern.test(seasonalText)
+            ? "summer_seasonal_category"
             : null,
         ].filter((reason): reason is string => Boolean(reason));
         if (!product?.id || reasons.length === 0) continue;
