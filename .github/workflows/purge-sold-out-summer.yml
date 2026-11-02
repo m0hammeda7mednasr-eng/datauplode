@@ -1,0 +1,120 @@
+name: Purge sold-out and summer products
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purge-sold-out-summer-production
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      API_BASE: https://datauplode-production.up.railway.app
+      WRITE_TOKEN: ${{ secrets.CATALOG_AUDIT_WRITE_TOKEN }}
+    steps:
+      - name: Validate secret
+        run: test -n "$WRITE_TOKEN" || { echo "CATALOG_AUDIT_WRITE_TOKEN is required" >&2; exit 1; }
+
+      - name: Wait for purge endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            response="$(curl --silent --show-error --max-time 900 \
+              --header 'content-type: application/json' \
+              --data '{"dryRun":true,"limit":50}' \
+              "$API_BASE/api/shopify/catalog/purge-sold-out-summer" || true)"
+            if jq -e '.success == true and .dryRun == true' >/dev/null 2>&1 <<<"$response"; then
+              jq '{shopDomain, summerCollection, summerCollectionProducts, selectedCount, soldOutScanComplete}' <<<"$response"
+              exit 0
+            fi
+            echo "Endpoint not ready yet (attempt $attempt/90)"
+            sleep 20
+          done
+          echo "Purge endpoint did not become ready" >&2
+          exit 1
+
+      - name: Delete verified candidates in guarded batches
+        id: purge
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > purge-report.jsonl
+          deleted_total=0
+          batches=0
+
+          for cycle in $(seq 1 250); do
+            dry="$(curl --fail-with-body --silent --show-error --max-time 900 \
+              --header 'content-type: application/json' \
+              --data '{"dryRun":true,"limit":50}' \
+              "$API_BASE/api/shopify/catalog/purge-sold-out-summer")"
+
+            jq -e '.success == true and .dryRun == true' >/dev/null <<<"$dry"
+            jq -e '.summerCollectionFound == true' >/dev/null <<<"$dry" || {
+              echo "Summer Collection was not found; refusing partial purge" >&2
+              exit 1
+            }
+
+            selected="$(jq -r '.selectedCount' <<<"$dry")"
+            if [[ "$selected" == "0" ]]; then
+              jq -c '{event:"complete", cycle, summerCollectionProducts, inventoryZeroCandidates, inventoryVerificationExcluded, soldOutScanComplete}' --argjson cycle "$cycle" <<<"$dry" | tee -a purge-report.jsonl
+              break
+            fi
+
+            plan_hash="$(jq -r '.planHash' <<<"$dry")"
+            payload="$(jq -cn \
+              --arg confirm 'DELETE_SOLD_OUT_AND_SUMMER_PRODUCTS' \
+              --arg expectedPlanHash "$plan_hash" \
+              --argjson expectedCount "$selected" \
+              '{dryRun:false,limit:50,confirm:$confirm,expectedPlanHash:$expectedPlanHash,expectedCount:$expectedCount}')"
+
+            applied="$(curl --fail-with-body --silent --show-error --max-time 900 \
+              --header 'content-type: application/json' \
+              --header "x-catalog-audit-write-token: $WRITE_TOKEN" \
+              --data "$payload" \
+              "$API_BASE/api/shopify/catalog/purge-sold-out-summer")"
+            jq -e '.success == true and .failedCount == 0 and .deletedCount == .selectedCount' >/dev/null <<<"$applied"
+            jq -c '{event:"batch", planHash, selectedCount, deletedCount, failedCount, summerCollectionProducts, soldOutProducts, inventoryVerificationExcluded}' <<<"$applied" | tee -a purge-report.jsonl
+
+            batch_deleted="$(jq -r '.deletedCount' <<<"$applied")"
+            deleted_total=$((deleted_total + batch_deleted))
+            batches=$((batches + 1))
+            sleep 2
+
+            if [[ "$cycle" == "250" ]]; then
+              echo "Purge did not finish within 250 guarded batches" >&2
+              exit 1
+            fi
+          done
+
+          final="$(curl --fail-with-body --silent --show-error --max-time 900 \
+            --header 'content-type: application/json' \
+            --data '{"dryRun":true,"limit":50}' \
+            "$API_BASE/api/shopify/catalog/purge-sold-out-summer")"
+          jq -e '.success == true and .selectedCount == 0 and .summerCollectionProducts == 0 and .soldOutScanComplete == true' >/dev/null <<<"$final"
+          jq -c '{event:"final_verification", summerCollectionProducts, selectedCount, inventoryZeroCandidates, inventoryVerificationExcluded, soldOutScanComplete}' <<<"$final" | tee -a purge-report.jsonl
+
+          echo "deleted_total=$deleted_total" >> "$GITHUB_OUTPUT"
+          echo "batches=$batches" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Sold-out and Summer Collection purge"
+            echo "- Deleted with Shopify readback: $deleted_total"
+            echo "- Guarded batches: $batches"
+            echo "- Final Summer Collection products: $(jq -r '.summerCollectionProducts' <<<"$final")"
+            echo "- Final verified deletion candidates: $(jq -r '.selectedCount' <<<"$final")"
+            echo "- Zero-inventory but still sellable/excluded: $(jq -r '.inventoryVerificationExcluded' <<<"$final")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload purge report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sold-out-summer-purge-report
+          path: purge-report.jsonl
+          if-no-files-found: warn

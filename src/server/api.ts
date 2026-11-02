@@ -6163,6 +6163,350 @@ router.post("/shopify/collections/assign-products", async (req, res) => {
   }
 });
 
+router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
+  const CONFIRMATION = "DELETE_SOLD_OUT_AND_SUMMER_PRODUCTS";
+  const REQUIRED_SHOP_DOMAIN = "09fgkz-6n.myshopify.com";
+  const dryRun = req.body?.dryRun !== false;
+  const limitRaw = Number(req.body?.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.max(1, Math.min(50, Math.floor(limitRaw)))
+    : 25;
+
+  try {
+    const connection = await prisma.shopifyConnection.findFirst({
+      where: { isConnected: true },
+      select: { shopDomain: true },
+    });
+    const shopDomain = String(connection?.shopDomain || "").trim().toLocaleLowerCase();
+    if (shopDomain !== REQUIRED_SHOP_DOMAIN) {
+      return res.status(409).json({
+        success: false,
+        error: "Connected Shopify store does not match the required Dabdoob store",
+        shopDomain: shopDomain || null,
+      });
+    }
+
+    if (!dryRun) {
+      const configuredToken = String(process.env.CATALOG_AUDIT_WRITE_TOKEN || "").trim();
+      const suppliedToken = String(req.header("x-catalog-audit-write-token") || "").trim();
+      const configuredBuffer = Buffer.from(configuredToken);
+      const suppliedBuffer = Buffer.from(suppliedToken);
+      const authorized = configuredBuffer.length > 0
+        && configuredBuffer.length === suppliedBuffer.length
+        && crypto.timingSafeEqual(configuredBuffer, suppliedBuffer);
+      if (!authorized) {
+        return res.status(403).json({
+          success: false,
+          error: "A valid catalog write token is required for deletion",
+        });
+      }
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const collections = await ShopifyService.getCollections(client);
+    const summerCollection = collections.find((collection: any) => {
+      const title = String(collection?.title || "").trim().toLocaleLowerCase();
+      const handle = String(collection?.handle || "").trim().toLocaleLowerCase();
+      return title === "summer collection" || handle === "summer-collection";
+    });
+
+    const summerSnapshot = summerCollection
+      ? await ShopifyService.getCollectionProductIds(client, summerCollection.id)
+      : { collection: null, productIds: [] as string[] };
+    const summerIds = new Set(summerSnapshot.productIds);
+
+    const candidateMap = new Map<string, {
+      shopifyId: string;
+      title: string | null;
+      handle: string | null;
+      status: string | null;
+      totalInventory: number | null;
+      reasons: string[];
+    }>();
+    const candidateQuery = `
+      query ProductDeletionCandidates($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on Product { id title handle status totalInventory }
+        }
+      }
+    `;
+    for (let index = 0; index < summerIds.size; index += 250) {
+      const ids = [...summerIds].slice(index, index + 250);
+      const data: any = await client.request(candidateQuery, { ids });
+      for (const product of data?.nodes || []) {
+        if (!product?.id) continue;
+        candidateMap.set(String(product.id), {
+          shopifyId: String(product.id),
+          title: product.title || null,
+          handle: product.handle || null,
+          status: product.status || null,
+          totalInventory: Number.isFinite(Number(product.totalInventory))
+            ? Number(product.totalInventory)
+            : null,
+          reasons: ["summer_collection"],
+        });
+      }
+    }
+
+    const soldOutQuery = `
+      query SoldOutProducts($after: String, $query: String!) {
+        products(first: 15, after: $after, sortKey: ID, query: $query) {
+          nodes {
+            id title handle status totalInventory
+            variants(first: 50) {
+              nodes { inventoryQuantity inventoryPolicy inventoryItem { tracked } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+    const variantAvailabilityQuery = `
+      query ProductVariantAvailability($id: ID!, $after: String) {
+        product(id: $id) {
+          variants(first: 250, after: $after) {
+            nodes { inventoryQuantity inventoryPolicy inventoryItem { tracked } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    `;
+
+    let after: string | null = null;
+    let inventoryZeroCandidates = 0;
+    let soldOutScanComplete = false;
+    const inventoryVerificationExcluded: Array<{
+      shopifyId: string;
+      title: string | null;
+      reason: string;
+    }> = [];
+    while (candidateMap.size < limit && !soldOutScanComplete) {
+      const data: any = await client.request(soldOutQuery, {
+        after,
+        query: "inventory_total:<=0",
+      });
+      const page = data?.products;
+      for (const product of page?.nodes || []) {
+        inventoryZeroCandidates += 1;
+        const variants = [...(product.variants?.nodes || [])];
+        let variantPageInfo = product.variants?.pageInfo;
+        while (variantPageInfo?.hasNextPage) {
+          const variantAfter = String(variantPageInfo.endCursor || "").trim();
+          if (!variantAfter) {
+            throw new Error(`Variant pagination did not return an end cursor for ${product.id}`);
+          }
+          const variantData: any = await client.request(variantAvailabilityQuery, {
+            id: product.id,
+            after: variantAfter,
+          });
+          const variantPage = variantData?.product?.variants;
+          variants.push(...(variantPage?.nodes || []));
+          variantPageInfo = variantPage?.pageInfo;
+        }
+
+        const hasUnknownAvailability = variants.length === 0 || variants.some((variant: any) => (
+          variant?.inventoryItem?.tracked === undefined
+          || variant?.inventoryItem?.tracked === null
+          || !String(variant?.inventoryPolicy || "").trim()
+          || !Number.isFinite(Number(variant?.inventoryQuantity))
+        ));
+        if (hasUnknownAvailability) {
+          inventoryVerificationExcluded.push({
+            shopifyId: String(product.id),
+            title: product.title || null,
+            reason: "variant_inventory_availability_unverified",
+          });
+          continue;
+        }
+
+        const hasSellableVariant = variants.some((variant: any) => (
+          variant.inventoryItem.tracked === false
+          || String(variant.inventoryPolicy).toUpperCase() === "CONTINUE"
+          || Number(variant.inventoryQuantity) > 0
+        ));
+        if (hasSellableVariant) {
+          inventoryVerificationExcluded.push({
+            shopifyId: String(product.id),
+            title: product.title || null,
+            reason: "zero_total_but_variant_still_sellable",
+          });
+          continue;
+        }
+
+        const productId = String(product.id);
+        const existingCandidate = candidateMap.get(productId);
+        if (existingCandidate) {
+          if (!existingCandidate.reasons.includes("sold_out")) {
+            existingCandidate.reasons.push("sold_out");
+          }
+        } else {
+          candidateMap.set(productId, {
+            shopifyId: productId,
+            title: product.title || null,
+            handle: product.handle || null,
+            status: product.status || null,
+            totalInventory: Number.isFinite(Number(product.totalInventory))
+              ? Number(product.totalInventory)
+              : null,
+            reasons: ["sold_out"],
+          });
+        }
+      }
+      if (!page?.pageInfo?.hasNextPage) {
+        soldOutScanComplete = true;
+        break;
+      }
+      if (candidateMap.size >= limit) break;
+      after = String(page.pageInfo.endCursor || "").trim() || null;
+      if (!after) throw new Error("Sold-out product pagination did not return an end cursor");
+    }
+
+    const allCandidates = [...candidateMap.values()]
+      .map((candidate) => ({
+        ...candidate,
+        reasons: [...candidate.reasons].sort(),
+      }))
+      .sort((a, b) => a.shopifyId.localeCompare(b.shopifyId));
+    const selectedCandidates = allCandidates.slice(0, limit);
+    const planHash = crypto
+      .createHash("sha256")
+      .update(selectedCandidates.map((candidate) => (
+        `${candidate.shopifyId}:${candidate.reasons.join("+")}`
+      )).join("\n"))
+      .digest("hex");
+    const summary = {
+      shopDomain,
+      summerCollection: summerSnapshot.collection,
+      summerCollectionFound: Boolean(summerCollection),
+      summerCollectionProducts: summerIds.size,
+      inventoryZeroCandidates,
+      inventoryVerificationExcluded: inventoryVerificationExcluded.length,
+      soldOutProducts: allCandidates.filter((candidate) => candidate.reasons.includes("sold_out")).length,
+      overlapProducts: allCandidates.filter((candidate) => candidate.reasons.length > 1).length,
+      discoveredCandidates: allCandidates.length,
+      selectedCount: selectedCandidates.length,
+      soldOutScanComplete,
+      limit,
+      planHash,
+    };
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dryRun: true,
+        confirmationRequired: CONFIRMATION,
+        ...summary,
+        candidates: selectedCandidates,
+        inventoryVerificationExcludedSample: inventoryVerificationExcluded.slice(0, 25),
+      });
+    }
+
+    if (!summerCollection) {
+      return res.status(409).json({
+        success: false,
+        error: "Summer Collection was not found; refusing a partial destructive run",
+        ...summary,
+      });
+    }
+    if (String(req.body?.confirm || "").trim() !== CONFIRMATION) {
+      return res.status(400).json({
+        success: false,
+        error: `Confirmation must equal ${CONFIRMATION}`,
+        ...summary,
+      });
+    }
+    if (String(req.body?.expectedPlanHash || "").trim() !== planHash) {
+      return res.status(409).json({
+        success: false,
+        error: "Deletion plan changed; run dry-run again",
+        ...summary,
+      });
+    }
+    if (Number(req.body?.expectedCount) !== selectedCandidates.length) {
+      return res.status(409).json({
+        success: false,
+        error: "Deletion candidate count changed; run dry-run again",
+        ...summary,
+      });
+    }
+
+    const deleted: any[] = [];
+    const failed: any[] = [];
+    for (const candidate of selectedCandidates) {
+      try {
+        const before = await ShopifyService.getProductBasic(client, candidate.shopifyId);
+        if (before) await ShopifyService.deleteProduct(client, candidate.shopifyId);
+        const afterDelete = await ShopifyService.getProductBasic(client, candidate.shopifyId);
+        if (afterDelete) throw new Error("Shopify read-back still returned the product after deletion");
+
+        const localProduct = await prisma.shopifyProduct.findUnique({
+          where: { shopifyId: candidate.shopifyId },
+          select: { sourceProductId: true },
+        });
+        const localDeletion = localProduct?.sourceProductId
+          ? await hardDeleteCatalogProduct({
+              sourceProductId: localProduct.sourceProductId,
+              reason: candidate.reasons.join("+"),
+              deleteFromShopify: false,
+            })
+          : { deleted: false, cacheOnly: true };
+
+        await prisma.$executeRawUnsafe(`
+          UPDATE "ShopifyCatalogIndexV2"
+          SET "status" = 'DELETED',
+              "matchStatus" = 'deleted',
+              "reason" = $2,
+              "updatedAt" = NOW()
+          WHERE "shopifyId" = $1
+        `, candidate.shopifyId, candidate.reasons.join("+"));
+
+        deleted.push({
+          ...candidate,
+          shopifyStateBefore: before ? "present" : "already_missing",
+          shopifyReadbackAfter: "missing",
+          localDeletion,
+        });
+      } catch (error: any) {
+        failed.push({
+          ...candidate,
+          error: String(error?.message || error || "Unknown deletion error"),
+        });
+      }
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        action: "PURGE_SOLD_OUT_AND_SUMMER_PRODUCTS",
+        details: JSON.stringify({
+          planHash,
+          selected: selectedCandidates.length,
+          deleted: deleted.length,
+          failed: failed.length,
+          summerCollectionId: summerCollection.id,
+          readbackMode: "shopify_delete_then_product_missing_readback",
+        }),
+        userId: "System",
+      },
+    });
+
+    return res.status(failed.length > 0 ? 207 : 200).json({
+      success: failed.length === 0,
+      dryRun: false,
+      ...summary,
+      deletedCount: deleted.length,
+      failedCount: failed.length,
+      deleted,
+      failed,
+    });
+  } catch (error: any) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to purge sold-out and summer products",
+    });
+  }
+});
+
 router.post("/shopify/products/apply-price-presentation", async (req, res) => {
   const productIds = Array.isArray(req.body?.productIds)
     ? [...new Set(
