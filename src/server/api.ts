@@ -6207,7 +6207,10 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
     const summerCollection = collections.find((collection: any) => {
       const title = String(collection?.title || "").trim().toLocaleLowerCase();
       const handle = String(collection?.handle || "").trim().toLocaleLowerCase();
-      return title === "summer collection" || handle === "summer-collection";
+      return title === "summer collection"
+        || handle === "summer-collection"
+        || title === "summer"
+        || handle === "summer";
     });
 
     const summerSnapshot = summerCollection
