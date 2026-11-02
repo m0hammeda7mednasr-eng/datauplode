@@ -6204,19 +6204,18 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
 
     const client = await ShopifyService.getClientFromDb(prisma);
     const collections = await ShopifyService.getCollections(client);
-    const summerCollection = collections.find((collection: any) => {
+    const summerCollections = collections.filter((collection: any) => {
       const title = String(collection?.title || "").trim().toLocaleLowerCase();
       const handle = String(collection?.handle || "").trim().toLocaleLowerCase();
-      return title === "summer collection"
-        || handle === "summer-collection"
-        || title === "summer"
-        || handle === "summer";
+      return /(^|[\s_-])summer([\s_-]|$)/i.test(title)
+        || /(^|[\s_-])summer([\s_-]|$)/i.test(handle);
     });
 
-    const summerSnapshot = summerCollection
-      ? await ShopifyService.getCollectionProductIds(client, summerCollection.id)
-      : { collection: null, productIds: [] as string[] };
-    const summerIds = new Set(summerSnapshot.productIds);
+    const summerSnapshots: Array<{ collection: any; productIds: string[] }> = [];
+    for (const collection of summerCollections) {
+      summerSnapshots.push(await ShopifyService.getCollectionProductIds(client, collection.id));
+    }
+    const summerIds = new Set(summerSnapshots.flatMap((snapshot) => snapshot.productIds));
 
     const candidateMap = new Map<string, {
       shopifyId: string;
@@ -6249,6 +6248,69 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
           reasons: ["summer_collection"],
         });
       }
+    }
+
+    const summerSearchQuery = `
+      query SummerMarkedProducts($after: String, $query: String!) {
+        products(first: 50, after: $after, sortKey: ID, query: $query) {
+          nodes { id title handle status totalInventory productType tags }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+    let summerSearchAfter: string | null = null;
+    let summerSearchComplete = false;
+    while (candidateMap.size < limit && !summerSearchComplete) {
+      const data: any = await client.request(summerSearchQuery, {
+        after: summerSearchAfter,
+        query: 'tag:summer OR tag:"summer collection" OR product_type:summer OR title:summer',
+      });
+      const page = data?.products;
+      for (const product of page?.nodes || []) {
+        const title = String(product?.title || "").trim();
+        const handle = String(product?.handle || "").trim();
+        const productType = String(product?.productType || "").trim();
+        const tags = Array.isArray(product?.tags)
+          ? product.tags.map((tag: unknown) => String(tag || "").trim()).filter(Boolean)
+          : [];
+        const reasons = [
+          /(^|[\s_-])summer([\s_-]|$)/i.test(title)
+            || /(^|[\s_-])summer([\s_-]|$)/i.test(handle)
+            ? "summer_title"
+            : null,
+          /(^|[\s_-])summer([\s_-]|$)/i.test(productType)
+            ? "summer_product_type"
+            : null,
+          tags.some((tag: string) => /(^|[\s_-])summer([\s_-]|$)/i.test(tag))
+            ? "summer_tag"
+            : null,
+        ].filter((reason): reason is string => Boolean(reason));
+        if (!product?.id || reasons.length === 0) continue;
+
+        const productId = String(product.id);
+        const existingCandidate = candidateMap.get(productId);
+        if (existingCandidate) {
+          existingCandidate.reasons = [...new Set([...existingCandidate.reasons, ...reasons])];
+          continue;
+        }
+        candidateMap.set(productId, {
+          shopifyId: productId,
+          title: product.title || null,
+          handle: product.handle || null,
+          status: product.status || null,
+          totalInventory: Number.isFinite(Number(product.totalInventory))
+            ? Number(product.totalInventory)
+            : null,
+          reasons,
+        });
+      }
+      if (!page?.pageInfo?.hasNextPage) {
+        summerSearchComplete = true;
+        break;
+      }
+      if (candidateMap.size >= limit) break;
+      summerSearchAfter = String(page.pageInfo.endCursor || "").trim() || null;
+      if (!summerSearchAfter) throw new Error("Summer product search pagination did not return an end cursor");
     }
 
     const soldOutQuery = `
@@ -6374,15 +6436,20 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
     const selectedCandidates = allCandidates.slice(0, limit);
     const planHash = crypto
       .createHash("sha256")
-      .update(selectedCandidates.map((candidate) => (
-        `${candidate.shopifyId}:${candidate.reasons.join("+")}`
-      )).join("\n"))
+      .update([
+        ...summerCollections.map((collection: any) => `collection:${collection.id}`),
+        ...selectedCandidates.map((candidate) => (
+          `${candidate.shopifyId}:${candidate.reasons.join("+")}`
+        )),
+      ].sort().join("\n"))
       .digest("hex");
     const summary = {
       shopDomain,
-      summerCollection: summerSnapshot.collection,
-      summerCollectionFound: Boolean(summerCollection),
+      summerCollections: summerSnapshots.map((snapshot) => snapshot.collection),
+      summerCollectionFound: summerCollections.length > 0,
+      summerCollectionCount: summerCollections.length,
       summerCollectionProducts: summerIds.size,
+      summerSearchComplete,
       inventoryZeroCandidates,
       inventoryVerificationExcluded: inventoryVerificationExcluded.length,
       soldOutProducts: allCandidates.filter((candidate) => candidate.reasons.includes("sold_out")).length,
@@ -6405,13 +6472,6 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
       });
     }
 
-    if (!summerCollection) {
-      return res.status(409).json({
-        success: false,
-        error: "Summer Collection was not found; refusing a partial destructive run",
-        ...summary,
-      });
-    }
     if (String(req.body?.confirm || "").trim() !== CONFIRMATION) {
       return res.status(400).json({
         success: false,
@@ -6478,6 +6538,59 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
       }
     }
 
+    const deletedCollections: any[] = [];
+    const retainedCollections: any[] = [];
+    const collectionFailures: any[] = [];
+    if (failed.length === 0) {
+      const deleteCollectionMutation = `
+        mutation DeleteSummerCollection($input: CollectionDeleteInput!) {
+          collectionDelete(input: $input) {
+            deletedCollectionId
+            userErrors { field message }
+          }
+        }
+      `;
+      for (const collection of summerCollections) {
+        try {
+          const afterProducts = await ShopifyService.getCollectionProductIds(client, collection.id);
+          if (afterProducts.productIds.length > 0) {
+            retainedCollections.push({
+              ...collection,
+              remainingProducts: afterProducts.productIds.length,
+            });
+            continue;
+          }
+          const deletion: any = await client.request(deleteCollectionMutation, {
+            input: { id: collection.id },
+          });
+          const payload = deletion?.collectionDelete;
+          const userErrors = payload?.userErrors || [];
+          if (userErrors.length > 0 || payload?.deletedCollectionId !== collection.id) {
+            throw new Error(userErrors.map((entry: any) => entry.message).join("; ") || "Collection deletion was not confirmed");
+          }
+          deletedCollections.push(collection);
+        } catch (error: any) {
+          collectionFailures.push({
+            ...collection,
+            error: String(error?.message || error || "Unknown collection deletion error"),
+          });
+        }
+      }
+    }
+
+    if (deletedCollections.length > 0) {
+      const collectionsAfter = await ShopifyService.getCollections(client);
+      const remainingCollectionIds = new Set(collectionsAfter.map((collection: any) => String(collection.id)));
+      for (const collection of deletedCollections) {
+        if (remainingCollectionIds.has(String(collection.id))) {
+          collectionFailures.push({
+            ...collection,
+            error: "Shopify read-back still returned the collection after deletion",
+          });
+        }
+      }
+    }
+
     await prisma.auditLog.create({
       data: {
         action: "PURGE_SOLD_OUT_AND_SUMMER_PRODUCTS",
@@ -6486,21 +6599,31 @@ router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
           selected: selectedCandidates.length,
           deleted: deleted.length,
           failed: failed.length,
-          summerCollectionId: summerCollection.id,
+          summerCollectionIds: summerCollections.map((collection: any) => collection.id),
+          deletedCollections: deletedCollections.length,
+          retainedCollections: retainedCollections.length,
+          collectionFailures: collectionFailures.length,
           readbackMode: "shopify_delete_then_product_missing_readback",
         }),
         userId: "System",
       },
     });
 
-    return res.status(failed.length > 0 ? 207 : 200).json({
-      success: failed.length === 0,
+    const hasFailures = failed.length > 0 || collectionFailures.length > 0;
+    return res.status(hasFailures ? 207 : 200).json({
+      success: !hasFailures,
       dryRun: false,
       ...summary,
       deletedCount: deleted.length,
       failedCount: failed.length,
+      deletedCollectionCount: deletedCollections.length,
+      retainedCollectionCount: retainedCollections.length,
+      collectionFailureCount: collectionFailures.length,
       deleted,
       failed,
+      deletedCollections,
+      retainedCollections,
+      collectionFailures,
     });
   } catch (error: any) {
     return res.status(error.statusCode || 500).json({
