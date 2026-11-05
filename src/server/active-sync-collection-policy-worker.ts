@@ -23,7 +23,7 @@ async function postPolicy(body: Record<string, unknown>, token?: string) {
       ...(token ? { "x-catalog-audit-write-token": token } : {}),
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(30_000),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -36,6 +36,7 @@ async function runCycle() {
   if (running) return;
   running = true;
   const startedAt = Date.now();
+  console.log("[active-sync-policy] cycle started");
   try {
     const token = String(process.env.CATALOG_AUDIT_WRITE_TOKEN || "").trim();
     if (!token) throw new Error("CATALOG_AUDIT_WRITE_TOKEN is not configured");

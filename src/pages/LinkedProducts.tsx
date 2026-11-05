@@ -300,7 +300,7 @@ function CatalogCycle({ cycle }: { cycle: NonNullable<CatalogResponse['cycle']> 
   return <section className="border-y border-slate-200 bg-white py-5">
     <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
       <div>
-        <div className="flex items-center gap-2"><h2 className="text-base font-black text-slate-900">First catalog verification cycle</h2><span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black uppercase', workerRunning ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600')}>{workerRunning && <Loader2 className="h-3 w-3 animate-spin" />}{workerLabel}</span></div>
+        <div className="flex items-center gap-2"><h2 className="text-base font-black text-slate-900">Current catalog verification pass</h2><span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black uppercase', workerRunning ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600')}>{workerRunning && <Loader2 className="h-3 w-3 animate-spin" />}{workerLabel}</span></div>
         <p className="mt-1 text-xs font-semibold text-slate-500">{cycle.fullyVerified.toLocaleString()} verified end to end · {cycle.remaining.toLocaleString()} remaining from {cycle.total.toLocaleString()} active Shopify products</p>
       </div>
       <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs font-bold text-slate-600">

@@ -1221,7 +1221,15 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
         COUNT(*) FILTER (WHERE classified."cycleState"='verified')::int AS "fullyVerified",
         COUNT(*) FILTER (WHERE classified."cycleState"='failed')::int AS "failed",
         COUNT(*) FILTER (WHERE classified."cycleState"='pending')::int AS "pending",
-        MIN(classified."firstSuccessAt") AS "startedAt"
+        MIN(classified."firstSuccessAt") AS "firstStartedAt",
+        COUNT(*) FILTER (
+          WHERE classified."cycleState"='verified'
+            AND classified."latestSuccessAt" >= NOW() - INTERVAL '24 hours'
+        )::int AS "recentVerified",
+        MIN(classified."latestSuccessAt") FILTER (
+          WHERE classified."cycleState"='verified'
+            AND classified."latestSuccessAt" >= NOW() - INTERVAL '24 hours'
+        ) AS "recentStartedAt"
       FROM classified
     `),
     prisma.syncJob.findFirst({
@@ -1243,9 +1251,10 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
   const failed = Math.max(0, Number(coverage.failed || 0));
   const pending = Math.max(0, Number(coverage.pending || 0));
   const verified = Math.max(0, Math.min(linked, Number(coverage.fullyVerified || 0)));
-  const startedAt = coverage.startedAt ? new Date(coverage.startedAt) : null;
-  const elapsedMs = startedAt ? Math.max(0, Date.now() - startedAt.getTime()) : 0;
-  const ratePerHour = elapsedMs > 0 ? Math.round((verified / elapsedMs) * 3_600_000 * 10) / 10 : 0;
+  const recentVerified = Math.max(0, Number(coverage.recentVerified || 0));
+  const startedAt = coverage.recentStartedAt ? new Date(coverage.recentStartedAt) : null;
+  const elapsedMs = startedAt ? Math.max(60_000, Date.now() - startedAt.getTime()) : 0;
+  const ratePerHour = elapsedMs > 0 ? Math.round((recentVerified / elapsedMs) * 3_600_000 * 10) / 10 : 0;
   const remaining = Math.max(0, shopifyTotal - verified);
   const value = {
     total: shopifyTotal,
@@ -1260,6 +1269,7 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
     remaining,
     completionPercent: shopifyTotal ? Math.round((verified / shopifyTotal) * 1000) / 10 : 0,
     startedAt,
+    recentVerified,
     elapsedSeconds: Math.round(elapsedMs / 1000),
     ratePerHour,
     estimatedHoursRemaining: ratePerHour > 0 ? Math.round((remaining / ratePerHour) * 10) / 10 : null,
