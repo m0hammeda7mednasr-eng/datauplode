@@ -53,43 +53,6 @@ function isImportPlaceholder(title: string) {
   return /^(?:Excel Import Issue|Blocked Source Product)\b/i.test(clean(title));
 }
 
-async function countFullyVerified() {
-  const rows = await prisma.$queryRawUnsafe<Array<{ count: number }>>(`
-    WITH progress AS (
-      SELECT
-        s."id" AS "sourceProductId",
-        MAX(a."createdAt") FILTER (
-          WHERE a."action"='SYNC_PRODUCT_CATALOG_SET'
-            AND COALESCE(a."details", '') ~ '"readbackVerified"[[:space:]]*:[[:space:]]*true'
-        ) AS "catalogSuccessAt",
-        MAX(a."createdAt") FILTER (
-          WHERE a."action" IN ('SYNC_PRODUCT_CATALOG_SET','SYNC_PRICE_STOCK_ONLY')
-            AND COALESCE(a."details", '') ~ '"readbackVerified"[[:space:]]*:[[:space:]]*true'
-        ) AS "priceStockSuccessAt",
-        MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRODUCT_CATALOG_FAILED') AS "catalogFailureAt",
-        MAX(a."createdAt") FILTER (WHERE a."action"='SYNC_PRICE_STOCK_FAILED') AS "priceStockFailureAt"
-      FROM "SourceProduct" s
-      INNER JOIN "ShopifyProduct" sp ON sp."sourceProductId"=s."id"
-      LEFT JOIN "AuditLog" a ON a."sourceProductId"=s."id"
-        AND a."action" IN (
-          'SYNC_PRODUCT_CATALOG_SET',
-          'SYNC_PRICE_STOCK_ONLY',
-          'SYNC_PRODUCT_CATALOG_FAILED',
-          'SYNC_PRICE_STOCK_FAILED'
-        )
-      WHERE LOWER(COALESCE(sp."status", ''))='active'
-      GROUP BY s."id"
-    )
-    SELECT COUNT(*)::int AS count
-    FROM progress
-    WHERE "catalogSuccessAt" IS NOT NULL
-      AND "priceStockSuccessAt" IS NOT NULL
-      AND ("catalogFailureAt" IS NULL OR "catalogFailureAt" <= "catalogSuccessAt")
-      AND ("priceStockFailureAt" IS NULL OR "priceStockFailureAt" <= "priceStockSuccessAt")
-  `);
-  return Number(rows[0]?.count || 0);
-}
-
 async function runCycle() {
   if (workerRunning) return;
   workerRunning = true;
@@ -189,7 +152,6 @@ async function runCycle() {
       return;
     }
 
-    const fullyBefore = await countFullyVerified();
     const client = await ShopifyService.getClientFromDb(prisma);
     const location = await ShopifyService.getInventoryLocation(client);
     const results: Array<{ id: string; ok: boolean; title: string; error?: string }> = [];
@@ -247,7 +209,6 @@ async function runCycle() {
       Array.from({ length: Math.min(concurrency, selected.length) }, () => worker()),
     );
 
-    const fullyAfter = await countFullyVerified();
     const ok = results.filter((result) => result.ok).length;
     const failed = results.length - ok;
     console.log(JSON.stringify({
@@ -255,9 +216,6 @@ async function runCycle() {
       selected: selected.length,
       ok,
       failed,
-      fullyBefore,
-      fullyAfter,
-      addedFullyVerified: fullyAfter - fullyBefore,
       elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
       selectedDomains: selected.map((candidate) => matchingDomain(candidate.url, domains)),
       sampleFailures: results
