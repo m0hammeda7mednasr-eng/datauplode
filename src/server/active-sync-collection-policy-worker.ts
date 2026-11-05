@@ -197,7 +197,14 @@ export function startActiveSyncCollectionPolicyWorker() {
     return;
   }
   console.log("[active-sync-policy] enabled for Next + Centrepoint");
-  scheduleNext(20_000);
+  // Keep this policy pass away from the catalog worker's startup and five-minute cadence.
+  const initialDelaySeconds = positiveInt(
+    "ACTIVE_SYNC_COLLECTION_POLICY_INITIAL_DELAY_SECONDS",
+    90,
+    30,
+    600,
+  );
+  scheduleNext(initialDelaySeconds * 1000);
 }
 
 startActiveSyncCollectionPolicyWorker();
