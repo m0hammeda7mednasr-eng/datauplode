@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { prisma } from "../db.js";
 
 const ACTION = "SCRAPERAPI_CREDIT_RESERVED";
@@ -49,6 +50,13 @@ function configuredKeys() {
   return [...new Set([...pooled, legacy].map((value) => value.trim()).filter(Boolean))];
 }
 
+function configuredPoolId() {
+  return crypto
+    .createHash("sha256")
+    .update(configuredKeys().sort().join("\n"))
+    .digest("hex");
+}
+
 export async function getScraperApiAccountUsage() {
   if (accountUsageCache && Date.now() - accountUsageCache.sampledAt.getTime() < ACCOUNT_USAGE_CACHE_MS) {
     return accountUsageCache;
@@ -77,7 +85,7 @@ export async function getScraperApiAccountUsage() {
   return accountUsagePromise;
 }
 
-async function usedSince(client: any, createdAt: Date) {
+async function usedSince(client: any, createdAt: Date, poolId: string) {
   const rows = await client.$queryRawUnsafe(`
     SELECT COALESCE(SUM(
       CASE
@@ -91,8 +99,10 @@ async function usedSince(client: any, createdAt: Date) {
       END
     ), 0)::text AS "total"
     FROM "AuditLog"
-    WHERE "action" = $1 AND "createdAt" >= $2
-  `, ACTION, createdAt) as Array<{ total: string }>;
+    WHERE "action" = $1
+      AND "createdAt" >= $2
+      AND COALESCE("details"::jsonb ->> 'poolId', '') = $3
+  `, ACTION, createdAt, poolId) as Array<{ total: string }>;
   const total = Number(rows[0]?.total || 0);
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
@@ -106,6 +116,7 @@ function defaultDailyLimit(monthlyLimit: number, now = new Date()) {
 
 export async function reserveScraperApiCredits(url: string, credits: number) {
   const now = new Date();
+  const poolId = configuredPoolId();
   const providerUsage = await getScraperApiAccountUsage();
   const monthlyLimit = positiveLimit(
     "SCRAPERAPI_MONTHLY_CREDIT_LIMIT",
@@ -130,9 +141,9 @@ export async function reserveScraperApiCredits(url: string, credits: number) {
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${ADVISORY_LOCK_ID})`);
 
     const [dailyUsed, appCycleUsed, reservationsSinceProviderSample] = await Promise.all([
-      dailyLimit ? usedSince(tx, dayStart) : Promise.resolve(0),
-      monthlyLimit ? usedSince(tx, cycleStart) : Promise.resolve(0),
-      providerUsage ? usedSince(tx, providerUsage.sampledAt) : Promise.resolve(0),
+      dailyLimit ? usedSince(tx, dayStart, poolId) : Promise.resolve(0),
+      monthlyLimit ? usedSince(tx, cycleStart, poolId) : Promise.resolve(0),
+      providerUsage ? usedSince(tx, providerUsage.sampledAt, poolId) : Promise.resolve(0),
     ]);
     const cycleUsed = providerUsage
       ? providerUsage.creditsUsed + reservationsSinceProviderSample
@@ -156,6 +167,7 @@ export async function reserveScraperApiCredits(url: string, credits: number) {
           credits: accounted,
           requestedCredits: requested,
           accountingVersion: 2,
+          poolId,
           hostname,
           billingCycleStart: cycleStart.toISOString(),
           billingCycleEnd: cycleEnd.toISOString(),
