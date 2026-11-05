@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -23,8 +23,6 @@ import { toast } from 'sonner';
 import { apiErrorMessage } from '../lib/api';
 
 const PAGE_SIZE = 100;
-const RECONCILE_CONFIRMATION = 'LINK_EXACT_SHOPIFY_CATALOG';
-
 type CatalogResponse = {
   success: boolean;
   legacy?: boolean;
@@ -37,6 +35,8 @@ type CatalogResponse = {
     needsLink: number;
     needsReview: number;
     pausedOrLinked: number;
+    next?: number;
+    centrepoint?: number;
   };
   filteredTotal: number;
   offset: number;
@@ -101,12 +101,13 @@ function legacyProduct(item: any) {
   };
 }
 
-async function loadCatalog(search: string, status: string, offset: number, refresh = false): Promise<CatalogResponse> {
+async function loadCatalog(search: string, offset: number, refresh = false): Promise<CatalogResponse> {
   try {
     const { data } = await axios.get('/api/shopify-catalog/link-state', {
       params: {
         search: search || undefined,
-        status: status === 'all' ? undefined : status,
+        status: 'active',
+        scope: 'active_sync',
         offset,
         limit: PAGE_SIZE,
         refresh: refresh ? 'true' : undefined,
@@ -121,20 +122,31 @@ async function loadCatalog(search: string, status: string, offset: number, refre
       axios.get('/api/products', { params: { limit: 200 } }),
       axios.get('/api/products/stats'),
     ]);
-    const items = Array.isArray(data) ? data.map(legacyProduct) : [];
-    const linked = Number(stats?.totalLinked || items.length);
-    const activeSync = Number(stats?.activeSync || 0);
+    const allItems = Array.isArray(data) ? data.map(legacyProduct) : [];
+    const items = allItems.filter((item: any) => {
+      try {
+        const host = new URL(item.sourceUrl).hostname.toLowerCase();
+        return host.endsWith('next.ae') || host.endsWith('centrepointstores.com');
+      } catch {
+        return false;
+      }
+    }).filter((item: any) => item.syncEnabled && item.syncStatus === 'active');
+    const next = items.filter((item: any) => String(item.sourceUrl).includes('next.ae')).length;
+    const centrepoint = items.filter((item: any) => String(item.sourceUrl).includes('centrepointstores.com')).length;
+    const activeSync = items.length || Number(stats?.activeSync || 0);
     return {
       success: true,
       legacy: true,
       counts: {
-        shopifyTotal: linked,
-        linked,
+        shopifyTotal: activeSync,
+        linked: activeSync,
         activeSync,
         matchedReady: 0,
         needsLink: 0,
         needsReview: Number(stats?.pendingReview || 0),
-        pausedOrLinked: Math.max(0, linked - activeSync),
+        pausedOrLinked: 0,
+        next,
+        centrepoint,
       },
       filteredTotal: items.length,
       offset: 0,
@@ -148,10 +160,8 @@ async function loadCatalog(search: string, status: string, offset: number, refre
 export default function LinkedProducts() {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
-  const [status, setStatus] = useState('all');
   const [offset, setOffset] = useState(0);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -162,8 +172,8 @@ export default function LinkedProducts() {
   }, [searchInput]);
 
   const catalogQuery = useQuery({
-    queryKey: ['shopify-catalog-link-state', search, status, offset],
-    queryFn: () => loadCatalog(search, status, offset),
+    queryKey: ['shopify-catalog-link-state', 'active_sync', search, offset],
+    queryFn: () => loadCatalog(search, offset),
     refetchInterval: (query) => {
       const data = query.state.data as CatalogResponse | undefined;
       return ['pending', 'running'].includes(String(data?.latestJob?.status || '')) ? 5000 : 30000;
@@ -181,34 +191,17 @@ export default function LinkedProducts() {
     needsLink: 0,
     needsReview: 0,
     pausedOrLinked: 0,
+    next: 0,
+    centrepoint: 0,
   };
-  const running = ['pending', 'running'].includes(String(catalog?.latestJob?.status || ''));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil((catalog?.filteredTotal || 0) / PAGE_SIZE));
 
-  const reconcile = useMutation({
-    mutationFn: async () => (await axios.post('/api/shopify-catalog/reconcile', { confirm: RECONCILE_CONFIRMATION })).data,
-    onSuccess: (data) => {
-      toast.success(data?.alreadyRunning ? 'Catalog linking is already running.' : 'Exact Shopify catalog linking started. Discovery uses 0 ScraperAPI credits.');
-      queryClient.invalidateQueries({ queryKey: ['shopify-catalog-link-state'] });
-    },
-    onError: (error) => toast.error(apiErrorMessage(error, 'Failed to start catalog linking')),
-  });
-
-  const filters = useMemo(() => [
-    ['all', 'All Shopify', counts.shopifyTotal],
-    ['linked', 'Linked', counts.linked],
-    ['active', 'Active Sync', counts.activeSync],
-    ['matched', 'Ready to Link', counts.matchedReady],
-    ['needs_review', 'Needs Review', counts.needsReview],
-    ['needs_link', 'No Match', counts.needsLink],
-  ] as const, [counts]);
-
   async function forceRefresh() {
     try {
-      await loadCatalog(search, status, offset, true);
+      await loadCatalog(search, offset, true);
       await catalogQuery.refetch();
-      toast.success('Shopify + sheets refreshed');
+      toast.success('Next + Centrepoint sync refreshed');
     } catch (error) {
       toast.error(apiErrorMessage(error, 'Failed to refresh catalog'));
     }
@@ -220,15 +213,12 @@ export default function LinkedProducts() {
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-500"><ShoppingBag className="h-4 w-4" />Shopify catalog is the source of truth</div>
           <h1 className="mt-1 text-3xl font-black tracking-tight text-zinc-900">Catalog Sync Control</h1>
-          <p className="mt-1 max-w-4xl text-sm font-medium text-slate-500">One operational list for every Shopify product, its source relationship, variants, price, stock and verified sync history.</p>
+          <p className="mt-1 max-w-4xl text-sm font-medium text-slate-500">Live price, stock and variant verification for Next and Centrepoint products only.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button onClick={forceRefresh} disabled={catalogQuery.isFetching} className="inline-flex items-center gap-2 rounded-xl border bg-white px-4 py-2.5 text-xs font-black disabled:opacity-50">
-            <RefreshCw className={cn('h-4 w-4', catalogQuery.isFetching && 'animate-spin')} />Refresh Shopify + Sheets
+            <RefreshCw className={cn('h-4 w-4', catalogQuery.isFetching && 'animate-spin')} />Refresh active sync
           </button>
-          {!catalog?.legacy && <button onClick={() => reconcile.mutate()} disabled={reconcile.isPending || running} className="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-black text-white disabled:opacity-50">
-            {reconcile.isPending || running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}{running ? 'Linking catalog…' : 'Link all exact matches'}
-          </button>}
         </div>
       </div>
 
@@ -240,28 +230,17 @@ export default function LinkedProducts() {
 
       {catalog?.cycle && <CatalogCycle cycle={catalog.cycle} />}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        <Metric label="Shopify Products" value={counts.shopifyTotal} tone="slate" />
-        <Metric label="Linked" value={counts.linked} tone="blue" />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Active Sync" value={counts.activeSync} tone="green" />
-        <Metric label="Ready to Link" value={counts.matchedReady} tone="sky" />
-        <Metric label="Needs Review" value={counts.needsReview} tone="amber" />
-        <Metric label="No Match" value={counts.needsLink} tone="rose" />
+        <Metric label="Next" value={counts.next || 0} tone="blue" />
+        <Metric label="Centrepoint" value={counts.centrepoint || 0} tone="sky" />
+        <Metric label="Fully Verified" value={catalog?.cycle?.fullyVerified || 0} tone="slate" />
       </div>
-
-      {catalog?.latestJob && !catalog.legacy && <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">{running ? <Loader2 className="h-4 w-4 animate-spin text-sky-600" /> : catalog.latestJob.status === 'completed' ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-amber-600" />}
-            <div><p className="text-xs font-black">Catalog mapping · {catalog.latestJob.status}</p><p className="text-[11px] text-slate-500">{Number(catalog.latestJob.result?.linked || 0).toLocaleString()} linked · {Number(catalog.latestJob.result?.failed || 0).toLocaleString()} conflicts · 0 ScraperAPI credits</p></div>
-          </div>
-          {catalog.scan && <div className="text-[10px] font-bold uppercase text-slate-400">{Number(catalog.scan.shopifyProductsRead || 0).toLocaleString()} Shopify · {Number(catalog.scan.sheetRowsRead || 0).toLocaleString()} sheet rows</div>}
-        </div>
-      </div>}
 
       <div className="rounded-2xl border bg-white p-4 shadow-sm">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
           <div className="relative w-full xl:max-w-xl"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search product, Shopify ID, SKU, source URL, sheet…" className="w-full rounded-xl border bg-slate-50 py-2.5 pl-10 pr-4 text-sm outline-none" /></div>
-          <div className="flex flex-wrap gap-2">{filters.map(([value, label, count]) => <button key={value} onClick={() => { setStatus(value); setOffset(0); }} className={cn('rounded-full border px-3 py-1.5 text-[10px] font-black uppercase', status === value ? 'border-slate-950 bg-slate-950 text-white' : 'bg-white text-slate-500')}>{label} · {Number(count).toLocaleString()}</button>)}</div>
+          <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[10px] font-black uppercase text-emerald-700">Next + Centrepoint only</div>
         </div>
       </div>
 

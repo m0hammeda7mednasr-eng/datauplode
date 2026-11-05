@@ -106,8 +106,14 @@ const assertions: Array<[string, boolean]> = [
       /synchronous:\s*true/.test(shopifyService),
   ],
   [
-    "full-catalog sync never deletes the Shopify product",
-    !/deleteProduct|restDelete|productDelete/.test(fullCatalogSync),
+    "sold-out deletion is opt-in, requires repeated evidence, and verifies Shopify read-back",
+    /SYNC_SOLD_OUT_DELETE_ENABLED=false/.test(envExample) &&
+      /SYNC_SOLD_OUT_DELETE_CONFIRMATIONS=2/.test(envExample) &&
+      /Math\.min\(3, Math\.max\(2/.test(fullCatalogSync) &&
+      /product\.variants\.every/.test(fullCatalogSync) &&
+      /confirmation < required/.test(fullCatalogSync) &&
+      /ShopifyService\.deleteProduct/.test(fullCatalogSync) &&
+      /if \(readback\) throw new Error\("Sold-out Shopify deletion could not be verified"\)/.test(fullCatalogSync),
   ],
   [
     "full-catalog sync requires exact read-back",

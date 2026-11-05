@@ -1014,6 +1014,51 @@ async function dbCounts() {
   return { shopifyTotal: linked, linked, activeSync, matchedReady: 0, needsLink: 0, needsReview: 0, pausedOrLinked: linked - activeSync };
 }
 
+async function activeSyncCounts() {
+  const activeWhere: any = {
+    syncEnabled: true,
+    sourceProduct: {
+      syncStatus: "active",
+      OR: [
+        { url: { contains: "next.ae", mode: "insensitive" } },
+        { url: { contains: "centrepointstores.com", mode: "insensitive" } },
+      ],
+    },
+  };
+  const [activeSync, next, centrepoint] = await Promise.all([
+    prisma.shopifyProduct.count({ where: activeWhere }),
+    prisma.shopifyProduct.count({
+      where: {
+        ...activeWhere,
+        sourceProduct: {
+          syncStatus: "active",
+          url: { contains: "next.ae", mode: "insensitive" },
+        },
+      },
+    }),
+    prisma.shopifyProduct.count({
+      where: {
+        ...activeWhere,
+        sourceProduct: {
+          syncStatus: "active",
+          url: { contains: "centrepointstores.com", mode: "insensitive" },
+        },
+      },
+    }),
+  ]);
+  return {
+    shopifyTotal: activeSync,
+    linked: activeSync,
+    activeSync,
+    matchedReady: 0,
+    needsLink: 0,
+    needsReview: 0,
+    pausedOrLinked: 0,
+    next,
+    centrepoint,
+  };
+}
+
 const PRODUCT_SYNC_ACTIONS = [
   "LINK_EXISTING_SHOPIFY_CATALOG_INDEX_EXACT",
   "SYNC_PRODUCT_CATALOG_SET",
@@ -1125,6 +1170,8 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
             'SYNC_PRICE_STOCK_FAILED'
           )
         WHERE LOWER(COALESCE(sp."status", '')) = 'active'
+          AND sp."syncEnabled" = true
+          AND LOWER(COALESCE(s."syncStatus", '')) = 'active'
         GROUP BY s."id"
       ), states AS (
         SELECT
@@ -1230,8 +1277,19 @@ async function catalogCycleSummary(shopifyTotal: number, linked: number) {
   return value;
 }
 
-async function dbOnlyResponse(search: string, status: string, offset: number, limit: number) {
-  const activeFilter = status === "active" ? { syncEnabled: true, sourceProduct: { syncStatus: "active" } } : {};
+async function dbOnlyResponse(search: string, status: string, offset: number, limit: number, activeScope = false) {
+  const activeFilter = status === "active" ? {
+    syncEnabled: true,
+    sourceProduct: {
+      syncStatus: "active",
+      ...(activeScope ? {
+        OR: [
+          { url: { contains: "next.ae", mode: "insensitive" as const } },
+          { url: { contains: "centrepointstores.com", mode: "insensitive" as const } },
+        ],
+      } : {}),
+    },
+  } : {};
   const searchFilter = search ? {
     OR: [
       { shopifyId: { contains: search, mode: "insensitive" as const } },
@@ -1247,7 +1305,7 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
       success: true,
       legacy: false,
       degraded: true,
-      counts: await dbCounts(),
+      counts: activeScope ? await activeSyncCounts() : await dbCounts(),
       filteredTotal: 0,
       offset,
       limit,
@@ -1326,7 +1384,7 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
       })),
     };
   });
-  const counts = await dbCounts();
+  const counts = activeScope ? await activeSyncCounts() : await dbCounts();
   return {
     success: true,
     sourceOfTruth: "shopify_database_connection",
@@ -1347,10 +1405,22 @@ async function dbOnlyResponse(search: string, status: string, offset: number, li
 router.get("/shopify-catalog/link-state", async (req, res) => {
   const search = clean(req.query.search).toLowerCase();
   const status = clean(req.query.status).toLowerCase() || "all";
+  const activeScope = clean(req.query.scope).toLowerCase() === "active_sync";
   const offset = Math.max(0, Number(req.query.offset || 0) || 0);
   const limit = Math.max(1, Math.min(250, Number(req.query.limit || 100) || 100));
   const refresh = String(req.query.refresh || "").toLowerCase() === "true";
   try {
+    if (activeScope) {
+      const scoped = await dbOnlyResponse(search, "active", offset, limit, true);
+      return res.json({
+        ...scoped,
+        degraded: false,
+        scope: {
+          mode: "active_sync_collections",
+          collections: ["Next", "Centrepoint"],
+        },
+      });
+    }
     await ensureCacheTable();
     if (refresh) {
       void startBackgroundJob(false).catch((error) => console.error("[shopify-catalog] refresh start failed:", error));

@@ -87,6 +87,143 @@ function sourceScrapeTimeoutMs() {
   return Math.min(180_000, Math.max(30_000, Math.floor(configured)));
 }
 
+const SOLD_OUT_CONFIRMATION_ACTION = "SYNC_SOURCE_SOLD_OUT_CONFIRMATION";
+const SOLD_OUT_DELETED_ACTION = "SYNC_SOURCE_SOLD_OUT_DELETED";
+
+function soldOutDeletionEnabled() {
+  return String(process.env.SYNC_SOLD_OUT_DELETE_ENABLED || "").toLowerCase() === "true";
+}
+
+function requiredSoldOutConfirmations() {
+  const configured = Number(process.env.SYNC_SOLD_OUT_DELETE_CONFIRMATIONS || 2);
+  if (!Number.isFinite(configured)) return 2;
+  return Math.min(3, Math.max(2, Math.floor(configured)));
+}
+
+function allVariantsSoldOut(product: NormalizedProduct) {
+  return product.variants.length > 0 && product.variants.every(
+    (variant) => variant.available === false || variant.stockStatus === "out_of_stock",
+  );
+}
+
+async function deleteConfirmedSoldOutProduct(options: {
+  prisma: PrismaClient;
+  client: ShopifyGraphqlClient;
+  sourceProduct: any;
+  fresh: NormalizedProduct;
+  oldRaw: any;
+}) {
+  const { prisma, client, sourceProduct, fresh, oldRaw } = options;
+  const sourceProductId = sourceProduct.id;
+  const shopifyProductId = sourceProduct.shopifyProduct.shopifyId;
+  const required = requiredSoldOutConfirmations();
+  const lastHealthySync = await prisma.auditLog.findFirst({
+    where: { sourceProductId, action: "SYNC_PRODUCT_CATALOG_SET" },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+  const previousConfirmations = await prisma.auditLog.count({
+    where: {
+      sourceProductId,
+      action: SOLD_OUT_CONFIRMATION_ACTION,
+      ...(lastHealthySync ? { createdAt: { gt: lastHealthySync.createdAt } } : {}),
+    },
+  });
+  const confirmation = previousConfirmations + 1;
+
+  await prisma.auditLog.create({
+    data: {
+      sourceProductId,
+      action: SOLD_OUT_CONFIRMATION_ACTION,
+      userId: "System",
+      details: JSON.stringify({
+        confirmation,
+        required,
+        sourceUrl: sourceProduct.url,
+        variants: fresh.variants.length,
+        confirmedAt: new Date().toISOString(),
+      }),
+    },
+  });
+
+  if (confirmation < required) {
+    throw new Error(`Source sold out confirmation ${confirmation}/${required}; Shopify deletion deferred`);
+  }
+
+  const before = await ShopifyService.getProductBasic(client, shopifyProductId).catch(() => null);
+  if (before) await ShopifyService.deleteProduct(client, shopifyProductId);
+
+  let readback = before;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    readback = await ShopifyService.getProductBasic(client, shopifyProductId).catch(() => null);
+    if (!readback) break;
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+  }
+  if (readback) throw new Error("Sold-out Shopify deletion could not be verified");
+
+  await prisma.$executeRawUnsafe(`
+    UPDATE "ShopifyCatalogIndexV2"
+    SET "status" = 'DELETED',
+        "matchStatus" = 'deleted',
+        "reason" = 'source_sold_out_confirmed_deleted',
+        "updatedAt" = NOW()
+    WHERE "shopifyId" = $1
+  `, shopifyProductId).catch(() => undefined);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shopifyVariant.deleteMany({
+      where: { shopifyProductId: sourceProduct.shopifyProduct.id },
+    });
+    await tx.shopifyProduct.delete({
+      where: { id: sourceProduct.shopifyProduct.id },
+    });
+    await tx.sourceVariant.updateMany({
+      where: { sourceProductId },
+      data: { available: false, stockStatus: "out_of_stock" },
+    });
+    await tx.sourceProduct.update({
+      where: { id: sourceProductId },
+      data: {
+        syncStatus: "paused",
+        lastScrapedAt: new Date(),
+        raw: JSON.stringify({
+          ...oldRaw,
+          soldOutDeletion: {
+            confirmed: true,
+            confirmations: confirmation,
+            deletedAt: new Date().toISOString(),
+            shopifyProductId,
+          },
+        }),
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        sourceProductId,
+        action: SOLD_OUT_DELETED_ACTION,
+        userId: "System",
+        details: JSON.stringify({
+          shopifyProductId,
+          sourceUrl: sourceProduct.url,
+          confirmations: confirmation,
+          deleteReadbackVerified: true,
+          deletedAt: new Date().toISOString(),
+        }),
+      },
+    });
+  }, { maxWait: 10_000, timeout: 30_000 });
+
+  return {
+    success: true,
+    deleted: true,
+    soldOut: true,
+    sourceProductId,
+    shopifyProductId,
+    confirmations: confirmation,
+    readbackVerified: true,
+  };
+}
+
 function optionValueForVariant(variant: NormalizedProduct["variants"][number], optionName: string) {
   return clean(
     variant.optionValues?.[optionName] ||
@@ -244,6 +381,15 @@ export async function syncFullProductCatalog(options: FullCatalogSyncOptions) {
   validateFreshProduct(fresh, multiplier);
 
   const client = options.client || await ShopifyService.getClientFromDb(prisma);
+  if (soldOutDeletionEnabled() && allVariantsSoldOut(fresh)) {
+    return deleteConfirmedSoldOutProduct({
+      prisma,
+      client,
+      sourceProduct: product,
+      fresh,
+      oldRaw,
+    });
+  }
   const location = options.location || await ShopifyService.getInventoryLocation(client);
   const shopifyProductId = product.shopifyProduct.shopifyId;
   const before = await ShopifyService.getProductCatalogSnapshot(client, shopifyProductId);

@@ -13,5 +13,6 @@ import './src/server/catalog-source-repair-hotfix.js';
 import './src/server/shopify-catalog-hardcase-hotfix.js';
 import './src/server/catalog-stored-fallback-worker.js';
 import './src/server/catalog-parallel-sync-worker.js';
+import './src/server/active-sync-collection-policy-worker.js';
 import './src/server/catalog-relation-audit-worker.js';
 await import('./server.js');

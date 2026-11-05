@@ -50,7 +50,7 @@ for (const candidate of candidates) {
       requireVariantExpansion: true,
     });
     results.push(result);
-    if (result.skipped === true) {
+    if ("skipped" in result && result.skipped === true) {
       await prisma.auditLog.create({
         data: {
           sourceProductId: candidate.id,
