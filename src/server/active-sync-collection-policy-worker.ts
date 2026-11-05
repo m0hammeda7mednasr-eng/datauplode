@@ -11,6 +11,16 @@ function positiveInt(name: string, fallback: number, min: number, max: number) {
 }
 
 function endpoint() {
+  const configuredBase = String(process.env.ACTIVE_SYNC_COLLECTION_POLICY_BASE_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (configuredBase) {
+    return `${configuredBase}/api/shopify/catalog/enforce-active-sync-collections`;
+  }
+  const railwayDomain = String(process.env.RAILWAY_PUBLIC_DOMAIN || "").trim();
+  if (railwayDomain) {
+    return `https://${railwayDomain}/api/shopify/catalog/enforce-active-sync-collections`;
+  }
   const port = Number(process.env.PORT || 8080);
   return `http://127.0.0.1:${port}/api/shopify/catalog/enforce-active-sync-collections`;
 }
