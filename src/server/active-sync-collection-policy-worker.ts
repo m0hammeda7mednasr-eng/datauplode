@@ -29,8 +29,8 @@ async function runCycle() {
   const startedAt = Date.now();
   console.log("[active-sync-policy] cycle started");
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      const beforeRows = await tx.$queryRawUnsafe<PolicyCounts[]>(`
+    const result = await (async () => {
+      const beforeRows = await prisma.$queryRawUnsafe<PolicyCounts[]>(`
         SELECT
           COUNT(*) FILTER (
             WHERE LOWER(COALESCE(sp."status", '')) = 'active'
@@ -60,7 +60,7 @@ async function runCycle() {
       `);
       const before = beforeRows[0] || { allowed: 0, toEnable: 0, toDisable: 0 };
 
-      await tx.$executeRawUnsafe(`
+      await prisma.$executeRawUnsafe(`
         UPDATE "ShopifyProduct" sp
         SET "syncEnabled" = TRUE,
             "syncPrice" = TRUE,
@@ -78,7 +78,7 @@ async function runCycle() {
             OR sp."syncImages" = FALSE
           )
       `);
-      await tx.$executeRawUnsafe(`
+      await prisma.$executeRawUnsafe(`
         UPDATE "SourceProduct" source
         SET "syncStatus" = 'active', "updatedAt" = NOW()
         WHERE source."syncStatus" <> 'active'
@@ -90,7 +90,7 @@ async function runCycle() {
               AND LOWER(COALESCE(sp."status", '')) = 'active'
           )
       `);
-      await tx.$executeRawUnsafe(`
+      await prisma.$executeRawUnsafe(`
         UPDATE "ShopifyProduct" sp
         SET "syncEnabled" = FALSE, "updatedAt" = NOW()
         FROM "SourceProduct" source
@@ -101,7 +101,7 @@ async function runCycle() {
             AND ${ALLOWED_SOURCE_SQL}
           )
       `);
-      await tx.$executeRawUnsafe(`
+      await prisma.$executeRawUnsafe(`
         UPDATE "SourceProduct" source
         SET "syncStatus" = 'paused', "updatedAt" = NOW()
         WHERE source."syncStatus" = 'active'
@@ -116,7 +116,7 @@ async function runCycle() {
           )
       `);
 
-      const afterRows = await tx.$queryRawUnsafe<Array<{
+      const afterRows = await prisma.$queryRawUnsafe<Array<{
         activeAllowed: number | bigint;
         activeOutside: number | bigint;
       }>>(`
@@ -140,7 +140,7 @@ async function runCycle() {
       `);
       const after = afterRows[0] || { activeAllowed: 0, activeOutside: 0 };
 
-      await tx.auditLog.create({
+      await prisma.auditLog.create({
         data: {
           action: "ENFORCE_ACTIVE_SYNC_DOMAIN_POLICY",
           userId: "System",
@@ -161,7 +161,7 @@ async function runCycle() {
         activeAllowedAfter: Number(after.activeAllowed),
         activeOutsideAfter: Number(after.activeOutside),
       };
-    }, { timeout: 60_000 });
+    })();
 
     console.log(JSON.stringify({
       worker: "active-sync-collection-policy-worker",
