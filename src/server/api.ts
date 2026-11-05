@@ -6163,6 +6163,243 @@ router.post("/shopify/collections/assign-products", async (req, res) => {
   }
 });
 
+router.post("/shopify/catalog/enforce-active-sync-collections", async (req, res) => {
+  const CONFIRMATION = "ENFORCE_NEXT_CENTREPOINT_ACTIVE_SYNC";
+  const REQUIRED_SHOP_DOMAIN = "09fgkz-6n.myshopify.com";
+  const ALLOWED_COLLECTION_HANDLES = ["next", "centrepoint"];
+  const dryRun = req.body?.dryRun !== false;
+
+  const productIdKey = (value: unknown) => {
+    const normalized = String(value || "").trim();
+    return normalized.split("/").filter(Boolean).at(-1) || normalized;
+  };
+
+  try {
+    const connection = await prisma.shopifyConnection.findFirst({
+      where: { isConnected: true },
+      select: { shopDomain: true },
+    });
+    const shopDomain = String(connection?.shopDomain || "").trim().toLocaleLowerCase();
+    if (shopDomain !== REQUIRED_SHOP_DOMAIN) {
+      return res.status(409).json({
+        success: false,
+        error: "Connected Shopify store does not match the required Dabdoob store",
+        shopDomain: shopDomain || null,
+      });
+    }
+
+    if (!dryRun) {
+      const configuredToken = String(process.env.CATALOG_AUDIT_WRITE_TOKEN || "").trim();
+      const suppliedToken = String(req.header("x-catalog-audit-write-token") || "").trim();
+      const configuredBuffer = Buffer.from(configuredToken);
+      const suppliedBuffer = Buffer.from(suppliedToken);
+      const authorized = configuredBuffer.length > 0
+        && configuredBuffer.length === suppliedBuffer.length
+        && crypto.timingSafeEqual(configuredBuffer, suppliedBuffer);
+      if (!authorized) {
+        return res.status(403).json({
+          success: false,
+          error: "A valid catalog write token is required",
+        });
+      }
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const collections = await ShopifyService.getCollections(client);
+    const allowedCollections = ALLOWED_COLLECTION_HANDLES.map((handle) => {
+      const collection = collections.find((entry: any) => (
+        String(entry?.handle || "").trim().toLocaleLowerCase() === handle
+      ));
+      if (!collection) throw new Error(`Required Shopify collection was not found: ${handle}`);
+      return collection;
+    });
+
+    const collectionSnapshots = [];
+    for (const collection of allowedCollections) {
+      collectionSnapshots.push(await ShopifyService.getCollectionProductIds(client, collection.id));
+    }
+    const allowedProductKeys = new Set(
+      collectionSnapshots.flatMap((snapshot) => snapshot.productIds).map(productIdKey),
+    );
+    if (allowedProductKeys.size === 0) {
+      throw new Error("Required Shopify collections contain no products; refusing policy change");
+    }
+
+    const links = await prisma.shopifyProduct.findMany({
+      select: {
+        id: true,
+        shopifyId: true,
+        sourceProductId: true,
+        status: true,
+        syncEnabled: true,
+        syncPrice: true,
+        syncInventory: true,
+        syncImages: true,
+        sourceProduct: { select: { syncStatus: true, url: true } },
+      },
+    });
+    const allowedLinks = links.filter((link) => (
+      allowedProductKeys.has(productIdKey(link.shopifyId))
+      && String(link.status || "").trim().toLocaleLowerCase() === "active"
+    ));
+    const allowedLinkIds = new Set(allowedLinks.map((link) => link.id));
+    const outsideLinks = links.filter((link) => !allowedLinkIds.has(link.id));
+    const isActive = (link: typeof links[number]) => (
+      link.syncEnabled && link.sourceProduct.syncStatus === "active"
+    );
+    const toEnable = allowedLinks.filter((link) => (
+      !isActive(link) || !link.syncPrice || !link.syncInventory || !link.syncImages
+    ));
+    const toDisable = outsideLinks.filter(isActive);
+    const allowedSourceHosts = allowedLinks.reduce<Record<string, number>>((counts, link) => {
+      let host = "invalid";
+      try {
+        host = new URL(link.sourceProduct.url).hostname.toLocaleLowerCase();
+      } catch {
+        // The invalid source remains visible in the dry-run report and will fail closed in sync.
+      }
+      counts[host] = (counts[host] || 0) + 1;
+      return counts;
+    }, {});
+    const planHash = crypto
+      .createHash("sha256")
+      .update([
+        ...allowedCollections.map((collection: any) => `collection:${collection.id}`),
+        ...allowedLinks.map((link) => `enable:${link.id}:${Number(isActive(link))}`),
+        ...outsideLinks.map((link) => `disable:${link.id}:${Number(isActive(link))}`),
+      ].sort().join("\n"))
+      .digest("hex");
+    const summary = {
+      shopDomain,
+      allowedCollections: collectionSnapshots.map((snapshot) => ({
+        id: snapshot.collection.id,
+        title: snapshot.collection.title,
+        handle: snapshot.collection.handle,
+        products: snapshot.productIds.length,
+      })),
+      allowedCollectionProducts: allowedProductKeys.size,
+      linkedProducts: links.length,
+      allowedLinkedActiveProducts: allowedLinks.length,
+      allowedUnlinkedProducts: Math.max(0, allowedProductKeys.size - allowedLinks.length),
+      currentlyActiveAllowed: allowedLinks.filter(isActive).length,
+      currentlyActiveOutside: toDisable.length,
+      toEnable: toEnable.length,
+      toDisable: toDisable.length,
+      allowedSourceHosts,
+      planHash,
+    };
+
+    if (dryRun) {
+      return res.json({ success: true, dryRun: true, confirmationRequired: CONFIRMATION, ...summary });
+    }
+    if (String(req.body?.confirm || "").trim() !== CONFIRMATION) {
+      return res.status(400).json({
+        success: false,
+        error: `Confirmation must equal ${CONFIRMATION}`,
+        ...summary,
+      });
+    }
+    if (String(req.body?.expectedPlanHash || "").trim() !== planHash) {
+      return res.status(409).json({
+        success: false,
+        error: "Active-sync plan changed; run dry-run again",
+        ...summary,
+      });
+    }
+    if (
+      Number(req.body?.expectedToEnable) !== toEnable.length
+      || Number(req.body?.expectedToDisable) !== toDisable.length
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Active-sync counts changed; run dry-run again",
+        ...summary,
+      });
+    }
+
+    const enabledLinkIds = allowedLinks.map((link) => link.id);
+    const enabledSourceIds = allowedLinks.map((link) => link.sourceProductId);
+    const disabledLinkIds = outsideLinks.map((link) => link.id);
+    const disabledSourceIds = outsideLinks.map((link) => link.sourceProductId);
+    await prisma.$transaction(async (tx) => {
+      if (enabledLinkIds.length > 0) {
+        await tx.shopifyProduct.updateMany({
+          where: { id: { in: enabledLinkIds } },
+          data: { syncEnabled: true, syncPrice: true, syncInventory: true, syncImages: true },
+        });
+        await tx.sourceProduct.updateMany({
+          where: { id: { in: enabledSourceIds } },
+          data: { syncStatus: "active" },
+        });
+      }
+      if (disabledLinkIds.length > 0) {
+        await tx.shopifyProduct.updateMany({
+          where: { id: { in: disabledLinkIds } },
+          data: { syncEnabled: false },
+        });
+        await tx.sourceProduct.updateMany({
+          where: { id: { in: disabledSourceIds } },
+          data: { syncStatus: "paused" },
+        });
+      }
+      await tx.$executeRawUnsafe(`
+        UPDATE "ShopifyCatalogIndexV2" catalog
+        SET "matchStatus" = CASE
+              WHEN sp."syncEnabled" = TRUE AND source."syncStatus" = 'active' THEN 'active'
+              ELSE 'linked'
+            END,
+            "updatedAt" = NOW()
+        FROM "ShopifyProduct" sp
+        JOIN "SourceProduct" source ON source."id" = sp."sourceProductId"
+        WHERE catalog."shopifyId" = sp."shopifyId"
+      `);
+      await tx.auditLog.create({
+        data: {
+          action: "ENFORCE_ACTIVE_SYNC_COLLECTION_POLICY",
+          userId: "System",
+          details: JSON.stringify({
+            allowedCollectionHandles: ALLOWED_COLLECTION_HANDLES,
+            planHash,
+            enabled: enabledLinkIds.length,
+            disabled: disabledLinkIds.length,
+          }),
+        },
+      });
+    }, { timeout: 120_000 });
+
+    const [activeAllowedAfter, activeOutsideAfter] = await Promise.all([
+      prisma.shopifyProduct.count({
+        where: {
+          id: { in: enabledLinkIds },
+          syncEnabled: true,
+          sourceProduct: { syncStatus: "active" },
+        },
+      }),
+      prisma.shopifyProduct.count({
+        where: {
+          id: { in: disabledLinkIds },
+          syncEnabled: true,
+          sourceProduct: { syncStatus: "active" },
+        },
+      }),
+    ]);
+    const verified = activeAllowedAfter === enabledLinkIds.length && activeOutsideAfter === 0;
+    return res.status(verified ? 200 : 409).json({
+      success: verified,
+      dryRun: false,
+      ...summary,
+      activeAllowedAfter,
+      activeOutsideAfter,
+      readbackVerified: verified,
+    });
+  } catch (error: any) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to enforce active-sync collection policy",
+    });
+  }
+});
+
 router.post("/shopify/catalog/purge-sold-out-summer", async (req, res) => {
   const CONFIRMATION = "DELETE_SOLD_OUT_AND_SUMMER_PRODUCTS";
   const REQUIRED_SHOP_DOMAIN = "09fgkz-6n.myshopify.com";
