@@ -2,6 +2,17 @@ import { prisma } from "./db.js";
 
 const ALLOWED_DOMAINS = ["next.ae", "centrepointstores.com"];
 
+const ALLOWED_SOURCE_SQL = `(
+  LOWER(COALESCE(source."url", '')) LIKE '%next.ae%'
+  OR LOWER(COALESCE(source."url", '')) LIKE '%centrepointstores.com%'
+)`;
+
+type PolicyCounts = {
+  allowed: number | bigint;
+  toEnable: number | bigint;
+  toDisable: number | bigint;
+};
+
 let started = false;
 let running = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -12,97 +23,153 @@ function positiveInt(name: string, fallback: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
-function allowedSource(url: string) {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return ALLOWED_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
-  } catch {
-    return false;
-  }
-}
-
 async function runCycle() {
   if (running) return;
   running = true;
   const startedAt = Date.now();
   console.log("[active-sync-policy] cycle started");
   try {
-    const links = await prisma.shopifyProduct.findMany({
-      select: {
-        id: true,
-        sourceProductId: true,
-        status: true,
-        syncEnabled: true,
-        syncPrice: true,
-        syncInventory: true,
-        syncImages: true,
-        sourceProduct: { select: { syncStatus: true, url: true } },
-      },
-    });
-    const allowedLinks = links.filter((link) => (
-      String(link.status || "").toLowerCase() === "active"
-      && allowedSource(link.sourceProduct.url)
-    ));
-    const allowedIds = new Set(allowedLinks.map((link) => link.id));
-    const outsideLinks = links.filter((link) => !allowedIds.has(link.id));
-    const isActive = (link: typeof links[number]) => (
-      link.syncEnabled && link.sourceProduct.syncStatus === "active"
-    );
-    const toEnable = allowedLinks.filter((link) => (
-      !isActive(link) || !link.syncPrice || !link.syncInventory || !link.syncImages
-    ));
-    const toDisable = outsideLinks.filter(isActive);
+    const result = await prisma.$transaction(async (tx) => {
+      const beforeRows = await tx.$queryRawUnsafe<PolicyCounts[]>(`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE LOWER(COALESCE(sp."status", '')) = 'active'
+              AND ${ALLOWED_SOURCE_SQL}
+          )::int AS "allowed",
+          COUNT(*) FILTER (
+            WHERE LOWER(COALESCE(sp."status", '')) = 'active'
+              AND ${ALLOWED_SOURCE_SQL}
+              AND (
+                sp."syncEnabled" = FALSE
+                OR sp."syncPrice" = FALSE
+                OR sp."syncInventory" = FALSE
+                OR sp."syncImages" = FALSE
+                OR source."syncStatus" <> 'active'
+              )
+          )::int AS "toEnable",
+          COUNT(*) FILTER (
+            WHERE NOT (
+              LOWER(COALESCE(sp."status", '')) = 'active'
+              AND ${ALLOWED_SOURCE_SQL}
+            )
+              AND sp."syncEnabled" = TRUE
+              AND source."syncStatus" = 'active'
+          )::int AS "toDisable"
+        FROM "ShopifyProduct" sp
+        JOIN "SourceProduct" source ON source."id" = sp."sourceProductId"
+      `);
+      const before = beforeRows[0] || { allowed: 0, toEnable: 0, toDisable: 0 };
 
-    if (toEnable.length > 0 || toDisable.length > 0) {
-      const enabledLinkIds = allowedLinks.map((link) => link.id);
-      const enabledSourceIds = allowedLinks.map((link) => link.sourceProductId);
-      const disabledLinkIds = outsideLinks.map((link) => link.id);
-      const disabledSourceIds = outsideLinks.map((link) => link.sourceProductId);
-      await prisma.$transaction(async (tx) => {
-        if (enabledLinkIds.length > 0) {
-          await tx.shopifyProduct.updateMany({
-            where: { id: { in: enabledLinkIds } },
-            data: { syncEnabled: true, syncPrice: true, syncInventory: true, syncImages: true },
-          });
-          await tx.sourceProduct.updateMany({
-            where: { id: { in: enabledSourceIds } },
-            data: { syncStatus: "active" },
-          });
-        }
-        if (disabledLinkIds.length > 0) {
-          await tx.shopifyProduct.updateMany({
-            where: { id: { in: disabledLinkIds } },
-            data: { syncEnabled: false },
-          });
-          await tx.sourceProduct.updateMany({
-            where: { id: { in: disabledSourceIds } },
-            data: { syncStatus: "paused" },
-          });
-        }
-        await tx.auditLog.create({
-          data: {
-            action: "ENFORCE_ACTIVE_SYNC_DOMAIN_POLICY",
-            userId: "System",
-            details: JSON.stringify({
-              allowedDomains: ALLOWED_DOMAINS,
-              enabled: toEnable.length,
-              disabled: toDisable.length,
-            }),
-          },
-        });
-      }, { timeout: 60_000 });
-    }
+      await tx.$executeRawUnsafe(`
+        UPDATE "ShopifyProduct" sp
+        SET "syncEnabled" = TRUE,
+            "syncPrice" = TRUE,
+            "syncInventory" = TRUE,
+            "syncImages" = TRUE,
+            "updatedAt" = NOW()
+        FROM "SourceProduct" source
+        WHERE source."id" = sp."sourceProductId"
+          AND LOWER(COALESCE(sp."status", '')) = 'active'
+          AND ${ALLOWED_SOURCE_SQL}
+          AND (
+            sp."syncEnabled" = FALSE
+            OR sp."syncPrice" = FALSE
+            OR sp."syncInventory" = FALSE
+            OR sp."syncImages" = FALSE
+          )
+      `);
+      await tx.$executeRawUnsafe(`
+        UPDATE "SourceProduct" source
+        SET "syncStatus" = 'active', "updatedAt" = NOW()
+        WHERE source."syncStatus" <> 'active'
+          AND ${ALLOWED_SOURCE_SQL}
+          AND EXISTS (
+            SELECT 1
+            FROM "ShopifyProduct" sp
+            WHERE sp."sourceProductId" = source."id"
+              AND LOWER(COALESCE(sp."status", '')) = 'active'
+          )
+      `);
+      await tx.$executeRawUnsafe(`
+        UPDATE "ShopifyProduct" sp
+        SET "syncEnabled" = FALSE, "updatedAt" = NOW()
+        FROM "SourceProduct" source
+        WHERE source."id" = sp."sourceProductId"
+          AND sp."syncEnabled" = TRUE
+          AND NOT (
+            LOWER(COALESCE(sp."status", '')) = 'active'
+            AND ${ALLOWED_SOURCE_SQL}
+          )
+      `);
+      await tx.$executeRawUnsafe(`
+        UPDATE "SourceProduct" source
+        SET "syncStatus" = 'paused', "updatedAt" = NOW()
+        WHERE source."syncStatus" = 'active'
+          AND EXISTS (
+            SELECT 1
+            FROM "ShopifyProduct" sp
+            WHERE sp."sourceProductId" = source."id"
+              AND NOT (
+                LOWER(COALESCE(sp."status", '')) = 'active'
+                AND ${ALLOWED_SOURCE_SQL}
+              )
+          )
+      `);
 
-    const activeOutsideAfter = links.filter((link) => (
-      isActive(link) && !allowedSource(link.sourceProduct.url)
-    )).length - toDisable.length;
+      const afterRows = await tx.$queryRawUnsafe<Array<{
+        activeAllowed: number | bigint;
+        activeOutside: number | bigint;
+      }>>(`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE LOWER(COALESCE(sp."status", '')) = 'active'
+              AND ${ALLOWED_SOURCE_SQL}
+              AND sp."syncEnabled" = TRUE
+              AND source."syncStatus" = 'active'
+          )::int AS "activeAllowed",
+          COUNT(*) FILTER (
+            WHERE NOT (
+              LOWER(COALESCE(sp."status", '')) = 'active'
+              AND ${ALLOWED_SOURCE_SQL}
+            )
+              AND sp."syncEnabled" = TRUE
+              AND source."syncStatus" = 'active'
+          )::int AS "activeOutside"
+        FROM "ShopifyProduct" sp
+        JOIN "SourceProduct" source ON source."id" = sp."sourceProductId"
+      `);
+      const after = afterRows[0] || { activeAllowed: 0, activeOutside: 0 };
+
+      await tx.auditLog.create({
+        data: {
+          action: "ENFORCE_ACTIVE_SYNC_DOMAIN_POLICY",
+          userId: "System",
+          details: JSON.stringify({
+            allowedDomains: ALLOWED_DOMAINS,
+            enabled: Number(before.toEnable),
+            disabled: Number(before.toDisable),
+            activeAllowedAfter: Number(after.activeAllowed),
+            activeOutsideAfter: Number(after.activeOutside),
+          }),
+        },
+      });
+
+      return {
+        allowed: Number(before.allowed),
+        toEnable: Number(before.toEnable),
+        toDisable: Number(before.toDisable),
+        activeAllowedAfter: Number(after.activeAllowed),
+        activeOutsideAfter: Number(after.activeOutside),
+      };
+    }, { timeout: 60_000 });
+
     console.log(JSON.stringify({
       worker: "active-sync-collection-policy-worker",
-      allowedLinkedActiveProducts: allowedLinks.length,
-      toEnable: toEnable.length,
-      toDisable: toDisable.length,
-      activeAllowedAfter: allowedLinks.length,
-      activeOutsideAfter: Math.max(0, activeOutsideAfter),
+      allowedLinkedActiveProducts: result.allowed,
+      toEnable: result.toEnable,
+      toDisable: result.toDisable,
+      activeAllowedAfter: result.activeAllowedAfter,
+      activeOutsideAfter: result.activeOutsideAfter,
       elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
     }));
   } catch (error: any) {
