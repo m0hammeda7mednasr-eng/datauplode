@@ -10,6 +10,11 @@ const CONFIRMATION = "DELETE_ALL_PRODUCTS_AND_COLLECTIONS_FROM_09FGKZ_6N";
 const JOB_TYPE = "SHOPIFY_FULL_STORE_PURGE";
 const PRODUCT_BATCH_SIZE = 10;
 const COLLECTION_BATCH_SIZE = 10;
+const MONTH_PURGE_JOB_TYPE = "SHOPIFY_CREATED_MONTH_PURGE_2026_10_11";
+const MONTH_PURGE_CONFIRMATION = "DELETE_PRODUCTS_CREATED_IN_2026_10_AND_11";
+const MONTH_PURGE_START = "2026-10-01T00:00:00Z";
+const MONTH_PURGE_END_EXCLUSIVE = "2026-12-01T00:00:00Z";
+const MONTH_PRODUCT_BATCH_SIZE = 20;
 
 type ProductSnapshot = {
   id: string;
@@ -30,6 +35,7 @@ type DeleteResult = {
 };
 
 let runningPurge: Promise<void> | null = null;
+let runningMonthPurge: Promise<void> | null = null;
 
 function clean(value: unknown) {
   return String(value ?? "").trim();
@@ -120,6 +126,45 @@ async function loadAllProducts(client: any) {
   return products.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
+async function loadProductsCreatedInOctoberAndNovember(client: any) {
+  const products: ProductSnapshot[] = [];
+  const query = `created_at:>=${MONTH_PURGE_START} created_at:<${MONTH_PURGE_END_EXCLUSIVE}`;
+  let after: string | null = null;
+
+  do {
+    const data: any = await client.request(`
+      query ProductsCreatedInRange($after: String, $query: String!) {
+        products(first: 250, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
+          nodes {
+            id
+            title
+            createdAt
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    `, { after, query });
+    const connection = data?.products;
+    for (const node of connection?.nodes || []) {
+      const id = clean(node?.id);
+      if (!id) continue;
+      products.push({
+        id,
+        title: clean(node?.title),
+        createdAt: clean(node?.createdAt),
+      });
+    }
+    if (!connection?.pageInfo?.hasNextPage) break;
+    after = clean(connection.pageInfo.endCursor) || null;
+    if (!after) throw new Error("Shopify month-range pagination did not return an end cursor");
+  } while (after);
+
+  return products.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
 async function loadAllCollections(client: any) {
   const collections: CollectionSnapshot[] = [];
   let after: string | null = null;
@@ -167,6 +212,13 @@ function buildPlanHash(products: ProductSnapshot[], collections: CollectionSnaps
       ...products.map((product) => `product:${product.id}`),
       ...collections.map((collection) => `collection:${collection.id}`),
     ].sort().join("\n"))
+    .digest("hex");
+}
+
+function buildProductPlanHash(products: ProductSnapshot[]) {
+  return crypto
+    .createHash("sha256")
+    .update(products.map((product) => `product:${product.id}`).sort().join("\n"))
     .digest("hex");
 }
 
@@ -445,6 +497,87 @@ async function runPurge(jobId: string, initialPlan: Awaited<ReturnType<typeof bu
   }
 }
 
+async function runOctoberNovemberPurge(jobId: string, initialProducts: ProductSnapshot[]) {
+  const client = await ShopifyService.getClientFromDb(prisma);
+  await getShopIdentity(client);
+  const progress: Record<string, any> = {
+    shopDomain: REQUIRED_SHOP_DOMAIN,
+    stage: "deleting_products",
+    dateRange: { start: MONTH_PURGE_START, endExclusive: MONTH_PURGE_END_EXCLUSIVE },
+    startedAt: new Date().toISOString(),
+    initialProductCount: initialProducts.length,
+    productsDeleted: 0,
+    linksRemoved: 0,
+    sourcesPaused: 0,
+    productFailures: [],
+  };
+
+  try {
+    for (let pass = 1; pass <= 5; pass += 1) {
+      const products = await loadProductsCreatedInOctoberAndNovember(client);
+      progress.productPass = pass;
+      progress.productsRemaining = products.length;
+      await updateJob(jobId, progress);
+      if (products.length === 0) break;
+
+      for (const batch of chunks(products.map((product) => product.id), MONTH_PRODUCT_BATCH_SIZE)) {
+        const result = await deleteProductBatch(client, batch);
+        const local = await disableLocalProductLinks(result.deleted);
+        progress.productsDeleted += result.deleted.length;
+        progress.linksRemoved += local.linksRemoved;
+        progress.sourcesPaused += local.sourcesPaused;
+        progress.productsRemaining = Math.max(0, Number(progress.productsRemaining) - result.deleted.length);
+        if (result.failed.length > 0) {
+          progress.productFailures = [...progress.productFailures, ...result.failed].slice(-100);
+        }
+        progress.updatedAt = new Date().toISOString();
+        await updateJob(jobId, progress);
+        await sleep(250);
+      }
+    }
+
+    const finalProducts = await loadProductsCreatedInOctoberAndNovember(client);
+    if (finalProducts.length > 0) {
+      throw new Error(`Shopify read-back still found ${finalProducts.length} products created in October or November 2026`);
+    }
+
+    progress.stage = "completed";
+    progress.productsRemaining = 0;
+    progress.finalProductCountInRange = 0;
+    progress.completedAt = new Date().toISOString();
+    await prisma.$transaction([
+      prisma.syncJob.update({
+        where: { id: jobId },
+        data: {
+          status: "completed",
+          result: JSON.stringify(progress),
+          completedAt: new Date(),
+        },
+      }),
+      prisma.auditLog.create({
+        data: {
+          action: "SHOPIFY_CREATED_MONTH_PURGE_COMPLETED",
+          userId: "System",
+          details: JSON.stringify(progress),
+        },
+      }),
+    ]);
+  } catch (error: any) {
+    progress.stage = "failed";
+    progress.error = clean(error?.message || error || "Unknown month purge error");
+    progress.failedAt = new Date().toISOString();
+    await prisma.syncJob.update({
+      where: { id: jobId },
+      data: {
+        status: "failed",
+        result: JSON.stringify(progress),
+        completedAt: new Date(),
+      },
+    });
+    throw error;
+  }
+}
+
 router.post("/shopify/store-purge/full/preflight", async (req, res) => {
   try {
     const expectedShopDomain = clean(req.body?.expectedShopDomain).toLowerCase();
@@ -572,6 +705,142 @@ router.get("/shopify/store-purge/full/status", async (_req, res) => {
   return res.json({
     success: true,
     runningInThisProcess: Boolean(runningPurge),
+    job: job ? {
+      id: job.id,
+      status: job.status,
+      payload: parseJsonObject(job.payload),
+      result: parseJsonObject(job.result),
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      createdAt: job.createdAt,
+    } : null,
+  });
+});
+
+router.post("/shopify/store-purge/created-october-november/preflight", async (req, res) => {
+  try {
+    if (clean(req.body?.expectedShopDomain).toLowerCase() !== REQUIRED_SHOP_DOMAIN) {
+      return res.status(400).json({ success: false, error: `expectedShopDomain must equal ${REQUIRED_SHOP_DOMAIN}` });
+    }
+    const client = await ShopifyService.getClientFromDb(prisma);
+    const shop = await getShopIdentity(client);
+    const products = await loadProductsCreatedInOctoberAndNovember(client);
+    return res.json({
+      success: true,
+      dryRun: true,
+      confirmationRequired: MONTH_PURGE_CONFIRMATION,
+      shop,
+      dateRange: { start: MONTH_PURGE_START, endExclusive: MONTH_PURGE_END_EXCLUSIVE },
+      productCount: products.length,
+      planHash: buildProductPlanHash(products),
+      newestProducts: products.slice(0, 10),
+      oldestProducts: products.slice(-10),
+    });
+  } catch (error: any) {
+    return res.status(Number(error?.statusCode) || 500).json({
+      success: false,
+      error: clean(error?.message || error || "October-November purge preflight failed"),
+    });
+  }
+});
+
+router.post("/shopify/store-purge/created-october-november/start", async (req, res) => {
+  try {
+    if (process.env.SHOPIFY_CREATED_MONTH_PURGE_ENABLED !== "true") {
+      return res.status(403).json({ success: false, error: "Created-month purge is disabled by configuration" });
+    }
+    if (clean(req.body?.expectedShopDomain).toLowerCase() !== REQUIRED_SHOP_DOMAIN) {
+      return res.status(400).json({ success: false, error: "Shop domain confirmation does not match" });
+    }
+    if (clean(req.body?.confirm) !== MONTH_PURGE_CONFIRMATION) {
+      return res.status(400).json({ success: false, error: `confirm must equal ${MONTH_PURGE_CONFIRMATION}` });
+    }
+    if (runningMonthPurge || runningPurge) {
+      return res.status(409).json({ success: false, error: "A Shopify purge is already running in this process" });
+    }
+
+    const client = await ShopifyService.getClientFromDb(prisma);
+    await getShopIdentity(client);
+    const products = await loadProductsCreatedInOctoberAndNovember(client);
+    const planHash = buildProductPlanHash(products);
+    if (clean(req.body?.expectedPlanHash) !== planHash) {
+      return res.status(409).json({ success: false, error: "Deletion plan changed; run preflight again" });
+    }
+    if (Number(req.body?.expectedProductCount) !== products.length) {
+      return res.status(409).json({ success: false, error: "Product count changed; run preflight again" });
+    }
+
+    const staleJobs = await prisma.syncJob.findMany({
+      where: {
+        type: { in: [JOB_TYPE, MONTH_PURGE_JOB_TYPE] },
+        status: { in: ["running", "pending"] },
+      },
+      select: { id: true, result: true },
+    });
+    for (const stale of staleJobs) {
+      const previous = parseJsonObject(stale.result);
+      await prisma.syncJob.update({
+        where: { id: stale.id },
+        data: {
+          status: "failed",
+          completedAt: new Date(),
+          result: JSON.stringify({
+            ...previous,
+            stage: "cancelled_scope_changed",
+            cancelledAt: new Date().toISOString(),
+            replacementScope: "products_created_in_2026_10_and_11",
+          }),
+        },
+      });
+    }
+
+    const job = await prisma.syncJob.create({
+      data: {
+        type: MONTH_PURGE_JOB_TYPE,
+        status: "running",
+        startedAt: new Date(),
+        payload: JSON.stringify({
+          shopDomain: REQUIRED_SHOP_DOMAIN,
+          planHash,
+          productCount: products.length,
+          dateRange: { start: MONTH_PURGE_START, endExclusive: MONTH_PURGE_END_EXCLUSIVE },
+        }),
+        result: JSON.stringify({ stage: "queued", productCount: products.length }),
+      },
+    });
+
+    runningMonthPurge = runOctoberNovemberPurge(job.id, products)
+      .catch((error) => {
+        console.error("[month-store-purge] failed:", clean(error?.message || error));
+      })
+      .finally(() => {
+        runningMonthPurge = null;
+      });
+
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      jobId: job.id,
+      shopDomain: REQUIRED_SHOP_DOMAIN,
+      productCount: products.length,
+      dateRange: { start: MONTH_PURGE_START, endExclusive: MONTH_PURGE_END_EXCLUSIVE },
+    });
+  } catch (error: any) {
+    return res.status(Number(error?.statusCode) || 500).json({
+      success: false,
+      error: clean(error?.message || error || "Failed to start October-November purge"),
+    });
+  }
+});
+
+router.get("/shopify/store-purge/created-october-november/status", async (_req, res) => {
+  const job = await prisma.syncJob.findFirst({
+    where: { type: MONTH_PURGE_JOB_TYPE },
+    orderBy: { createdAt: "desc" },
+  });
+  return res.json({
+    success: true,
+    runningInThisProcess: Boolean(runningMonthPurge),
     job: job ? {
       id: job.id,
       status: job.status,
